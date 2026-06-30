@@ -240,7 +240,13 @@ def fmt_price(price, listing_default):
 # ----------------------------------------------------------------------- notify
 
 def ntfy_post(topic, title, message, click=None, priority="high", tags="tennis"):
-    url = f"https://ntfy.sh/{urllib.parse.quote(topic)}"
+    topic = (topic or "").strip()
+    if "://" in topic:  # ktoś wkleił pełny URL zamiast nazwy tematu -> weź ostatni segment
+        topic = topic.rstrip("/").split("/")[-1]
+    if not topic:
+        log("! Pusty temat ntfy — pomijam wysyłkę.")
+        return None
+    url = f"https://ntfy.sh/{urllib.parse.quote(topic, safe='')}"
     headers = {
         "Title": title.encode("utf-8"),
         "Priority": priority,
@@ -250,8 +256,22 @@ def ntfy_post(topic, title, message, click=None, priority="high", tags="tennis")
     if click:
         headers["Click"] = click
     req = urllib.request.Request(url, data=message.encode("utf-8"), headers=headers, method="POST")
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        return resp.status
+    # Wysyłka jest NIEBLOKUJĄCA: błąd ntfy nie może wywrócić iteracji ani blokować
+    # zapisu stanu (inaczej notyfikacja powtarza się w nieskończoność).
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return resp.status
+    except urllib.error.HTTPError as e:
+        detail = ""
+        try:
+            detail = e.read().decode("utf-8", "replace")[:300]
+        except Exception:  # noqa: BLE001
+            pass
+        log(f"! ntfy {e.code} dla tematu '{topic}': {detail} — popraw nazwę tematu (NTFY_TOPIC / opcja ntfy_topic).")
+        return None
+    except (urllib.error.URLError, TimeoutError) as e:
+        log(f"! ntfy nieosiągalny ({e!r}) — pomijam to powiadomienie.")
+        return None
 
 
 def notify_new(topic, slots, tz, listing_price, book_url):
