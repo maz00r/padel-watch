@@ -1,0 +1,11 @@
+{
+  "listings": [
+    "https://go.decathlon.pl/l/8df055d5-125d-4946-aa4b-962cb7ad4c94"
+  ],
+  "timezone": "Europe/Warsaw",
+  "filters": [
+    { "days": ["mon", "tue", "wed", "thu", "fri"], "start": "15:00", "end": "02:00" },
+    { "days": ["sat", "sun"], "start": "00:00", "end": "24:00" }
+  ],
+  "ntfy_topic": ""
+}

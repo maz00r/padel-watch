@@ -1,0 +1,10 @@
+.git
+.github
+__pycache__/
+*.pyc
+.DS_Store
+.venv/
+data/
+state.json
+config.bak.json
+README.md

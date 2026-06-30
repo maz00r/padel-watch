@@ -1,0 +1,24 @@
+name: Padel Watch (Decathlon)
+version: "1.2.0"
+slug: padel_watch
+description: Monitoruje wolne terminy padla na Decathlon GO i wysyła powiadomienia push (ntfy.sh).
+url: https://github.com/maz00r94/padel-watch
+arch:
+  - aarch64
+  - amd64
+  - armv7
+init: false
+startup: application
+boot: auto
+options:
+  ntfy_topic: "your-ntfy-topic-here"
+  check_interval: 60
+  filters: "mon-fri:15:00-02:00; sat-sun:00:00-24:00"
+  listing_url: "https://go.decathlon.pl/l/8df055d5-125d-4946-aa4b-962cb7ad4c94"
+  timezone: "Europe/Warsaw"
+schema:
+  ntfy_topic: str
+  check_interval: int(10,3600)
+  filters: str?
+  listing_url: url
+  timezone: str

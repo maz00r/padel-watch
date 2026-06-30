@@ -1,0 +1,6 @@
+# Obraz bazowy per architektura. python:3.12-alpine jest wieloarchitekturowy,
+# więc każda architektura HA pobierze swój wariant. tzdata dokładamy w Dockerfile.
+build_from:
+  aarch64: python:3.12-alpine
+  amd64: python:3.12-alpine
+  armv7: python:3.12-alpine
