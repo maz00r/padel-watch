@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.2.2
+- Wysyłka ntfy jest teraz NIEBLOKUJĄCA: błąd (np. HTTP 404) nie wywraca iteracji
+  ani nie blokuje zapisu stanu (koniec pętli powtarzających się powiadomień).
+- Log pokazuje status i treść błędu z ntfy — łatwiej zdiagnozować zły temat.
+- Sanityzacja tematu (przycięcie spacji; gdy wklejono pełny URL, brany jest sam temat).
+
 ## 1.2.1
 - Poprawka: jawna instalacja `python3` w obrazie (HA buduje na bazie alpine+s6 bez
   pythona) — naprawia `python3: not found` i puste opcje przy starcie.
