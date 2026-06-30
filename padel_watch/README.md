@@ -6,7 +6,7 @@ pojawi się **nowy wolny termin** w wybranych godzinach.
 ## Instalacja (repozytorium custom)
 
 1. W HA: **Ustawienia → Dodatki → Sklep z dodatkami → ⋮ (prawy górny róg) → Repozytoria**.
-2. Dodaj adres repozytorium z tym dodatkiem (np. `https://github.com/maz00r94/padel-watch`) → **Dodaj**.
+2. Dodaj adres repozytorium z tym dodatkiem (np. `https://github.com/maz00r/padel-watch`) → **Dodaj**.
 3. Odśwież sklep, wejdź w **Padel Watch (Decathlon)** → **Zainstaluj**.
 4. Zakładka **Konfiguracja** — ustaw opcje (niżej) → **Zapisz**.
 5. Zakładka **Info** — włącz **Uruchom przy starcie** i **Watchdog**, potem **Uruchom**.
