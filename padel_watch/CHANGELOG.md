@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.0
+- Link do kortu nie jest już „na sztywno": aplikacja podąża za przekierowaniem
+  strony `/l/{id}` (Decathlon czasem przenosi kort pod nowe ID) i używa AKTUALNEGO
+  ID zarówno do monitoringu, jak i do linku w powiadomieniu. Dzięki temu app sam
+  nadąża za zmianą adresu (wynik cache'owany ~6 h).
+
 ## 1.2.2
 - Wysyłka ntfy jest teraz NIEBLOKUJĄCA: błąd (np. HTTP 404) nie wywraca iteracji
   ani nie blokuje zapisu stanu (koniec pętli powtarzających się powiadomień).
