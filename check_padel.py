@@ -35,7 +35,9 @@ STATE_PATH = os.path.join(os.environ.get("STATE_DIR") or HERE, "state.json")
 
 LISTING_URL = "https://go.decathlon.pl/api/listing/{id}"  # lekki (~1 KB): kort + datesStats
 LISTING_DATES_URL = LISTING_URL + "?include=dates"        # ciężki (~257 KB): + wszystkie terminy
+LISTING_PAGE_URL = "https://go.decathlon.pl/l/{id}"       # strona kortu (podąża za 301 na nowe ID)
 UA = "padel-watch/1.0 (+https://go.decathlon.pl)"
+UUID_RE = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 
 DAY_NAMES = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]  # weekday(): Mon=0..Sun=6
 PL_DAYS = ["poniedziałek", "wtorek", "środa", "czwartek", "piątek", "sobota", "niedziela"]
@@ -84,13 +86,39 @@ def save_state(free_ids):
 
 def listing_id_from_url(url):
     """Wyciąga UUID kortu z linku /l/... (bierze ostatni UUID w URL-u)."""
-    ids = re.findall(
-        r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
-        url,
-    )
+    ids = re.findall(UUID_RE, url)
     if not ids:
         raise ValueError(f"Nie znalazłem ID kortu w URL: {url}")
     return ids[-1]
+
+
+_ID_CACHE = {}          # seed_id -> (current_id, expires_at)
+RESOLVE_TTL = 6 * 3600  # jak często ponownie sprawdzać przekierowanie (sekundy)
+
+
+def resolve_current_id(seed_id):
+    """Zwraca AKTUALNE id kortu, podążając za przekierowaniem strony /l/{id} (301).
+
+    Decathlon czasem przenosi kort pod nowe ID — stary link robi wtedy 301 na nowy.
+    Dzięki temu aplikacja sama nadąża za zmianą adresu, bez wpisywania go na sztywno.
+    Wynik jest cache'owany na RESOLVE_TTL, by nie odpytywać strony w każdej iteracji.
+    """
+    now = time.time()
+    hit = _ID_CACHE.get(seed_id)
+    if hit and hit[1] > now:
+        return hit[0]
+    try:
+        req = urllib.request.Request(LISTING_PAGE_URL.format(id=seed_id), headers={"User-Agent": UA})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            found = re.findall(UUID_RE, resp.geturl())  # finalny URL po przekierowaniach
+    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as e:
+        log(f"! Nie rozwiązałem aktualnego linku dla {seed_id} ({e!r}) — używam podanego")
+        return seed_id  # nie cache'ujemy błędu — spróbujemy ponownie następnym razem
+    current = found[-1] if found else seed_id
+    if current != seed_id:
+        log(f"↪ kort {seed_id} przekierowany na aktualne ID {current}")
+    _ID_CACHE[seed_id] = (current, now + RESOLVE_TTL)
+    return current
 
 
 def parse_dt(s):
@@ -342,14 +370,18 @@ def run_once(announce_startup=False):
         listings = [u.strip() for u in re.split(r"[,\s]+", listings_env) if u.strip()]
     else:
         listings = cfg.get("listings", [])
-    book_url = (listings or [None])[0]  # link do strony rezerwacji
+    book_url = None  # kanoniczny link do rezerwacji (budowany z aktualnego ID)
 
     current = {}  # id -> slot
     book_url_by_id = {}
     listing_price_by_id = {}
 
     for url in listings:
-        lid = listing_id_from_url(url)
+        # Podążaj za przekierowaniem -> aktualne ID kortu (do monitoringu i linku).
+        lid = resolve_current_id(listing_id_from_url(url))
+        canon_url = LISTING_PAGE_URL.format(id=lid)
+        if book_url is None:
+            book_url = canon_url
         # Krok 1: lekki ping (~1 KB) — sprawdź licznik dostępności bez ciężkiego payloadu.
         try:
             light = fetch_listing_light(lid)
@@ -374,7 +406,7 @@ def run_once(announce_startup=False):
         log(f"= {title}: {avail} dostępnych, {len(slots)} pasujących do filtra")
         for s in slots:
             current[s["id"]] = s
-            book_url_by_id[s["id"]] = url
+            book_url_by_id[s["id"]] = canon_url
             listing_price_by_id[s["id"]] = listing_price
         for s in sorted(slots, key=lambda x: x["start_utc"]):
             log(f"   - {fmt_when(s['start_utc'].astimezone(tz), short=True)}  {s['name']}  {s['count']}/{s['limit']}")
