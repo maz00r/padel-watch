@@ -49,8 +49,24 @@ def fmt_when(dt, short=False):
     return f"{days[dt.weekday()]} {dt:%d.%m %H:%M}"
 
 
+_LOG_TZ = None
+
+
+def _log_tz():
+    """Strefa czasowa znaczników w logach (TIMEZONE / Europe/Warsaw; fallback UTC)."""
+    global _LOG_TZ
+    if _LOG_TZ is None:
+        name = os.environ.get("TIMEZONE") or "Europe/Warsaw"
+        try:
+            _LOG_TZ = ZoneInfo(name) if ZoneInfo else timezone.utc
+        except Exception:  # noqa: BLE001 - zła nazwa strefy nie może wywrócić logowania
+            _LOG_TZ = timezone.utc
+    return _LOG_TZ
+
+
 def log(*args):
-    print(*args, flush=True)
+    ts = datetime.now(_log_tz()).strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{ts}]", *args, flush=True)
 
 
 # --------------------------------------------------------------------------- IO
