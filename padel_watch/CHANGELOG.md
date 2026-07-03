@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.3.1
+- Każda linia logu ma znacznik czasu `[RRRR-MM-DD GG:MM:SS]` w strefie z opcji
+  `timezone` (domyślnie Europe/Warsaw; przy błędnej nazwie fallback do UTC).
+
 ## 1.3.0
 - Link do kortu nie jest już „na sztywno": aplikacja podąża za przekierowaniem
   strony `/l/{id}` (Decathlon czasem przenosi kort pod nowe ID) i używa AKTUALNEGO
