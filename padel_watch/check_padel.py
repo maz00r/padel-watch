@@ -36,6 +36,7 @@ STATE_PATH = os.path.join(os.environ.get("STATE_DIR") or HERE, "state.json")
 LISTING_URL = "https://go.decathlon.pl/api/listing/{id}"  # lekki (~1 KB): kort + datesStats
 LISTING_DATES_URL = LISTING_URL + "?include=dates"        # ciężki (~257 KB): + wszystkie terminy
 LISTING_PAGE_URL = "https://go.decathlon.pl/l/{id}"       # strona kortu (podąża za 301 na nowe ID)
+DECATHLON_API_URL = "https://go.decathlon.pl/api"
 UA = "padel-watch/1.0 (+https://go.decathlon.pl)"
 UUID_RE = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 
@@ -81,20 +82,34 @@ def load_config():
 
 
 def load_state():
+    data = load_state_doc()
+    if data is None:
+        return None
+    return set(data.get("free_ids", []))
+
+
+def load_state_doc():
     if not os.path.exists(STATE_PATH):
         return None  # None = pierwszy bieg (baseline)
     try:
         with open(STATE_PATH, encoding="utf-8") as f:
-            data = json.load(f)
-        return set(data.get("free_ids", []))
+            return json.load(f)
     except (json.JSONDecodeError, OSError):
         log("! state.json uszkodzony — traktuję jako pierwszy bieg")
         return None
 
 
-def save_state(free_ids):
+def save_state(free_ids, registered_ids=None):
+    if registered_ids is None:
+        old = load_state_doc() or {}
+        registered_ids = set(old.get("registered_ids", []))
     with open(STATE_PATH, "w", encoding="utf-8") as f:
-        json.dump({"free_ids": sorted(free_ids)}, f, ensure_ascii=False, indent=2)
+        json.dump(
+            {"free_ids": sorted(free_ids), "registered_ids": sorted(registered_ids)},
+            f,
+            ensure_ascii=False,
+            indent=2,
+        )
         f.write("\n")
 
 
@@ -199,6 +214,8 @@ def free_slots(doc, listing_id, now_utc):
         out.append(
             {
                 "id": f"{listing_id}:{item.get('id')}",
+                "date_id": item.get("id"),
+                "listing_id": listing_id,
                 "start_utc": start,
                 "name": a.get("name") or "Termin",
                 "price": a.get("price"),
@@ -274,11 +291,150 @@ def parse_filters_env(spec):
     return filters
 
 
+def parse_intervals_env(spec):
+    """Parsuje zmienną INTERVALS: okna z własną częstotliwością odświeżania.
+
+    Format jak FILTERS, z doklejonym '=SEKUNDY', np.:
+        'mon-fri:15:00-02:00=30; sat-sun:08:00-22:00=60'
+    Poza dopasowanymi oknami obowiązuje bazowy CHECK_INTERVAL.
+    Okna przez północ działają tak samo jak w FILTERS.
+    """
+    out = []
+    for chunk in spec.split(";"):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        win, secs = chunk.rsplit("=", 1)
+        days_part, time_part = win.split(":", 1)
+        start, end = (x.strip() for x in time_part.split("-", 1))
+        seconds = max(10, int(secs))  # min 10 s — nie młócimy API
+        out.append({"days": parse_days(days_part), "start": start, "end": end, "seconds": seconds})
+    return out
+
+
+def current_interval(default_s, windows, tz, now_utc=None):
+    """Interwał obowiązujący TERAZ: sekundy z pierwszego pasującego okna, inaczej default."""
+    if not windows:
+        return default_s
+    now_local = (now_utc or datetime.now(timezone.utc)).astimezone(tz)
+    for w in windows:
+        if passes_filter({"start_utc": now_local}, [w], tz):
+            return w["seconds"]
+    return default_s
+
+
 def fmt_price(price, listing_default):
     p = price or listing_default
     if not p or p.get("amount") in (None, 0):
         return "za darmo"
     return f"{p['amount'] / 100:.2f} {p.get('currency', '')}".strip()
+
+
+def boolish(value):
+    return str(value or "").strip().lower() in ("1", "true", "yes", "y", "on", "tak")
+
+
+def price_amount(slot, listing_default):
+    p = slot.get("price") or listing_default or {}
+    return p.get("amount") or 0
+
+
+# ------------------------------------------------------------------ register
+
+def load_registered_ids():
+    data = load_state_doc() or {}
+    return set(data.get("registered_ids", []))
+
+
+def decathlon_post(path, token, payload):
+    req = urllib.request.Request(
+        f"{DECATHLON_API_URL}{path}",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "User-Agent": UA,
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {token}",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        raw = resp.read()
+        if resp.headers.get("Content-Encoding") == "gzip":
+            raw = gzip.decompress(raw)
+    return json.loads(raw.decode("utf-8")) if raw else {}
+
+
+def register_slot(slot, listing_price, cfg):
+    """Tworzy transakcję Decathlon GO dla pojedynczego terminu.
+
+    Wspierany jest bezpieczny wariant dla darmowych zapisów. Płatne terminy są
+    domyślnie pomijane, bo Decathlon wymaga osobnego kroku płatności.
+    """
+    token = (cfg.get("token") or "").strip()
+    name = (cfg.get("name") or "").strip()
+    if not token:
+        return False, "brak tokenu Decathlon GO"
+    if not name:
+        return False, "brak imienia i nazwiska uczestnika"
+    amount = price_amount(slot, listing_price)
+    if cfg.get("free_only", True) and amount > 0:
+        return False, f"termin płatny ({fmt_price(slot.get('price'), listing_price)})"
+    participant = {
+        "name": name,
+        "age": cfg.get("age"),
+        "voucherCode": cfg.get("voucher_code") or None,
+    }
+    payload = {
+        "data": {
+            "attributes": {
+                "listingDateId": slot["date_id"],
+                "participants": [participant],
+                "speculative": False,
+            }
+        }
+    }
+    if cfg.get("customer_first_name") or cfg.get("customer_last_name"):
+        payload["data"]["attributes"]["customer"] = {
+            "firstName": cfg.get("customer_first_name") or "",
+            "lastName": cfg.get("customer_last_name") or "",
+        }
+    try:
+        doc = decathlon_post("/transaction?include=participants,lineItems,payUData", token, payload)
+    except urllib.error.HTTPError as e:
+        detail = ""
+        try:
+            detail = e.read().decode("utf-8", "replace")[:240]
+        except Exception:  # noqa: BLE001
+            pass
+        return False, f"Decathlon HTTP {e.code}: {detail or e.reason}"
+    except (urllib.error.URLError, TimeoutError) as e:
+        return False, f"Decathlon niedostępny: {e!r}"
+    attrs = (doc.get("data") or {}).get("attributes") or {}
+    state = attrs.get("processState") or attrs.get("state") or "utworzono transakcję"
+    if state == "pending-payment":
+        return False, "utworzono rezerwację, ale wymaga płatności"
+    return True, state
+
+
+def auto_register_new_slots(slots, listing_price_by_id, cfg, already_registered):
+    if not cfg.get("enabled"):
+        return {}, already_registered
+    results = {}
+    registered = set(already_registered)
+    for slot in slots:
+        sid = slot["id"]
+        if sid in registered:
+            results[sid] = (True, "już zarejestrowane")
+            continue
+        ok, msg = register_slot(slot, listing_price_by_id.get(sid), cfg)
+        results[sid] = (ok, msg)
+        if ok:
+            registered.add(sid)
+            log(f"✓ Auto-rejestracja: {fmt_when(slot['start_utc'].astimezone(_log_tz()), short=True)} — {msg}")
+        else:
+            log(f"! Auto-rejestracja pominięta/nieudana dla {sid}: {msg}")
+    return results, registered
 
 
 # ----------------------------------------------------------------------- notify
@@ -318,31 +474,46 @@ def ntfy_post(topic, title, message, click=None, priority="high", tags="tennis")
         return None
 
 
-def notify_new(topic, slots, tz, listing_price, book_url):
-    """Powiadom o nowych wolnych terminach. Pojedynczo, a przy wielu — zbiorczo."""
+def notify_new(topic, slots, tz, listing_price, book_url, registration_results=None):
+    """Powiadom o nowych wolnych terminach. Pojedynczo, a przy wielu — zbiorczo.
+
+    Zwraca zbiór id slotów, których NIE udało się wysłać — wywołujący nie zapisuje
+    ich do stanu, więc wysyłka zostanie ponowiona w następnej iteracji.
+    """
     if not topic:
         log("! Brak NTFY_TOPIC — pomijam wysyłkę (tryb testowy).")
-        return
+        return set()  # tryb testowy: nie ma czego ponawiać
     if len(slots) > 6:
         lines = [
             f"• {fmt_when(s['start_utc'].astimezone(tz), short=True)} — {fmt_price(s['price'], listing_price)}"
             for s in slots
         ]
-        ntfy_post(
+        if registration_results:
+            ok_count = sum(1 for s in slots if registration_results.get(s["id"], (False, ""))[0])
+            lines.append(f"Auto-rejestracja: {ok_count}/{len(slots)} udanych.")
+        status = ntfy_post(
             topic,
             f"🎾 {len(slots)} nowych wolnych terminów padla!",
             "\n".join(lines) + f"\nRezerwuj: {book_url}",
             click=book_url,
         )
-        return
+        return set() if status else {s["id"] for s in slots}
+    failed = set()
     for s in slots:
         when = s["start_utc"].astimezone(tz)
-        ntfy_post(
+        extra = ""
+        if registration_results and s["id"] in registration_results:
+            ok, msg = registration_results[s["id"]]
+            extra = f"\nAuto-rejestracja: {'OK' if ok else 'nie'} — {msg}"
+        status = ntfy_post(
             topic,
             "🎾 Wolny kort padel!",
-            f"{fmt_when(when)}\n{s['name']} — {fmt_price(s['price'], listing_price)}\nRezerwuj: {book_url}",
+            f"{fmt_when(when)}\n{s['name']} — {fmt_price(s['price'], listing_price)}{extra}\nRezerwuj: {book_url}",
             click=book_url,
         )
+        if status is None:
+            failed.add(s["id"])
+    return failed
 
 
 def notify_startup(topic, count, tz, book_url=None):
@@ -368,6 +539,20 @@ def run_once(announce_startup=False):
     """Zwraca 0 przy powodzeniu, 2 przy błędzie sieci (stan nietknięty)."""
     cfg = load_config()
     topic = os.environ.get("NTFY_TOPIC") or cfg.get("ntfy_topic") or ""
+    reg_cfg = {
+        "enabled": boolish(os.environ.get("AUTO_REGISTER") or cfg.get("auto_register")),
+        "token": os.environ.get("DECATHLON_TOKEN") or cfg.get("decathlon_token") or "",
+        "name": os.environ.get("AUTO_REGISTER_NAME") or cfg.get("auto_register_name") or "",
+        "age": os.environ.get("AUTO_REGISTER_AGE") or cfg.get("auto_register_age") or None,
+        "voucher_code": os.environ.get("AUTO_REGISTER_VOUCHER") or cfg.get("auto_register_voucher") or "",
+        "free_only": not boolish(os.environ.get("AUTO_REGISTER_PAID") or cfg.get("auto_register_paid")),
+        "customer_first_name": os.environ.get("AUTO_REGISTER_CUSTOMER_FIRST_NAME")
+        or cfg.get("auto_register_customer_first_name")
+        or "",
+        "customer_last_name": os.environ.get("AUTO_REGISTER_CUSTOMER_LAST_NAME")
+        or cfg.get("auto_register_customer_last_name")
+        or "",
+    }
     tzname = os.environ.get("TIMEZONE") or cfg.get("timezone") or "Europe/Warsaw"
     tz = ZoneInfo(tzname) if ZoneInfo else timezone.utc
     filters_env = os.environ.get("FILTERS")
@@ -441,19 +626,31 @@ def run_once(announce_startup=False):
         return 0
 
     new_ids = current_ids - prev
+    failed_ids = set()
+    registered_ids = load_registered_ids()
+    registration_results = {}
     if new_ids:
         log(f"NOWE wolne terminy: {len(new_ids)}")
         new_slots = sorted((current[i] for i in new_ids), key=lambda x: x["start_utc"])
+        registration_results, registered_ids = auto_register_new_slots(
+            new_slots, listing_price_by_id, reg_cfg, registered_ids
+        )
         # grupuj powiadomienia per listing (book_url)
         by_url = {}
         for s in new_slots:
             by_url.setdefault(book_url_by_id[s["id"]], []).append(s)
         for url, slots in by_url.items():
-            notify_new(topic, slots, tz, listing_price_by_id[slots[0]["id"]], url)
+            failed_ids |= notify_new(
+                topic, slots, tz, listing_price_by_id[slots[0]["id"]], url, registration_results
+            )
+        if failed_ids:
+            log(f"! Nie wysłano {len(failed_ids)} powiadomień — ponowię w następnej iteracji.")
     else:
         log("Brak nowych wolnych terminów.")
 
-    save_state(current_ids)
+    # Sloty z nieudaną wysyłką NIE trafiają do stanu -> następna iteracja
+    # potraktuje je znów jako nowe i ponowi powiadomienie.
+    save_state(current_ids - failed_ids, registered_ids)
     return 0
 
 
@@ -471,10 +668,27 @@ def main():
 
     if interval <= 0:
         run_once()
-        return 0  # tryb jednorazowy (np. GitHub Actions) — nie wywracaj workflow
+        return 0  # tryb jednorazowy — nie wywracaj wywołującego
+
+    # Opcjonalne okna z inną częstotliwością (INTERVALS), w strefie TIMEZONE.
+    tzname = os.environ.get("TIMEZONE") or "Europe/Warsaw"
+    try:
+        tz = ZoneInfo(tzname) if ZoneInfo else timezone.utc
+    except Exception:  # noqa: BLE001
+        tz = timezone.utc
+    windows = []
+    intervals_env = os.environ.get("INTERVALS", "")
+    if intervals_env.strip():
+        try:
+            windows = parse_intervals_env(intervals_env)
+            desc = "; ".join(f"{','.join(w['days'])} {w['start']}-{w['end']} co {w['seconds']}s" for w in windows)
+            log(f"Okna częstotliwości: {desc} (poza nimi co {interval}s)")
+        except Exception as e:  # noqa: BLE001 - błędny env nie może wywrócić procesu
+            log(f"! Błędny INTERVALS '{intervals_env}': {e} — używam stałego {interval}s")
 
     log(f"Tryb pętli: sprawdzam co {interval}s. Ctrl+C aby zakończyć.")
     first = True  # powiadomienie startowe na pierwszej UDANEJ iteracji procesu
+    last_sleep = None
     while True:
         try:
             rc = run_once(announce_startup=first)
@@ -482,7 +696,11 @@ def main():
                 first = False
         except Exception as e:  # noqa: BLE001 - pętla ma przetrwać każdy błąd
             log(f"! Nieoczekiwany błąd w iteracji: {e!r} — kontynuuję.")
-        time.sleep(interval)
+        sleep_s = current_interval(interval, windows, tz)
+        if sleep_s != last_sleep and windows:
+            log(f"⏱ aktualny interwał: {sleep_s}s")
+            last_sleep = sleep_s
+        time.sleep(sleep_s)
 
 
 if __name__ == "__main__":
