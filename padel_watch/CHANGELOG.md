@@ -1,9 +1,11 @@
 # Changelog
 
-## Unreleased
+## 1.5.0
 - Opcjonalna automatyczna rejestracja na nowe terminy Decathlon GO (`auto_register`).
   Wymaga aktualnego JWT `go-sdk-jwt` i danych uczestnika; domyślnie obsługuje tylko
   darmowe terminy, a płatne pozostawia do ręcznego dokończenia płatności.
+- Domyślny tryb testowy `auto_register_dry_run`, który waliduje zapis przez
+  `/api/v2/transactions.create`, ale nie tworzy rezerwacji.
 - Stan przechowuje także `registered_ids`, żeby nie ponawiać udanej rejestracji
   na ten sam termin.
 

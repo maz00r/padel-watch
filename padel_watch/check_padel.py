@@ -346,14 +346,16 @@ def load_registered_ids():
     return set(data.get("registered_ids", []))
 
 
-def decathlon_post(path, token, payload):
+def decathlon_rpc(method, token, payload):
+    """Wywołuje endpoint RPC Decathlon GO: POST /api/v2/{method} z tokenem sesji."""
     req = urllib.request.Request(
-        f"{DECATHLON_API_URL}{path}",
+        f"{DECATHLON_API_URL}/v2/{method}",
         data=json.dumps(payload).encode("utf-8"),
         headers={
             "User-Agent": UA,
             "Accept": "application/json",
             "Content-Type": "application/json",
+            "Accept-Encoding": "gzip",
             "Authorization": f"Bearer {token}",
         },
         method="POST",
@@ -365,56 +367,58 @@ def decathlon_post(path, token, payload):
     return json.loads(raw.decode("utf-8")) if raw else {}
 
 
-def register_slot(slot, listing_price, cfg):
-    """Tworzy transakcję Decathlon GO dla pojedynczego terminu.
+def register_slot(slot, listing_price, cfg, speculative=False):
+    """Zapisuje uczestnika na termin przez Decathlon GO (POST /api/v2/transactions.create).
 
-    Wspierany jest bezpieczny wariant dla darmowych zapisów. Płatne terminy są
-    domyślnie pomijane, bo Decathlon wymaga osobnego kroku płatności.
+    speculative=True -> tylko niezobowiązująca wycena/walidacja (nie rezerwuje).
+    Domyślnie tylko darmowe terminy (płatne wymagają osobnego kroku płatności).
+    Payload i endpoint odtworzone z aplikacji Decathlon GO.
     """
     token = (cfg.get("token") or "").strip()
     name = (cfg.get("name") or "").strip()
     if not token:
         return False, "brak tokenu Decathlon GO"
     if not name:
-        return False, "brak imienia i nazwiska uczestnika"
-    amount = price_amount(slot, listing_price)
-    if cfg.get("free_only", True) and amount > 0:
-        return False, f"termin płatny ({fmt_price(slot.get('price'), listing_price)})"
+        return False, "brak imienia i nazwiska uczestnika (auto_register_name)"
+    if price_amount(slot, listing_price) > 0 and cfg.get("free_only", True):
+        return False, f"termin płatny ({fmt_price(slot.get('price'), listing_price)}) — pomijam"
     participant = {
         "name": name,
-        "age": cfg.get("age"),
-        "voucherCode": cfg.get("voucher_code") or None,
+        "age": cfg.get("age") or None,
+        "priceId": None,        # darmowy kort nie ma poziomu cenowego
+        "subPriceId": None,
+        "isReduced": False,
+        "customFormAnswers": [],
+        "startList": None,
     }
     payload = {
-        "data": {
-            "attributes": {
-                "listingDateId": slot["date_id"],
-                "participants": [participant],
-                "speculative": False,
-            }
-        }
+        "speculative": bool(speculative),
+        "listingDateId": slot["date_id"],
+        "customer": None,
+        "homeDeliveryAddress": None,
+        "participants": [participant],
+        "invoiceData": None,
+        "seatsIOHoldToken": None,
     }
-    if cfg.get("customer_first_name") or cfg.get("customer_last_name"):
-        payload["data"]["attributes"]["customer"] = {
-            "firstName": cfg.get("customer_first_name") or "",
-            "lastName": cfg.get("customer_last_name") or "",
-        }
     try:
-        doc = decathlon_post("/transaction?include=participants,lineItems,payUData", token, payload)
+        doc = decathlon_rpc("transactions.create", token, payload)
     except urllib.error.HTTPError as e:
         detail = ""
         try:
             detail = e.read().decode("utf-8", "replace")[:240]
         except Exception:  # noqa: BLE001
             pass
+        if e.code in (401, 403):
+            return False, f"token odrzucony (HTTP {e.code}) — odśwież token Decathlon GO"
         return False, f"Decathlon HTTP {e.code}: {detail or e.reason}"
     except (urllib.error.URLError, TimeoutError) as e:
         return False, f"Decathlon niedostępny: {e!r}"
-    attrs = (doc.get("data") or {}).get("attributes") or {}
-    state = attrs.get("processState") or attrs.get("state") or "utworzono transakcję"
+    state = doc.get("processState") or doc.get("state") or (doc.get("data") or {}).get("processState")
+    if speculative:
+        return True, f"walidacja OK (speculative{', ' + state if state else ''})"
     if state == "pending-payment":
         return False, "utworzono rezerwację, ale wymaga płatności"
-    return True, state
+    return True, state or "zarejestrowano"
 
 
 def auto_register_new_slots(slots, listing_price_by_id, cfg, already_registered):
@@ -422,18 +426,22 @@ def auto_register_new_slots(slots, listing_price_by_id, cfg, already_registered)
         return {}, already_registered
     results = {}
     registered = set(already_registered)
+    speculative = bool(cfg.get("speculative"))
     for slot in slots:
         sid = slot["id"]
         if sid in registered:
             results[sid] = (True, "już zarejestrowane")
             continue
-        ok, msg = register_slot(slot, listing_price_by_id.get(sid), cfg)
+        ok, msg = register_slot(slot, listing_price_by_id.get(sid), cfg, speculative=speculative)
         results[sid] = (ok, msg)
-        if ok:
-            registered.add(sid)
-            log(f"✓ Auto-rejestracja: {fmt_when(slot['start_utc'].astimezone(_log_tz()), short=True)} — {msg}")
+        when = fmt_when(slot["start_utc"].astimezone(_log_tz()), short=True)
+        if ok and not speculative:
+            registered.add(sid)  # w trybie speculative NIE oznaczamy jako zapisane
+            log(f"✓ Auto-rejestracja: {when} — {msg}")
+        elif ok:
+            log(f"~ Auto-rejestracja (test): {when} — {msg}")
         else:
-            log(f"! Auto-rejestracja pominięta/nieudana dla {sid}: {msg}")
+            log(f"! Auto-rejestracja pominięta/nieudana dla {when}: {msg}")
     return results, registered
 
 
@@ -541,17 +549,11 @@ def run_once(announce_startup=False):
     topic = os.environ.get("NTFY_TOPIC") or cfg.get("ntfy_topic") or ""
     reg_cfg = {
         "enabled": boolish(os.environ.get("AUTO_REGISTER") or cfg.get("auto_register")),
+        "speculative": boolish(os.environ.get("AUTO_REGISTER_DRY_RUN") or cfg.get("auto_register_dry_run")),
         "token": os.environ.get("DECATHLON_TOKEN") or cfg.get("decathlon_token") or "",
         "name": os.environ.get("AUTO_REGISTER_NAME") or cfg.get("auto_register_name") or "",
         "age": os.environ.get("AUTO_REGISTER_AGE") or cfg.get("auto_register_age") or None,
-        "voucher_code": os.environ.get("AUTO_REGISTER_VOUCHER") or cfg.get("auto_register_voucher") or "",
         "free_only": not boolish(os.environ.get("AUTO_REGISTER_PAID") or cfg.get("auto_register_paid")),
-        "customer_first_name": os.environ.get("AUTO_REGISTER_CUSTOMER_FIRST_NAME")
-        or cfg.get("auto_register_customer_first_name")
-        or "",
-        "customer_last_name": os.environ.get("AUTO_REGISTER_CUSTOMER_LAST_NAME")
-        or cfg.get("auto_register_customer_last_name")
-        or "",
     }
     tzname = os.environ.get("TIMEZONE") or cfg.get("timezone") or "Europe/Warsaw"
     tz = ZoneInfo(tzname) if ZoneInfo else timezone.utc
