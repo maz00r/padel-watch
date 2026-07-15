@@ -2,11 +2,7 @@ __pycache__/
 *.pyc
 .DS_Store
 .venv/
-# lokalny wolumen Dockera (compose) — nie wrzucamy na GitHub
+state.json
 data/
-config.bak.json
-# UWAGA: state.json NIE jest ignorowany — musi być commitowany,
-# aby stan terminów przetrwał między uruchomieniami GitHub Actions.
-
 # lokalne ustawienia Claude Code
 .claude/

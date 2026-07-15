@@ -20,13 +20,20 @@ pojawi się **nowy wolny termin** w wybranych godzinach.
 | Opcja | Znaczenie | Przykład |
 |-------|-----------|----------|
 | `ntfy_topic` | temat ntfy (ten sam, co subskrybujesz w apce) | `your-ntfy-topic-here` |
-| `check_interval` | co ile sekund sprawdzać (10–3600) | `60` |
+| `check_interval` | bazowa częstotliwość sprawdzania w sekundach (10–3600) | `60` |
 | `filters` | godziny powiadomień; okna `;`, każde `DNI:HH:MM-HH:MM` | `mon-fri:15:00-02:00; sat-sun:00:00-24:00` |
-| `listing_url` | link do kortu (Decathlon GO) | `https://go.decathlon.pl/l/8df055d5-...` |
-| `timezone` | strefa czasowa filtra | `Europe/Warsaw` |
+| `intervals` | inna częstotliwość w zadanych godzinach: `DNI:HH:MM-HH:MM=SEKUNDY` | `mon-fri:15:00-02:00=30` |
+| `listing_url` | link do kortu (Decathlon GO); app sam podąża za zmianą adresu | `https://go.decathlon.pl/l/1c0ec93e-...` |
+| `timezone` | strefa czasowa filtrów i logów | `Europe/Warsaw` |
 
 **`filters`:** DNI to zakres (`mon-fri`) lub lista (`sat,sun`); dni: `mon tue wed thu fri sat sun`.
 Okno przez północ jest OK (`15:00-02:00` = wieczór + noc do 2:00). Cały dzień = `00:00-24:00`.
+
+**`intervals`:** ten sam format okien co `filters`, z doklejonym `=SEKUNDY`. W godzinach
+pasujących do okna app sprawdza z podaną częstotliwością, poza nimi wg `check_interval`.
+Np. `mon-fri:15:00-02:00=30; sat-sun:08:00-22:00=30` = co 30 s wieczorami i w weekendowe
+dnie, a co `check_interval` (np. 300 s) w pozostałych porach. Puste = zawsze `check_interval`.
+Minimum 10 s. Zmiana interwału jest logowana (`⏱ aktualny interwał: ...`).
 
 ## Powiadomienia
 

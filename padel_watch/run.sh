@@ -9,8 +9,12 @@ opt() { python3 -c "import json;print(json.load(open('$OPT')).get('$1',''))" 2>/
 export NTFY_TOPIC="$(opt ntfy_topic)"
 export CHECK_INTERVAL="$(opt check_interval)"
 export FILTERS="$(opt filters)"
+export INTERVALS="$(opt intervals)"
 export LISTINGS="$(opt listing_url)"
 export TIMEZONE="$(opt timezone)"
+# opcja pominięta w UI -> Python zwraca "None"; traktuj jak pustą
+[ "$FILTERS" = "None" ] && export FILTERS=""
+[ "$INTERVALS" = "None" ] && export INTERVALS=""
 export STATE_DIR="/data"           # stan (state.json) trwały między restartami dodatku
 export CONFIG_PATH="/data/__none__.json"   # brak pliku -> skrypt bierze wszystko z ENV
 

@@ -274,6 +274,38 @@ def parse_filters_env(spec):
     return filters
 
 
+def parse_intervals_env(spec):
+    """Parsuje zmienną INTERVALS: okna z własną częstotliwością odświeżania.
+
+    Format jak FILTERS, z doklejonym '=SEKUNDY', np.:
+        'mon-fri:15:00-02:00=30; sat-sun:08:00-22:00=60'
+    Poza dopasowanymi oknami obowiązuje bazowy CHECK_INTERVAL.
+    Okna przez północ działają tak samo jak w FILTERS.
+    """
+    out = []
+    for chunk in spec.split(";"):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        win, secs = chunk.rsplit("=", 1)
+        days_part, time_part = win.split(":", 1)
+        start, end = (x.strip() for x in time_part.split("-", 1))
+        seconds = max(10, int(secs))  # min 10 s — nie młócimy API
+        out.append({"days": parse_days(days_part), "start": start, "end": end, "seconds": seconds})
+    return out
+
+
+def current_interval(default_s, windows, tz, now_utc=None):
+    """Interwał obowiązujący TERAZ: sekundy z pierwszego pasującego okna, inaczej default."""
+    if not windows:
+        return default_s
+    now_local = (now_utc or datetime.now(timezone.utc)).astimezone(tz)
+    for w in windows:
+        if passes_filter({"start_utc": now_local}, [w], tz):
+            return w["seconds"]
+    return default_s
+
+
 def fmt_price(price, listing_default):
     p = price or listing_default
     if not p or p.get("amount") in (None, 0):
@@ -319,30 +351,38 @@ def ntfy_post(topic, title, message, click=None, priority="high", tags="tennis")
 
 
 def notify_new(topic, slots, tz, listing_price, book_url):
-    """Powiadom o nowych wolnych terminach. Pojedynczo, a przy wielu — zbiorczo."""
+    """Powiadom o nowych wolnych terminach. Pojedynczo, a przy wielu — zbiorczo.
+
+    Zwraca zbiór id slotów, których NIE udało się wysłać — wywołujący nie zapisuje
+    ich do stanu, więc wysyłka zostanie ponowiona w następnej iteracji.
+    """
     if not topic:
         log("! Brak NTFY_TOPIC — pomijam wysyłkę (tryb testowy).")
-        return
+        return set()  # tryb testowy: nie ma czego ponawiać
     if len(slots) > 6:
         lines = [
             f"• {fmt_when(s['start_utc'].astimezone(tz), short=True)} — {fmt_price(s['price'], listing_price)}"
             for s in slots
         ]
-        ntfy_post(
+        status = ntfy_post(
             topic,
             f"🎾 {len(slots)} nowych wolnych terminów padla!",
             "\n".join(lines) + f"\nRezerwuj: {book_url}",
             click=book_url,
         )
-        return
+        return set() if status else {s["id"] for s in slots}
+    failed = set()
     for s in slots:
         when = s["start_utc"].astimezone(tz)
-        ntfy_post(
+        status = ntfy_post(
             topic,
             "🎾 Wolny kort padel!",
             f"{fmt_when(when)}\n{s['name']} — {fmt_price(s['price'], listing_price)}\nRezerwuj: {book_url}",
             click=book_url,
         )
+        if status is None:
+            failed.add(s["id"])
+    return failed
 
 
 def notify_startup(topic, count, tz, book_url=None):
@@ -441,6 +481,7 @@ def run_once(announce_startup=False):
         return 0
 
     new_ids = current_ids - prev
+    failed_ids = set()
     if new_ids:
         log(f"NOWE wolne terminy: {len(new_ids)}")
         new_slots = sorted((current[i] for i in new_ids), key=lambda x: x["start_utc"])
@@ -449,11 +490,15 @@ def run_once(announce_startup=False):
         for s in new_slots:
             by_url.setdefault(book_url_by_id[s["id"]], []).append(s)
         for url, slots in by_url.items():
-            notify_new(topic, slots, tz, listing_price_by_id[slots[0]["id"]], url)
+            failed_ids |= notify_new(topic, slots, tz, listing_price_by_id[slots[0]["id"]], url)
+        if failed_ids:
+            log(f"! Nie wysłano {len(failed_ids)} powiadomień — ponowię w następnej iteracji.")
     else:
         log("Brak nowych wolnych terminów.")
 
-    save_state(current_ids)
+    # Sloty z nieudaną wysyłką NIE trafiają do stanu -> następna iteracja
+    # potraktuje je znów jako nowe i ponowi powiadomienie.
+    save_state(current_ids - failed_ids)
     return 0
 
 
@@ -471,10 +516,27 @@ def main():
 
     if interval <= 0:
         run_once()
-        return 0  # tryb jednorazowy (np. GitHub Actions) — nie wywracaj workflow
+        return 0  # tryb jednorazowy — nie wywracaj wywołującego
+
+    # Opcjonalne okna z inną częstotliwością (INTERVALS), w strefie TIMEZONE.
+    tzname = os.environ.get("TIMEZONE") or "Europe/Warsaw"
+    try:
+        tz = ZoneInfo(tzname) if ZoneInfo else timezone.utc
+    except Exception:  # noqa: BLE001
+        tz = timezone.utc
+    windows = []
+    intervals_env = os.environ.get("INTERVALS", "")
+    if intervals_env.strip():
+        try:
+            windows = parse_intervals_env(intervals_env)
+            desc = "; ".join(f"{','.join(w['days'])} {w['start']}-{w['end']} co {w['seconds']}s" for w in windows)
+            log(f"Okna częstotliwości: {desc} (poza nimi co {interval}s)")
+        except Exception as e:  # noqa: BLE001 - błędny env nie może wywrócić procesu
+            log(f"! Błędny INTERVALS '{intervals_env}': {e} — używam stałego {interval}s")
 
     log(f"Tryb pętli: sprawdzam co {interval}s. Ctrl+C aby zakończyć.")
     first = True  # powiadomienie startowe na pierwszej UDANEJ iteracji procesu
+    last_sleep = None
     while True:
         try:
             rc = run_once(announce_startup=first)
@@ -482,7 +544,11 @@ def main():
                 first = False
         except Exception as e:  # noqa: BLE001 - pętla ma przetrwać każdy błąd
             log(f"! Nieoczekiwany błąd w iteracji: {e!r} — kontynuuję.")
-        time.sleep(interval)
+        sleep_s = current_interval(interval, windows, tz)
+        if sleep_s != last_sleep and windows:
+            log(f"⏱ aktualny interwał: {sleep_s}s")
+            last_sleep = sleep_s
+        time.sleep(sleep_s)
 
 
 if __name__ == "__main__":
