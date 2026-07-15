@@ -2,6 +2,7 @@
 """Testy jednostkowe silnika (bez sieci). Uruchomienie: python3 -m unittest -v test_check_padel"""
 
 import io
+import base64
 import json
 import os
 import sys
@@ -20,6 +21,11 @@ FILTERS = [
     {"days": ["mon", "tue", "wed", "thu", "fri"], "start": "15:00", "end": "02:00"},
     {"days": ["sat", "sun"], "start": "00:00", "end": "24:00"},
 ]
+
+
+def jwt_with_exp(exp):
+    payload = base64.urlsafe_b64encode(json.dumps({"exp": exp}).encode("utf-8")).decode("ascii").rstrip("=")
+    return f"header.{payload}.signature"
 
 
 def slot_at(*args):
@@ -293,6 +299,46 @@ class TestAutoRegister(unittest.TestCase):
         self.assertEqual(seen["method"], "transactions.create")
         self.assertEqual(seen["payload"]["listingDateId"], "D")
         self.assertEqual(seen["payload"]["participants"][0]["name"], "Jan Kowalski")
+
+    def test_token_is_cleaned(self):
+        self.assertEqual(cp.clean_decathlon_token('JWT: "abc.def.ghi"'), "abc.def.ghi")
+        self.assertEqual(cp.clean_decathlon_token("Bearer abc.def.ghi"), "abc.def.ghi")
+
+    def test_newer_state_token_wins(self):
+        old = jwt_with_exp(100)
+        new = jwt_with_exp(200)
+        self.assertEqual(cp.newer_decathlon_token(old, new), new)
+        self.assertEqual(cp.newer_decathlon_token(new, old), new)
+
+    def test_register_refreshes_token_after_401(self):
+        seen = []
+
+        def fake_rpc(method, token, payload):
+            seen.append(token)
+            if len(seen) == 1:
+                raise urllib.error.HTTPError("u", 401, "Unauthorized", {}, io.BytesIO(b"{}"))
+            return {"processState": "accepted"}
+
+        def fake_refresh(token, cookie):
+            self.assertEqual(token, "old.jwt.token")
+            self.assertEqual(cookie, "sid=1")
+            return "new.jwt.token"
+
+        cfg = {
+            "token": "old.jwt.token",
+            "refresh_cookie": "sid=1",
+            "name": "Jan Kowalski",
+            "free_only": True,
+        }
+        with mock.patch.object(cp, "decathlon_rpc", fake_rpc), \
+                mock.patch.object(cp, "refresh_decathlon_token", fake_refresh):
+            ok, msg = cp.register_slot(self.SLOT, None, cfg, speculative=True)
+
+        self.assertTrue(ok)
+        self.assertIn("walidacja OK", msg)
+        self.assertEqual(seen, ["old.jwt.token", "new.jwt.token"])
+        self.assertEqual(cfg["token"], "new.jwt.token")
+        self.assertTrue(cfg["token_refreshed"])
 
     def test_decathlon_rpc_wraps_input(self):
         seen = {}

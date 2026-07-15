@@ -28,6 +28,7 @@ pojawi się **nowy wolny termin** w wybranych godzinach.
 | `auto_register` | próba automatycznego zapisu na nowy termin | `false` |
 | `auto_register_dry_run` | testuje zapis bez tworzenia rezerwacji | `true` |
 | `decathlon_token` | JWT z zalogowanej sesji Decathlon GO (`go-sdk-jwt`) | `eyJ...` |
+| `decathlon_cookie` | cookie sesji Decathlon GO do automatycznego odświeżania JWT | `connect.sid=...` |
 | `auto_register_name` | imię i nazwisko uczestnika wysyłane w rezerwacji | `Jan Kowalski` |
 | `auto_register_age` | wiek uczestnika, jeśli wydarzenie go wymaga | `34` |
 | `auto_register_paid` | pozwól tworzyć transakcje także dla płatnych terminów; płatność nadal trzeba dokończyć ręcznie | `false` |
@@ -51,8 +52,11 @@ Minimum 10 s. Zmiana interwału jest logowana (`⏱ aktualny interwał: ...`).
 
 Automatyczna rejestracja jest domyślnie wyłączona. Po włączeniu app próbuje utworzyć
 transakcję Decathlon GO dla nowych terminów, które przeszły filtry czasu. Używa endpointu
-`/api/v2/transactions.create`, więc wymaga aktualnego tokenu zalogowanego użytkownika
-z localStorage Decathlon GO (`go-sdk-jwt`).
+`/api/v2/transactions.create`, więc wymaga sesji zalogowanego użytkownika Decathlon GO.
+JWT z localStorage (`go-sdk-jwt`) zwykle wygasa po kilkunastu minutach, dlatego do
+działania w tle podaj też `decathlon_cookie`: wartość nagłówka `Cookie` z zalogowanej
+strony Decathlon GO. App użyje go do `/api/auth/refresh`, zapisze odświeżony JWT w
+`/data/state.json` i będzie ponawiać refresh bez ręcznego wklejania tokenu co 15 minut.
 
 `auto_register_dry_run` jest domyślnie włączone: app wykonuje walidację/wstępną wycenę,
 ale nie zapisuje uczestnika. Ustaw `auto_register_dry_run: false` dopiero po sprawdzeniu

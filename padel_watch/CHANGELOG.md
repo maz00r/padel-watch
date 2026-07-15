@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.5.2
+- Auto-rejestracja potrafi odświeżyć krótkotrwały JWT Decathlon GO przez
+  `/api/auth/refresh`, jeśli podano cookie sesji w `decathlon_cookie`.
+- Odświeżony JWT jest zapisywany w stanie dodatku, więc nie trzeba co kilkanaście
+  minut ręcznie aktualizować `decathlon_token` w Home Assistant.
+- Token wklejony z prefixem `Bearer`, `JWT:` albo cudzysłowami jest automatycznie
+  czyszczony przed użyciem.
+
 ## 1.5.1
 - Poprawka auto-rejestracji: request do `/api/v2/transactions.create` wysyła teraz
   payload w polu `input`, zgodnie z formatem RPC Decathlon GO.

@@ -13,6 +13,7 @@ Tylko biblioteka standardowa — brak zależności (działa w GitHub Actions bez
 """
 
 import gzip
+import base64
 import json
 import os
 import re
@@ -99,17 +100,17 @@ def load_state_doc():
         return None
 
 
-def save_state(free_ids, registered_ids=None):
+def save_state(free_ids, registered_ids=None, decathlon_jwt=None):
+    old = load_state_doc() or {}
     if registered_ids is None:
-        old = load_state_doc() or {}
         registered_ids = set(old.get("registered_ids", []))
+    if decathlon_jwt is None:
+        decathlon_jwt = old.get("decathlon_jwt")
+    doc = {"free_ids": sorted(free_ids), "registered_ids": sorted(registered_ids)}
+    if decathlon_jwt:
+        doc["decathlon_jwt"] = clean_decathlon_token(decathlon_jwt)
     with open(STATE_PATH, "w", encoding="utf-8") as f:
-        json.dump(
-            {"free_ids": sorted(free_ids), "registered_ids": sorted(registered_ids)},
-            f,
-            ensure_ascii=False,
-            indent=2,
-        )
+        json.dump(doc, f, ensure_ascii=False, indent=2)
         f.write("\n")
 
 
@@ -346,6 +347,68 @@ def load_registered_ids():
     return set(data.get("registered_ids", []))
 
 
+def clean_decathlon_token(value):
+    token = (value or "").strip().strip("\"'")
+    for prefix in ("JWT:", "jwt:", "Bearer ", "bearer "):
+        if token.startswith(prefix):
+            token = token[len(prefix):].strip().strip("\"'")
+    return token
+
+
+def jwt_expiry(token):
+    token = clean_decathlon_token(token)
+    parts = token.split(".")
+    if len(parts) != 3:
+        return 0
+    try:
+        payload = parts[1] + "=" * (-len(parts[1]) % 4)
+        data = json.loads(base64.urlsafe_b64decode(payload.encode("ascii")).decode("utf-8"))
+    except Exception:  # noqa: BLE001 - diagnostyka tokena nie może zatrzymać monitoringu
+        return 0
+    try:
+        return int(data.get("exp") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def newer_decathlon_token(config_token, state_token):
+    config_token = clean_decathlon_token(config_token)
+    state_token = clean_decathlon_token(state_token)
+    if not config_token:
+        return state_token
+    if not state_token:
+        return config_token
+    return state_token if jwt_expiry(state_token) > jwt_expiry(config_token) else config_token
+
+
+def refresh_decathlon_token(token, cookie):
+    cookie = (cookie or "").strip()
+    if not cookie:
+        raise ValueError("brak cookie sesji Decathlon GO")
+    req = urllib.request.Request(
+        f"{DECATHLON_API_URL}/auth/refresh",
+        data=json.dumps({}).encode("utf-8"),
+        headers={
+            "User-Agent": UA,
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "Accept-Encoding": "gzip",
+            "Authorization": f"Bearer {clean_decathlon_token(token)}",
+            "Cookie": cookie,
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        raw = resp.read()
+        if resp.headers.get("Content-Encoding") == "gzip":
+            raw = gzip.decompress(raw)
+    doc = json.loads(raw.decode("utf-8")) if raw else {}
+    refreshed = clean_decathlon_token(doc.get("jwt"))
+    if not refreshed:
+        raise ValueError("Decathlon GO nie zwrócił nowego JWT")
+    return refreshed
+
+
 def decathlon_rpc(method, token, payload, extend=None):
     """Wywołuje endpoint RPC Decathlon GO: POST /api/v2/{method} z tokenem sesji."""
     req = urllib.request.Request(
@@ -375,7 +438,7 @@ def register_slot(slot, listing_price, cfg, speculative=False):
     Domyślnie tylko darmowe terminy (płatne wymagają osobnego kroku płatności).
     Payload i endpoint odtworzone z aplikacji Decathlon GO.
     """
-    token = (cfg.get("token") or "").strip()
+    token = clean_decathlon_token(cfg.get("token"))
     name = (cfg.get("name") or "").strip()
     if not token:
         return False, "brak tokenu Decathlon GO"
@@ -401,19 +464,36 @@ def register_slot(slot, listing_price, cfg, speculative=False):
         "invoiceData": None,
         "seatsIOHoldToken": None,
     }
-    try:
-        doc = decathlon_rpc("transactions.create", token, payload)
-    except urllib.error.HTTPError as e:
-        detail = ""
+    doc = None
+    for attempt in range(2):
         try:
-            detail = e.read().decode("utf-8", "replace")[:240]
-        except Exception:  # noqa: BLE001
-            pass
-        if e.code in (401, 403):
-            return False, f"token odrzucony (HTTP {e.code}) — odśwież token Decathlon GO"
-        return False, f"Decathlon HTTP {e.code}: {detail or e.reason}"
-    except (urllib.error.URLError, TimeoutError) as e:
-        return False, f"Decathlon niedostępny: {e!r}"
+            doc = decathlon_rpc("transactions.create", token, payload)
+            break
+        except urllib.error.HTTPError as e:
+            detail = ""
+            try:
+                detail = e.read().decode("utf-8", "replace")[:240]
+            except Exception:  # noqa: BLE001
+                pass
+            finally:
+                try:
+                    e.close()
+                except Exception:  # noqa: BLE001
+                    pass
+            if e.code == 401 and attempt == 0 and cfg.get("refresh_cookie"):
+                try:
+                    token = refresh_decathlon_token(token, cfg.get("refresh_cookie"))
+                    cfg["token"] = token
+                    cfg["token_refreshed"] = True
+                    log("~ Token Decathlon GO odświeżony po HTTP 401; ponawiam rejestrację")
+                    continue
+                except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ValueError) as refresh_error:
+                    return False, f"token odrzucony (HTTP 401), refresh nieudany: {refresh_error!r}"
+            if e.code in (401, 403):
+                return False, f"token odrzucony (HTTP {e.code}) — sprawdź decathlon_cookie / token"
+            return False, f"Decathlon HTTP {e.code}: {detail or e.reason}"
+        except (urllib.error.URLError, TimeoutError) as e:
+            return False, f"Decathlon niedostępny: {e!r}"
     state = doc.get("processState") or doc.get("state") or (doc.get("data") or {}).get("processState")
     if speculative:
         return True, f"walidacja OK (speculative{', ' + state if state else ''})"
@@ -547,11 +627,16 @@ def notify_startup(topic, count, tz, book_url=None):
 def run_once(announce_startup=False):
     """Zwraca 0 przy powodzeniu, 2 przy błędzie sieci (stan nietknięty)."""
     cfg = load_config()
+    state_doc = load_state_doc()
     topic = os.environ.get("NTFY_TOPIC") or cfg.get("ntfy_topic") or ""
     reg_cfg = {
         "enabled": boolish(os.environ.get("AUTO_REGISTER") or cfg.get("auto_register")),
         "speculative": boolish(os.environ.get("AUTO_REGISTER_DRY_RUN") or cfg.get("auto_register_dry_run")),
-        "token": os.environ.get("DECATHLON_TOKEN") or cfg.get("decathlon_token") or "",
+        "token": newer_decathlon_token(
+            os.environ.get("DECATHLON_TOKEN") or cfg.get("decathlon_token") or "",
+            (state_doc or {}).get("decathlon_jwt") or "",
+        ),
+        "refresh_cookie": os.environ.get("DECATHLON_COOKIE") or cfg.get("decathlon_cookie") or "",
         "name": os.environ.get("AUTO_REGISTER_NAME") or cfg.get("auto_register_name") or "",
         "age": os.environ.get("AUTO_REGISTER_AGE") or cfg.get("auto_register_age") or None,
         "free_only": not boolish(os.environ.get("AUTO_REGISTER_PAID") or cfg.get("auto_register_paid")),
@@ -616,7 +701,7 @@ def run_once(announce_startup=False):
             log(f"   - {fmt_when(s['start_utc'].astimezone(tz), short=True)}  {s['name']}  {s['count']}/{s['limit']}")
 
     current_ids = set(current.keys())
-    prev = load_state()
+    prev = None if state_doc is None else set(state_doc.get("free_ids", []))
 
     # Powiadomienie startowe: przy każdym uruchomieniu aplikacji (announce_startup)
     # oraz przy pierwszym biegu bez zapisanego stanu.
@@ -625,7 +710,7 @@ def run_once(announce_startup=False):
 
     if prev is None:
         log("Pierwszy bieg — zapisuję baseline, bez alertów o pojedynczych terminach.")
-        save_state(current_ids)
+        save_state(current_ids, decathlon_jwt=reg_cfg.get("token"))
         return 0
 
     new_ids = current_ids - prev
@@ -653,7 +738,7 @@ def run_once(announce_startup=False):
 
     # Sloty z nieudaną wysyłką NIE trafiają do stanu -> następna iteracja
     # potraktuje je znów jako nowe i ponowi powiadomienie.
-    save_state(current_ids - failed_ids, registered_ids)
+    save_state(current_ids - failed_ids, registered_ids, reg_cfg.get("token"))
     return 0
 
 
