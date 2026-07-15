@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+- Opcjonalna automatyczna rejestracja na nowe terminy Decathlon GO (`auto_register`).
+  Wymaga aktualnego JWT `go-sdk-jwt` i danych uczestnika; domyślnie obsługuje tylko
+  darmowe terminy, a płatne pozostawia do ręcznego dokończenia płatności.
+- Stan przechowuje także `registered_ids`, żeby nie ponawiać udanej rejestracji
+  na ten sam termin.
+
 ## 1.4.0
 - **Nowa opcja `intervals`**: inna częstotliwość odświeżania w zadanych godzinach,
   np. `mon-fri:15:00-02:00=30` (co 30 s wieczorem, poza oknem wg `check_interval`).

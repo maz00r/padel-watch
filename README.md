@@ -25,6 +25,8 @@ Historia zmian: [padel_watch/CHANGELOG.md](padel_watch/CHANGELOG.md).
 - App podąża za przekierowaniem strony kortu, więc zmiana adresu/ID po stronie
   Decathlonu nie psuje monitoringu.
 - Nieudana wysyłka ntfy jest ponawiana w kolejnej iteracji — alert nie ginie.
+- Opcjonalnie app może spróbować automatycznie zarejestrować użytkownika na nowy
+  darmowy termin Decathlon GO, używając tokenu zalogowanej sesji.
 
 ## Rozwój
 

@@ -234,6 +234,13 @@ class TestStateRoundtrip(unittest.TestCase):
                 cp.save_state({"b", "a"})
                 self.assertEqual(cp.load_state(), {"a", "b"})
 
+    def test_save_preserves_registered_ids(self):
+        with tempfile.TemporaryDirectory() as td:
+            with mock.patch.object(cp, "STATE_PATH", os.path.join(td, "state.json")):
+                cp.save_state({"a"}, {"old"})
+                cp.save_state({"b"})
+                self.assertEqual(cp.load_registered_ids(), {"old"})
+
     def test_missing_state_is_none(self):
         with tempfile.TemporaryDirectory() as td:
             with mock.patch.object(cp, "STATE_PATH", os.path.join(td, "state.json")):
@@ -246,6 +253,46 @@ class TestStateRoundtrip(unittest.TestCase):
                 f.write("{zepsute")
             with mock.patch.object(cp, "STATE_PATH", p):
                 self.assertIsNone(cp.load_state())
+
+
+class TestAutoRegister(unittest.TestCase):
+    SLOT = {
+        "id": "L:D",
+        "listing_id": "L",
+        "date_id": "D",
+        "start_utc": datetime(2026, 7, 7, 10, 0, tzinfo=timezone.utc),
+        "price": None,
+    }
+
+    def test_missing_token_skips(self):
+        ok, msg = cp.register_slot(self.SLOT, None, {"enabled": True, "name": "Jan Kowalski"})
+        self.assertFalse(ok)
+        self.assertIn("tokenu", msg)
+
+    def test_paid_slot_skips_by_default(self):
+        slot = dict(self.SLOT, price={"currency": "PLN", "amount": 1500})
+        ok, msg = cp.register_slot(slot, None, {"token": "t", "name": "Jan Kowalski", "free_only": True})
+        self.assertFalse(ok)
+        self.assertIn("płatny", msg)
+
+    def test_register_payload(self):
+        seen = {}
+
+        def fake_post(path, token, payload):
+            seen["path"] = path
+            seen["token"] = token
+            seen["payload"] = payload
+            return {"data": {"attributes": {"processState": "accepted"}}}
+
+        cfg = {"token": "jwt", "name": "Jan Kowalski", "age": "34", "free_only": True}
+        with mock.patch.object(cp, "decathlon_post", fake_post):
+            ok, msg = cp.register_slot(self.SLOT, None, cfg)
+        self.assertTrue(ok)
+        self.assertEqual(msg, "accepted")
+        self.assertEqual(seen["path"], "/transaction?include=participants,lineItems,payUData")
+        attrs = seen["payload"]["data"]["attributes"]
+        self.assertEqual(attrs["listingDateId"], "D")
+        self.assertEqual(attrs["participants"][0]["name"], "Jan Kowalski")
 
 
 if __name__ == "__main__":
