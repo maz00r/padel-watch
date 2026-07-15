@@ -26,10 +26,10 @@ pojawi się **nowy wolny termin** w wybranych godzinach.
 | `listing_url` | link do kortu (Decathlon GO); app sam podąża za zmianą adresu | `https://go.decathlon.pl/l/1c0ec93e-...` |
 | `timezone` | strefa czasowa filtrów i logów | `Europe/Warsaw` |
 | `auto_register` | próba automatycznego zapisu na nowy termin | `false` |
+| `auto_register_dry_run` | testuje zapis bez tworzenia rezerwacji | `true` |
 | `decathlon_token` | JWT z zalogowanej sesji Decathlon GO (`go-sdk-jwt`) | `eyJ...` |
 | `auto_register_name` | imię i nazwisko uczestnika wysyłane w rezerwacji | `Jan Kowalski` |
 | `auto_register_age` | wiek uczestnika, jeśli wydarzenie go wymaga | `34` |
-| `auto_register_voucher` | opcjonalny kod rabatowy | `KOD` |
 | `auto_register_paid` | pozwól tworzyć transakcje także dla płatnych terminów; płatność nadal trzeba dokończyć ręcznie | `false` |
 
 **`filters`:** DNI to zakres (`mon-fri`) lub lista (`sat,sun`); dni: `mon tue wed thu fri sat sun`.
@@ -51,8 +51,12 @@ Minimum 10 s. Zmiana interwału jest logowana (`⏱ aktualny interwał: ...`).
 
 Automatyczna rejestracja jest domyślnie wyłączona. Po włączeniu app próbuje utworzyć
 transakcję Decathlon GO dla nowych terminów, które przeszły filtry czasu. Używa endpointu
-`/api/transaction`, więc wymaga aktualnego tokenu zalogowanego użytkownika z localStorage
-Decathlon GO (`go-sdk-jwt`).
+`/api/v2/transactions.create`, więc wymaga aktualnego tokenu zalogowanego użytkownika
+z localStorage Decathlon GO (`go-sdk-jwt`).
+
+`auto_register_dry_run` jest domyślnie włączone: app wykonuje walidację/wstępną wycenę,
+ale nie zapisuje uczestnika. Ustaw `auto_register_dry_run: false` dopiero po sprawdzeniu
+logów i powiadomień z trybu testowego.
 
 Domyślnie rejestrowane są tylko darmowe terminy. Dla płatnych terminów ustawienie
 `auto_register_paid: true` może utworzyć transakcję oczekującą na płatność, ale płatność

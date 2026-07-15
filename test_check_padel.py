@@ -278,21 +278,20 @@ class TestAutoRegister(unittest.TestCase):
     def test_register_payload(self):
         seen = {}
 
-        def fake_post(path, token, payload):
-            seen["path"] = path
+        def fake_rpc(method, token, payload):
+            seen["method"] = method
             seen["token"] = token
             seen["payload"] = payload
-            return {"data": {"attributes": {"processState": "accepted"}}}
+            return {"processState": "accepted"}
 
         cfg = {"token": "jwt", "name": "Jan Kowalski", "age": "34", "free_only": True}
-        with mock.patch.object(cp, "decathlon_post", fake_post):
+        with mock.patch.object(cp, "decathlon_rpc", fake_rpc):
             ok, msg = cp.register_slot(self.SLOT, None, cfg)
         self.assertTrue(ok)
         self.assertEqual(msg, "accepted")
-        self.assertEqual(seen["path"], "/transaction?include=participants,lineItems,payUData")
-        attrs = seen["payload"]["data"]["attributes"]
-        self.assertEqual(attrs["listingDateId"], "D")
-        self.assertEqual(attrs["participants"][0]["name"], "Jan Kowalski")
+        self.assertEqual(seen["method"], "transactions.create")
+        self.assertEqual(seen["payload"]["listingDateId"], "D")
+        self.assertEqual(seen["payload"]["participants"][0]["name"], "Jan Kowalski")
 
 
 if __name__ == "__main__":
