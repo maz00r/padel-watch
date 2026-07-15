@@ -2,6 +2,7 @@
 """Testy jednostkowe silnika (bez sieci). Uruchomienie: python3 -m unittest -v test_check_padel"""
 
 import io
+import json
 import os
 import sys
 import tempfile
@@ -292,6 +293,32 @@ class TestAutoRegister(unittest.TestCase):
         self.assertEqual(seen["method"], "transactions.create")
         self.assertEqual(seen["payload"]["listingDateId"], "D")
         self.assertEqual(seen["payload"]["participants"][0]["name"], "Jan Kowalski")
+
+    def test_decathlon_rpc_wraps_input(self):
+        seen = {}
+
+        class FakeResponse(io.BytesIO):
+            headers = {"get": staticmethod(lambda name: None)}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        def fake_urlopen(req, timeout=30):
+            seen["url"] = req.full_url
+            seen["headers"] = dict(req.header_items())
+            seen["payload"] = json.loads(req.data.decode("utf-8"))
+            return FakeResponse(json.dumps({"output": {"processState": "accepted"}}).encode("utf-8"))
+
+        with mock.patch.object(cp.urllib.request, "urlopen", fake_urlopen):
+            doc = cp.decathlon_rpc("transactions.create", "jwt", {"listingDateId": "D"})
+
+        self.assertEqual(doc, {"processState": "accepted"})
+        self.assertEqual(seen["url"], "https://go.decathlon.pl/api/v2/transactions.create")
+        self.assertEqual(seen["payload"]["input"], {"listingDateId": "D"})
+        self.assertEqual(seen["payload"]["extend"], {})
 
 
 if __name__ == "__main__":

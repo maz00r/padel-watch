@@ -346,11 +346,11 @@ def load_registered_ids():
     return set(data.get("registered_ids", []))
 
 
-def decathlon_rpc(method, token, payload):
+def decathlon_rpc(method, token, payload, extend=None):
     """Wywołuje endpoint RPC Decathlon GO: POST /api/v2/{method} z tokenem sesji."""
     req = urllib.request.Request(
         f"{DECATHLON_API_URL}/v2/{method}",
-        data=json.dumps(payload).encode("utf-8"),
+        data=json.dumps({"input": payload, "extend": extend or {}}).encode("utf-8"),
         headers={
             "User-Agent": UA,
             "Accept": "application/json",
@@ -364,7 +364,8 @@ def decathlon_rpc(method, token, payload):
         raw = resp.read()
         if resp.headers.get("Content-Encoding") == "gzip":
             raw = gzip.decompress(raw)
-    return json.loads(raw.decode("utf-8")) if raw else {}
+    doc = json.loads(raw.decode("utf-8")) if raw else {}
+    return doc.get("output", doc)
 
 
 def register_slot(slot, listing_price, cfg, speculative=False):

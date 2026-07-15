@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.5.1
+- Poprawka auto-rejestracji: request do `/api/v2/transactions.create` wysyła teraz
+  payload w polu `input`, zgodnie z formatem RPC Decathlon GO.
+
 ## 1.5.0
 - Opcjonalna automatyczna rejestracja na nowe terminy Decathlon GO (`auto_register`).
   Wymaga aktualnego JWT `go-sdk-jwt` i danych uczestnika; domyślnie obsługuje tylko
