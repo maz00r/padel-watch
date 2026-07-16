@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.11.0
+- **Nowa opcja `test_token`**: test poświadczeń Decathlon GO **bez wolnego terminu**.
+  Przy starcie app próbuje pobrać token i loguje wynik wraz z datą ważności
+  (`✓ Test poświadczeń: token OK, ważny do ... (jeszcze ~118 min)`). Nic nie rezerwuje.
+- Ten sam test wykonuje się automatycznie przy każdym starcie, gdy `auto_register`
+  jest włączone — od razu wiesz, czy cookie jeszcze żyje.
+- Nieudany test wysyła alert ntfy i jest rozpoznawany jak zwykły błąd auth.
+
 ## 1.10.0
 - **`decathlon_token` jest teraz opcjonalny — wystarczy `decathlon_cookie`.** App sam
   pobiera JWT z `/api/auth/refresh` (to cookie uwierzytelnia refresh, nie token).

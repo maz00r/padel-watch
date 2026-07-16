@@ -34,6 +34,7 @@ pojawi się **nowy wolny termin** w wybranych godzinach.
 | `auto_register_paid` | pozwól tworzyć transakcje także dla płatnych terminów; płatność nadal trzeba dokończyć ręcznie | `false` |
 | `auto_register_max` | ile terminów maksymalnie zapisać w jednym przebiegu (0–10); `0` = nic | `1` |
 | `auto_register_order` | kolejność prób: `earliest` (od najwcześniejszego) lub `latest` (od najpóźniejszego) | `earliest` |
+| `test_token` | jednorazowy test poświadczeń przy starcie (nic nie rezerwuje) | `false` |
 | `clear_state` | jednorazowe czyszczenie stanu: `registered` lub `all`; puste = nic nie rób | `` |
 
 > **Bezpieczniki auto-rejestracji.** Domyślnie `auto_register_max: 1`, więc gdy pojawi się
@@ -113,6 +114,25 @@ test — `decathlon_token` zostawiliśmy jako opcję, ale przy podanym cookie je
 
 **Skąd wziąć cookie:** zalogowana strona `go.decathlon.pl` → DevTools → **Network** →
 dowolne żądanie do `go.decathlon.pl` → **Request Headers** → skopiuj wartość `Cookie`.
+
+### Sprawdzenie cookie bez czekania na wolny termin (`test_token`)
+
+Nie musisz czekać, aż kort się zwolni, żeby zweryfikować poświadczenia:
+
+1. **Konfiguracja** → `test_token: true` → **Zapisz** → **Uruchom ponownie**.
+2. W **Dzienniku** zobaczysz jeden z wpisów:
+
+```
+✓ Test poświadczeń: token OK, ważny do 2026-07-16 12:41:03 (jeszcze ~118 min).
+✗ Test poświadczeń: nie udało się pobrać tokenu cookiem: <HTTPError 401: 'Unauthorized'>
+✗ Test poświadczeń: brak tokenu Decathlon GO i brak decathlon_cookie — auto-rezerwacja nie zadziała.
+```
+
+3. Gdy zobaczysz `✓`, możesz wyłączyć `test_token` i włączyć `auto_register`.
+
+Test **niczego nie rezerwuje** — tylko pobiera token. Działa nawet przy zerowej liczbie
+wolnych terminów i przy wyłączonej auto-rejestracji. Gdy `auto_register` jest włączone,
+ten sam test wykonuje się automatycznie przy każdym starcie dodatku.
 
 > Cookie to **pełne poświadczenie sesji** — leży jawnym tekstem w `/data/options.json`
 > dodatku i w backupach HA. Traktuj je jak hasło.

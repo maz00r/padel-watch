@@ -501,6 +501,37 @@ def ensure_decathlon_token(cfg):
     return fresh, None
 
 
+def check_decathlon_credentials(cfg, topic=None, book_url=None):
+    """Test poświadczeń — sprawdza, czy da się zdobyć token. NIE wymaga wolnego terminu.
+
+    Uruchamiany przy starcie (gdy auto_register jest włączone) albo na żądanie opcją
+    `test_token`. Nic nie rezerwuje — tylko próbuje pobrać/odświeżyć JWT i mówi wprost,
+    czy cookie działa i do kiedy token jest ważny.
+    """
+    cfg["auth_checked"] = True
+    if not (cfg.get("token") or cfg.get("refresh_cookie")):
+        msg = "brak tokenu Decathlon GO i brak decathlon_cookie"
+        log(f"✗ Test poświadczeń: {msg} — auto-rezerwacja nie zadziała.")
+        cfg["auth_error"] = msg
+        return False
+    token, err = ensure_decathlon_token(cfg)
+    if err:
+        log(f"✗ Test poświadczeń: {err}")
+        cfg["auth_error"] = err
+        if topic:
+            notify_auth_problem(topic, err, book_url)
+        return False
+    exp = jwt_expiry(token)
+    if exp:
+        left = max(0, int(exp - time.time()))
+        when = datetime.fromtimestamp(exp, _log_tz()).strftime("%Y-%m-%d %H:%M:%S")
+        log(f"✓ Test poświadczeń: token OK, ważny do {when} (jeszcze ~{left // 60} min).")
+    else:
+        log("✓ Test poświadczeń: token pobrany (nie odczytałem daty ważności).")
+    cfg["auth_error"] = None
+    return True
+
+
 def decathlon_rpc(method, token, payload, extend=None):
     """Wywołuje endpoint RPC Decathlon GO: POST /api/v2/{method} z tokenem sesji."""
     req = urllib.request.Request(
@@ -880,6 +911,12 @@ def run_once(announce_startup=False):
     if announce_startup or prev is None:
         notify_startup(topic, len(current_ids), tz, book_url)
 
+    # Test poświadczeń Decathlon GO — NIE wymaga wolnego terminu. Uruchamiany przy
+    # starcie procesu (gdy auto_register włączone) albo na żądanie opcją test_token.
+    test_token = boolish(os.environ.get("TEST_TOKEN") or cfg.get("test_token"))
+    if (announce_startup or test_token) and (reg_cfg.get("enabled") or test_token):
+        check_decathlon_credentials(reg_cfg, topic, book_url)
+
     if prev is None:
         log("Pierwszy bieg — zapisuję baseline, bez alertów o pojedynczych terminach.")
         save_state(current_ids, decathlon_jwt=reg_cfg.get("token"))
@@ -907,10 +944,11 @@ def run_once(announce_startup=False):
     # Alert o tokenie: raz na incydent (kasowany, gdy token znów działa).
     auth_error = reg_cfg.get("auth_error")
     auth_alert_sent = bool(state_doc.get("auth_alert_sent"))
+    auth_verified = bool(candidate_ids) or reg_cfg.get("auth_checked")
     if auth_error and not auth_alert_sent:
         notify_auth_problem(topic, auth_error, book_url)
         auth_alert_sent = True
-    elif not auth_error and auth_alert_sent and candidate_ids and reg_cfg.get("enabled"):
+    elif not auth_error and auth_alert_sent and auth_verified and reg_cfg.get("enabled"):
         log("✓ Token Decathlon znów działa — kasuję alert.")
         auth_alert_sent = False
 
