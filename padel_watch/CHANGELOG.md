@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.12.1
+- Alert „Token wygasł" mówi teraz wprost: wklej świeży `go-sdk-jwt` w `decathlon_token`
+  (wcześniej odsyłał do nieaktualnego `decathlon_cookie`).
+- Usunięto martwą zmienną `DECATHLON_REFRESH_TOKEN` (nie była eksportowana w run.sh
+  ani obecna w config.yaml); rotowany `rt` i tak przychodzi z serwera i żyje w stanie.
+
 ## 1.12.0
 - **Poprawka modelu uwierzytelniania: wystarczy sam `decathlon_token` (`go-sdk-jwt`).**
   Decathlon GO trzyma auth w `localStorage`, a NIE w ciasteczku sesji — w nagłówku
