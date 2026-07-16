@@ -83,7 +83,8 @@ Okno przez północ jest OK (`15:00-02:00` = wieczór + noc do 2:00). Cały dzie
 pasujących do okna app sprawdza z podaną częstotliwością, poza nimi wg `check_interval`.
 Np. `mon-fri:15:00-02:00=30; sat-sun:08:00-22:00=30` = co 30 s wieczorami i w weekendowe
 dnie, a co `check_interval` (np. 300 s) w pozostałych porach. Puste = zawsze `check_interval`.
-Minimum 10 s. Zmiana interwału jest logowana (`⏱ aktualny interwał: ...`).
+Minimum 2 s (niższa wartość jest podbijana, z wpisem w logu; poniżej 5 s logowane jest
+ostrzeżenie — używaj tylko w wąskich oknach, bo grozi blokadą po IP). Zmiana interwału jest logowana (`⏱ aktualny interwał: ...`).
 
 ## Powiadomienia
 

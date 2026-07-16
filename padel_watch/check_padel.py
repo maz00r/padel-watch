@@ -354,7 +354,14 @@ def parse_intervals_env(spec):
         win, secs = chunk.rsplit("=", 1)
         days_part, time_part = win.split(":", 1)
         start, end = (x.strip() for x in time_part.split("-", 1))
-        seconds = max(10, int(secs))  # min 10 s — nie młócimy API
+        requested = int(secs)
+        seconds = max(MIN_INTERVAL_SECONDS, requested)
+        if seconds != requested:
+            log(f"! INTERVALS '{win.strip()}': żądano {requested}s — używam {seconds}s "
+                f"(minimum, poniżej ryzykujesz blokadę po IP).")
+        elif seconds < AGGRESSIVE_INTERVAL_SECONDS:
+            log(f"⚠ INTERVALS '{win.strip()}': {seconds}s to bardzo agresywne tempo "
+                f"(~{3600 // seconds} zapytań/h) — używaj tylko w wąskich oknach.")
         out.append({"days": parse_days(days_part), "start": start, "end": end, "seconds": seconds})
     return out
 
@@ -550,6 +557,8 @@ def register_slot(slot, listing_price, cfg, speculative=False):
 
 AUTH_FAILURE_MARKERS = ("token odrzucony", "brak tokenu")
 LATEST_FIRST_VALUES = ("latest", "last", "desc", "najpozniejszy", "najpóźniejszy")
+MIN_INTERVAL_SECONDS = 2         # twarda dolna granica INTERVALS (ochrona przed blokadą IP)
+AGGRESSIVE_INTERVAL_SECONDS = 5  # poniżej tego logujemy ostrzeżenie
 
 
 def auto_register_new_slots(slots, listing_price_by_id, cfg, already_registered):
