@@ -811,9 +811,9 @@ def notify_auth_problem(topic, detail, book_url=None):
         log("! Brak NTFY_TOPIC — pomijam alert o tokenie (tryb testowy).")
         return None
     msg = (
-        "Auto-rezerwacja NIE działa — odśwież decathlon_cookie / decathlon_token "
-        "w konfiguracji dodatku.\nMonitorowanie i powiadomienia o wolnych terminach "
-        f"działają normalnie.\n\nSzczegóły: {detail}"
+        "Auto-rezerwacja NIE działa — wklej świeży go-sdk-jwt w opcję decathlon_token "
+        "(DevTools → Application → Local Storage).\nMonitorowanie i powiadomienia o wolnych "
+        f"terminach działają normalnie.\n\nSzczegóły: {detail}"
     )
     return ntfy_post(
         topic,
@@ -857,8 +857,8 @@ def run_once(announce_startup=False):
             (state_doc or {}).get("decathlon_jwt") or "",
         ),
         "refresh_cookie": os.environ.get("DECATHLON_COOKIE") or cfg.get("decathlon_cookie") or "",
-        "refresh_token": (state_doc or {}).get("decathlon_rt")
-        or os.environ.get("DECATHLON_REFRESH_TOKEN") or cfg.get("decathlon_refresh_token") or "",
+        # rt bywa zwracany przez serwer przy odświeżaniu i zapisywany w stanie (rotacja).
+        "refresh_token": (state_doc or {}).get("decathlon_rt") or "",
         "name": os.environ.get("AUTO_REGISTER_NAME") or cfg.get("auto_register_name") or "",
         "age": os.environ.get("AUTO_REGISTER_AGE") or cfg.get("auto_register_age") or None,
         "free_only": not boolish(os.environ.get("AUTO_REGISTER_PAID") or cfg.get("auto_register_paid")),
