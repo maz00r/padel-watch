@@ -1,5 +1,5 @@
 name: Padel Watch (Decathlon)
-version: "1.9.0"
+version: "1.11.0"
 slug: padel_watch
 description: Monitoruje wolne terminy padla na Decathlon GO i wysyła powiadomienia push (ntfy.sh).
 url: https://github.com/maz00r/padel-watch
@@ -27,6 +27,7 @@ options:
   auto_register_max: 1
   auto_register_order: "earliest"
   clear_state: ""
+  test_token: false
 schema:
   ntfy_topic: str
   check_interval: int(10,3600)
@@ -44,3 +45,4 @@ schema:
   auto_register_max: int(0,10)
   auto_register_order: list(earliest|latest)
   clear_state: list(|registered|all)
+  test_token: bool

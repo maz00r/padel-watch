@@ -484,6 +484,153 @@ class TestAutoRegisterLimits(unittest.TestCase):
         self.assertEqual(calls, ["L:0"])
 
 
+class TestCookieOnlyToken(unittest.TestCase):
+    """decathlon_token jest opcjonalny — wystarczy decathlon_cookie."""
+
+    @staticmethod
+    def fresh_jwt():
+        return jwt_with_exp(int(datetime.now(timezone.utc).timestamp()) + 3600)
+
+    @staticmethod
+    def expired_jwt():
+        return jwt_with_exp(int(datetime.now(timezone.utc).timestamp()) - 10)
+
+    def test_no_token_but_cookie_fetches_one(self):
+        seen = {}
+
+        def fake_refresh(token, cookie):
+            seen["token"] = token
+            seen["cookie"] = cookie
+            return "swiezy.jwt.token"
+
+        cfg = {"token": "", "refresh_cookie": "sid=abc"}
+        with mock.patch.object(cp, "refresh_decathlon_token", fake_refresh):
+            token, err = cp.ensure_decathlon_token(cfg)
+        self.assertIsNone(err)
+        self.assertEqual(token, "swiezy.jwt.token")
+        self.assertEqual(seen["cookie"], "sid=abc")
+        self.assertEqual(seen["token"], "", "bez tokenu refresh opiera się na samym cookie")
+        self.assertEqual(cfg["token"], "swiezy.jwt.token")
+
+    def test_expired_token_refreshed_proactively(self):
+        cfg = {"token": self.expired_jwt(), "refresh_cookie": "sid=abc"}
+        with mock.patch.object(cp, "refresh_decathlon_token", lambda t, c: "nowy.jwt.token"):
+            token, err = cp.ensure_decathlon_token(cfg)
+        self.assertIsNone(err)
+        self.assertEqual(token, "nowy.jwt.token")
+
+    def test_valid_token_is_not_refreshed(self):
+        valid = self.fresh_jwt()
+        cfg = {"token": valid, "refresh_cookie": "sid=abc"}
+        with mock.patch.object(cp, "refresh_decathlon_token",
+                               side_effect=AssertionError("nie wolno odświeżać ważnego tokenu")):
+            token, err = cp.ensure_decathlon_token(cfg)
+        self.assertIsNone(err)
+        self.assertEqual(token, valid)
+
+    def test_no_token_no_cookie_is_auth_error(self):
+        token, err = cp.ensure_decathlon_token({"token": "", "refresh_cookie": ""})
+        self.assertIsNone(token)
+        self.assertIn("brak tokenu", err)
+        self.assertTrue(any(m in err for m in cp.AUTH_FAILURE_MARKERS),
+                        "musi być rozpoznane jako blad auth (przerywa przebieg)")
+
+    def test_refresh_failure_is_auth_error(self):
+        cfg = {"token": "", "refresh_cookie": "sid=abc"}
+        with mock.patch.object(cp, "refresh_decathlon_token",
+                               side_effect=urllib.error.URLError("brak sieci")):
+            token, err = cp.ensure_decathlon_token(cfg)
+        self.assertIn("nie udało się pobrać tokenu", err)
+        self.assertTrue(any(m in err for m in cp.AUTH_FAILURE_MARKERS))
+
+    def test_unparsable_token_without_cookie_is_used_as_is(self):
+        cfg = {"token": "nie-jest-jwt", "refresh_cookie": ""}
+        token, err = cp.ensure_decathlon_token(cfg)
+        self.assertEqual(token, "nie-jest-jwt")
+        self.assertIsNone(err, "nie znamy exp -> próbujemy, 401 obsłuży fallback")
+
+    def test_register_works_with_cookie_only(self):
+        slot = {"id": "L:D", "date_id": "D", "price": None,
+                "start_utc": datetime(2026, 7, 7, 10, 0, tzinfo=timezone.utc)}
+        cfg = {"token": "", "refresh_cookie": "sid=abc", "name": "Jan Kowalski", "free_only": True}
+        with mock.patch.object(cp, "refresh_decathlon_token", lambda t, c: "swiezy.jwt.token"), \
+                mock.patch.object(cp, "decathlon_rpc", lambda m, t, p: {"processState": "accepted"}):
+            ok, msg = cp.register_slot(slot, None, cfg)
+        self.assertTrue(ok, f"zapis samym cookie powinien przejść, dostałem: {msg}")
+
+    def test_refresh_omits_auth_header_when_no_token(self):
+        seen = {}
+
+        class FakeResponse(io.BytesIO):
+            headers = {"get": staticmethod(lambda n: None)}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        def fake_urlopen(req, timeout=30):
+            seen["headers"] = dict(req.header_items())
+            return FakeResponse(json.dumps({"jwt": "swiezy.jwt.token"}).encode("utf-8"))
+
+        with mock.patch.object(cp.urllib.request, "urlopen", fake_urlopen):
+            out = cp.refresh_decathlon_token("", "sid=abc")
+        self.assertEqual(out, "swiezy.jwt.token")
+        keys = {k.lower() for k in seen["headers"]}
+        self.assertIn("cookie", keys)
+        self.assertNotIn("authorization", keys, "bez tokenu nie wysyłamy pustego Bearer")
+
+
+class TestCredentialSelfTest(unittest.TestCase):
+    """Test poświadczeń działa BEZ wolnych terminów (opcja test_token / start)."""
+
+    def test_ok_reports_expiry(self):
+        exp = int(datetime.now(timezone.utc).timestamp()) + 3600
+        cfg = {"token": "", "refresh_cookie": "sid=abc"}
+        with mock.patch.object(cp, "refresh_decathlon_token", lambda t, c: jwt_with_exp(exp)), \
+                mock.patch.object(cp, "log") as fake_log:
+            ok = cp.check_decathlon_credentials(cfg)
+        self.assertTrue(ok)
+        self.assertIsNone(cfg["auth_error"])
+        joined = " ".join(str(c) for c in fake_log.call_args_list)
+        self.assertIn("token OK", joined)
+        self.assertIn("ważny do", joined, "log ma podać do kiedy token jest ważny")
+
+    def test_missing_everything_reports_and_sets_error(self):
+        cfg = {"token": "", "refresh_cookie": ""}
+        with mock.patch.object(cp, "log"):
+            ok = cp.check_decathlon_credentials(cfg)
+        self.assertFalse(ok)
+        self.assertIn("brak tokenu", cfg["auth_error"])
+
+    def test_bad_cookie_notifies(self):
+        cfg = {"token": "", "refresh_cookie": "sid=zle"}
+        with mock.patch.object(cp, "refresh_decathlon_token",
+                               side_effect=urllib.error.HTTPError("u", 401, "Unauthorized", {}, io.BytesIO(b"{}"))), \
+                mock.patch.object(cp, "notify_auth_problem") as fake_notify, \
+                mock.patch.object(cp, "log"):
+            ok = cp.check_decathlon_credentials(cfg, topic="temat")
+        self.assertFalse(ok)
+        self.assertIn("nie udało się pobrać tokenu", cfg["auth_error"])
+        fake_notify.assert_called_once()
+
+    def test_does_not_book_anything(self):
+        """Test poświadczeń nie może niczego rezerwować."""
+        cfg = {"token": "", "refresh_cookie": "sid=abc"}
+        with mock.patch.object(cp, "refresh_decathlon_token", lambda t, c: "a.b.c"), \
+                mock.patch.object(cp, "register_slot", side_effect=AssertionError("nie wolno rezerwować!")), \
+                mock.patch.object(cp, "decathlon_rpc", side_effect=AssertionError("nie wolno wołać RPC!")), \
+                mock.patch.object(cp, "log"):
+            self.assertTrue(cp.check_decathlon_credentials(cfg))
+
+    def test_marks_auth_checked(self):
+        cfg = {"token": "", "refresh_cookie": ""}
+        with mock.patch.object(cp, "log"):
+            cp.check_decathlon_credentials(cfg)
+        self.assertTrue(cfg["auth_checked"], "flaga pozwala skasować alert bez kandydatów")
+
+
 class TestPendingAfterAuthFailure(unittest.TestCase):
     """Po awarii tokenu zapamiętujemy termin(y) do ponowienia — ale nie hurtowo."""
 
