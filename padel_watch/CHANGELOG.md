@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.12.0
+- **Poprawka modelu uwierzytelniania: wystarczy sam `decathlon_token` (`go-sdk-jwt`).**
+  Decathlon GO trzyma auth w `localStorage`, a NIE w ciasteczku sesji — w nagłówku
+  `Cookie` są wyłącznie Google Analytics/Hotjar. Wcześniejsze `decathlon_cookie` było
+  oparte na błędnym założeniu i nie mogło działać.
+- Refresh odwzorowuje teraz wywołanie aplikacji Decathlona: `Authorization: Bearer
+  <obecny jwt>` + `unsafeRefreshToken` w body (gdy `go-unsafe-rt` istnieje). Poświadczeniem
+  jest sam JWT, więc odświeżanie działa **bez cookie**.
+- Rotowany refresh token (`rt` z odpowiedzi) jest zapamiętywany w `state.json` i odsyłany
+  przy kolejnym odświeżeniu.
+- Czytelniejsze komunikaty: `brak tokenu Decathlon GO (wklej go-sdk-jwt w decathlon_token)`
+  oraz `token odrzucony (HTTP 401) — wklej świeży go-sdk-jwt`.
+- `decathlon_cookie` zostaje jako opcja awaryjna, ale zwykle jest niepotrzebne.
+
 ## 1.11.0
 - **Nowa opcja `test_token`**: test poświadczeń Decathlon GO **bez wolnego terminu**.
   Przy starcie app próbuje pobrać token i loguje wynik wraz z datą ważności

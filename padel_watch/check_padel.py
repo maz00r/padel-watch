@@ -106,12 +106,15 @@ def write_state_doc(doc):
         f.write("\n")
 
 
-def save_state(free_ids, registered_ids=None, decathlon_jwt=None, pending_ids=None, auth_alert_sent=None):
+def save_state(free_ids, registered_ids=None, decathlon_jwt=None, pending_ids=None,
+               auth_alert_sent=None, decathlon_rt=None):
     old = load_state_doc() or {}
     if registered_ids is None:
         registered_ids = set(old.get("registered_ids", []))
     if decathlon_jwt is None:
         decathlon_jwt = old.get("decathlon_jwt")
+    if decathlon_rt is None:
+        decathlon_rt = old.get("decathlon_rt")
     if pending_ids is None:
         pending_ids = old.get("pending_ids", [])
     if auth_alert_sent is None:
@@ -119,6 +122,8 @@ def save_state(free_ids, registered_ids=None, decathlon_jwt=None, pending_ids=No
     doc = {"free_ids": sorted(free_ids), "registered_ids": sorted(registered_ids)}
     if decathlon_jwt:
         doc["decathlon_jwt"] = clean_decathlon_token(decathlon_jwt)
+    if decathlon_rt:
+        doc["decathlon_rt"] = decathlon_rt
     if pending_ids:
         doc["pending_ids"] = sorted(pending_ids)  # terminy do ponowienia po naprawie tokenu
     if auth_alert_sent:
@@ -434,29 +439,36 @@ def newer_decathlon_token(config_token, state_token):
     return state_token if jwt_expiry(state_token) > jwt_expiry(config_token) else config_token
 
 
-def refresh_decathlon_token(token, cookie):
-    """Pozyskuje świeży JWT z /api/auth/refresh na podstawie cookie sesji.
+def refresh_decathlon_token(token, cookie=None, refresh_token=None):
+    """Pozyskuje świeży JWT z /api/auth/refresh — dokładnie jak aplikacja Decathlon GO.
 
-    To cookie uwierzytelnia refresh (aplikacja Decathlona woła go z withCredentials).
-    Nagłówek Authorization dokładamy tylko, gdy mamy jakiś token — przy jego braku
-    (albo gdy jest wygasły) refresh i tak opiera się na cookie.
+    Odwzorowuje jej wywołanie:
+        headers: Authorization: Bearer <obecny go-sdk-jwt>
+        data:    { unsafeRefreshToken: <go-unsafe-rt> }   # tylko gdy istnieje
+        withCredentials: true                              # cookies, jeśli są
+    W GO poświadczeniem jest zwykle SAM JWT (localStorage 'go-sdk-jwt') — nie ma
+    ciasteczka sesji ani 'go-unsafe-rt'. Cookie i refresh_token są opcjonalne.
+    Zwraca (jwt, rt) — serwer bywa, że rotuje refresh token.
     """
+    token = clean_decathlon_token(token)
     cookie = (cookie or "").strip()
-    if not cookie:
-        raise ValueError("brak cookie sesji Decathlon GO")
+    refresh_token = (refresh_token or "").strip()
+    if not (token or cookie or refresh_token):
+        raise ValueError("brak poświadczeń Decathlon GO (token/cookie/refresh token)")
     headers = {
         "User-Agent": UA,
         "Accept": "application/json",
         "Content-Type": "application/json",
         "Accept-Encoding": "gzip",
-        "Cookie": cookie,
     }
-    token = clean_decathlon_token(token)
     if token:
         headers["Authorization"] = f"Bearer {token}"
+    if cookie:
+        headers["Cookie"] = cookie
+    body = {"unsafeRefreshToken": refresh_token} if refresh_token else {}
     req = urllib.request.Request(
         f"{DECATHLON_API_URL}/auth/refresh",
-        data=json.dumps({}).encode("utf-8"),
+        data=json.dumps(body).encode("utf-8"),
         headers=headers,
         method="POST",
     )
@@ -468,36 +480,39 @@ def refresh_decathlon_token(token, cookie):
     refreshed = clean_decathlon_token(doc.get("jwt"))
     if not refreshed:
         raise ValueError("Decathlon GO nie zwrócił nowego JWT")
-    return refreshed
+    return refreshed, (doc.get("rt") or "").strip()
 
 
 def ensure_decathlon_token(cfg):
-    """Zwraca (token, błąd). Sam pozyskuje/odświeża JWT na podstawie cookie.
+    """Zwraca (token, błąd). Utrzymuje JWT przy życiu, odświeżając go PROAKTYWNIE.
 
-    Dzięki temu `decathlon_token` jest OPCJONALNY — wystarczy `decathlon_cookie`:
-    - brak tokenu + cookie      -> pobieramy świeży JWT,
-    - token wygasa/wygasł + cookie -> odświeżamy PROAKTYWNIE (bez czekania na 401),
-    - token ważny               -> używamy bez ruchu sieciowego,
-    - nie umiemy odczytać `exp`  -> próbujemy jak jest (401 obsłuży fallback).
+    W Decathlon GO poświadczeniem jest sam JWT (localStorage `go-sdk-jwt`) — wklejasz
+    go RAZ, a dodatek odnawia go zanim wygaśnie, więc łańcuch trwa dopóki działa:
+    - token ważny            -> używamy bez ruchu sieciowego,
+    - token wygasa/wygasł    -> refresh (JWT + opcjonalnie cookie/refresh token),
+    - nie umiemy odczytać exp -> próbujemy jak jest (401 obsłuży fallback).
     """
     token = clean_decathlon_token(cfg.get("token"))
     cookie = (cfg.get("refresh_cookie") or "").strip()
+    rt = (cfg.get("refresh_token") or "").strip()
     exp = jwt_expiry(token) if token else 0
     expired = bool(token) and exp > 0 and exp <= time.time() + TOKEN_EXPIRY_MARGIN
     if token and not expired:
         return token, None
-    if not cookie:
-        if token:
-            return token, None  # wygasły, ale spróbujmy — 401 i tak jest obsłużone
-        return None, "brak tokenu Decathlon GO i brak decathlon_cookie"
+    if not (token or cookie or rt):
+        return None, "brak tokenu Decathlon GO (wklej go-sdk-jwt w decathlon_token)"
     try:
-        fresh = refresh_decathlon_token(token, cookie)
+        fresh, new_rt = refresh_decathlon_token(token, cookie, rt)
     except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ValueError) as e:
-        return (token or None), f"nie udało się pobrać tokenu cookiem: {e!r}"
+        if token and not expired:
+            return token, None
+        return (token or None), f"nie udało się odświeżyć tokenu: {e!r}"
     cfg["token"] = fresh
     cfg["token_refreshed"] = True
-    log("~ Pobrano świeży token Decathlon GO na podstawie cookie."
-        if not token else "~ Token Decathlon GO wygasał — odświeżony cookiem.")
+    if new_rt:
+        cfg["refresh_token"] = new_rt  # serwer rotuje refresh token — zapamiętaj nowy
+    log("~ Token Decathlon GO wygasał — odświeżony." if token
+        else "~ Pobrano świeży token Decathlon GO.")
     return fresh, None
 
 
@@ -509,8 +524,8 @@ def check_decathlon_credentials(cfg, topic=None, book_url=None):
     czy cookie działa i do kiedy token jest ważny.
     """
     cfg["auth_checked"] = True
-    if not (cfg.get("token") or cfg.get("refresh_cookie")):
-        msg = "brak tokenu Decathlon GO i brak decathlon_cookie"
+    if not (cfg.get("token") or cfg.get("refresh_cookie") or cfg.get("refresh_token")):
+        msg = "brak tokenu Decathlon GO (wklej go-sdk-jwt w decathlon_token)"
         log(f"✗ Test poświadczeń: {msg} — auto-rezerwacja nie zadziała.")
         cfg["auth_error"] = msg
         return False
@@ -603,17 +618,21 @@ def register_slot(slot, listing_price, cfg, speculative=False):
                     e.close()
                 except Exception:  # noqa: BLE001
                     pass
-            if e.code == 401 and attempt == 0 and cfg.get("refresh_cookie"):
+            if e.code == 401 and attempt == 0:
                 try:
-                    token = refresh_decathlon_token(token, cfg.get("refresh_cookie"))
+                    token, new_rt = refresh_decathlon_token(
+                        token, cfg.get("refresh_cookie"), cfg.get("refresh_token")
+                    )
                     cfg["token"] = token
                     cfg["token_refreshed"] = True
+                    if new_rt:
+                        cfg["refresh_token"] = new_rt
                     log("~ Token Decathlon GO odświeżony po HTTP 401; ponawiam rejestrację")
                     continue
                 except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ValueError) as refresh_error:
                     return False, f"token odrzucony (HTTP 401), refresh nieudany: {refresh_error!r}"
             if e.code in (401, 403):
-                return False, f"token odrzucony (HTTP {e.code}) — sprawdź decathlon_cookie / token"
+                return False, f"token odrzucony (HTTP {e.code}) — wklej świeży go-sdk-jwt"
             return False, f"Decathlon HTTP {e.code}: {detail or e.reason}"
         except (urllib.error.URLError, TimeoutError) as e:
             return False, f"Decathlon niedostępny: {e!r}"
@@ -625,7 +644,7 @@ def register_slot(slot, listing_price, cfg, speculative=False):
     return True, state or "zarejestrowano"
 
 
-AUTH_FAILURE_MARKERS = ("token odrzucony", "brak tokenu", "nie udało się pobrać tokenu")
+AUTH_FAILURE_MARKERS = ("token odrzucony", "brak tokenu", "nie udało się odświeżyć tokenu")
 TOKEN_EXPIRY_MARGIN = 60  # odśwież JWT, gdy zostało mniej niż tyle sekund ważności
 LATEST_FIRST_VALUES = ("latest", "last", "desc", "najpozniejszy", "najpóźniejszy")
 MIN_INTERVAL_SECONDS = 2         # twarda dolna granica INTERVALS (ochrona przed blokadą IP)
@@ -838,6 +857,8 @@ def run_once(announce_startup=False):
             (state_doc or {}).get("decathlon_jwt") or "",
         ),
         "refresh_cookie": os.environ.get("DECATHLON_COOKIE") or cfg.get("decathlon_cookie") or "",
+        "refresh_token": (state_doc or {}).get("decathlon_rt")
+        or os.environ.get("DECATHLON_REFRESH_TOKEN") or cfg.get("decathlon_refresh_token") or "",
         "name": os.environ.get("AUTO_REGISTER_NAME") or cfg.get("auto_register_name") or "",
         "age": os.environ.get("AUTO_REGISTER_AGE") or cfg.get("auto_register_age") or None,
         "free_only": not boolish(os.environ.get("AUTO_REGISTER_PAID") or cfg.get("auto_register_paid")),
@@ -919,7 +940,8 @@ def run_once(announce_startup=False):
 
     if prev is None:
         log("Pierwszy bieg — zapisuję baseline, bez alertów o pojedynczych terminach.")
-        save_state(current_ids, decathlon_jwt=reg_cfg.get("token"))
+        save_state(current_ids, decathlon_jwt=reg_cfg.get("token"),
+                   decathlon_rt=reg_cfg.get("refresh_token"))
         return 0
 
     new_ids = current_ids - prev
@@ -976,6 +998,7 @@ def run_once(announce_startup=False):
         reg_cfg.get("token"),
         pending_ids=reg_cfg.get("pending_ids") or [],
         auth_alert_sent=auth_alert_sent,
+        decathlon_rt=reg_cfg.get("refresh_token"),
     )
     return 0
 
