@@ -27,8 +27,8 @@ pojawi się **nowy wolny termin** w wybranych godzinach.
 | `timezone` | strefa czasowa filtrów i logów | `Europe/Warsaw` |
 | `auto_register` | próba automatycznego zapisu na nowy termin | `false` |
 | `auto_register_dry_run` | testuje zapis bez tworzenia rezerwacji | `true` |
-| `decathlon_cookie` | **cookie sesji Decathlon GO — to wystarczy**, app sam pobiera i odnawia token | `connect.sid=...` |
-| `decathlon_token` | **opcjonalny** JWT (`go-sdk-jwt`). Podaj tylko, jeśli nie chcesz dawać cookie — wygasa po kilku godzinach i trzeba go wklejać ręcznie | `eyJ...` |
+| `decathlon_token` | **JWT z localStorage (`go-sdk-jwt`) — to wystarczy**, app sam go odnawia | `eyJ...` |
+| `decathlon_cookie` | opcjonalne; zwykle **niepotrzebne** — GO nie używa ciasteczka sesji | `` |
 | `auto_register_name` | imię i nazwisko uczestnika wysyłane w rezerwacji | `Jan Kowalski` |
 | `auto_register_age` | wiek uczestnika, jeśli wydarzenie go wymaga | `34` |
 | `auto_register_paid` | pozwól tworzyć transakcje także dla płatnych terminów; płatność nadal trzeba dokończyć ręcznie | `false` |
@@ -46,16 +46,16 @@ pojawi się **nowy wolny termin** w wybranych godzinach.
 
 ### Gdy token przestanie działać
 
-JWT Decathlona żyje krótko, ale przy podanym `decathlon_cookie` app **sam go odnawia**
-(`/api/auth/refresh`) i zapisuje w stanie — cookie wklejasz raz i zwykle starcza na długo.
-Gdy jednak i cookie wygaśnie:
+JWT Decathlona żyje krótko, ale app **sam go odnawia** (`/api/auth/refresh`) i zapisuje
+w stanie — wklejasz go raz. Gdy jednak łańcuch odnowień się urwie (np. dodatek był długo
+wyłączony):
 
 - dostaniesz **push ntfy „⚠️ Token Decathlon wygasł"** (raz na incydent, nie co minutę),
-- w logu zobaczysz `token odrzucony (HTTP 401) — sprawdź decathlon_cookie / token`,
+- w logu zobaczysz `token odrzucony (HTTP 401) — wklej świeży go-sdk-jwt`,
 - **monitorowanie i powiadomienia o wolnych terminach działają dalej normalnie** —
   po prostu zarezerwujesz ręcznie z linku w powiadomieniu,
 - termin, którego nie udało się zająć, jest **zapamiętany i ponawiany** po wklejeniu
-  świeżego cookie (max tyle terminów, ile i tak zapisałby `auto_register_max`).
+  świeżego tokenu (max tyle terminów, ile i tak zapisałby `auto_register_max`).
 
 ### Czyszczenie zapisanych terminów (`clear_state`)
 
@@ -99,36 +99,47 @@ Automatyczna rejestracja jest domyślnie wyłączona. Po włączeniu app tworzy 
 Decathlon GO (`/api/v2/transactions.create`) dla terminów, które przeszły filtry czasu —
 wymaga to sesji zalogowanego użytkownika.
 
-### Wystarczy samo cookie (token jest opcjonalny)
+### Wystarczy sam token (`go-sdk-jwt`)
 
-Podaj **tylko `decathlon_cookie`** — wartość nagłówka `Cookie` z zalogowanej strony
-Decathlon GO. App sam:
+Decathlon GO trzyma uwierzytelnienie w **localStorage**, nie w ciasteczku — dlatego
+potrzebna jest jedna wartość: **`go-sdk-jwt`**.
 
-1. pobierze świeży JWT z `/api/auth/refresh` (to cookie uwierzytelnia refresh),
-2. sprawdzi `exp` tokenu i **odświeży go proaktywnie**, zanim wygaśnie,
-3. zapisze token w `/data/state.json`, więc przeżyje restart,
-4. w razie `401` odświeży i ponowi próbę.
+**Skąd ją wziąć:** zalogowane `go.decathlon.pl` → DevTools → **Application**
+(Firefox: **Storage**) → **Local Storage** → `https://go.decathlon.pl` → klucz
+**`go-sdk-jwt`** → skopiuj wartość do opcji `decathlon_token`.
 
-JWT (`go-sdk-jwt`) żyje krótko, więc wklejanie go ręcznie ma sens tylko jako jednorazowy
-test — `decathlon_token` zostawiliśmy jako opcję, ale przy podanym cookie jest zbędny.
+Dalej app radzi sobie sam:
 
-**Skąd wziąć cookie:** zalogowana strona `go.decathlon.pl` → DevTools → **Network** →
-dowolne żądanie do `go.decathlon.pl` → **Request Headers** → skopiuj wartość `Cookie`.
+1. sprawdza `exp` tokenu i **odświeża go proaktywnie**, zanim wygaśnie
+   (`/api/auth/refresh` z `Authorization: Bearer <obecny jwt>` — dokładnie jak robi to
+   strona Decathlona),
+2. zapisuje świeży JWT w `/data/state.json`, więc przeżywa restart,
+3. jeśli serwer zwróci rotowany refresh token (`rt`), też go zapamiętuje i odsyła,
+4. w razie `401` odświeża i ponawia próbę.
 
-### Sprawdzenie cookie bez czekania na wolny termin (`test_token`)
+Dzięki temu **wklejasz JWT raz** — łańcuch odnowień trwa, dopóki dodatek działa.
 
-Nie musisz czekać, aż kort się zwolni, żeby zweryfikować poświadczenia:
+> **Kiedy trzeba wkleić ponownie?** Gdy dodatek jest zatrzymany dłużej niż żywotność
+> tokenu, łańcuch się urywa. Dostaniesz wtedy push „⚠️ Token Decathlon wygasł" i wklejasz
+> świeży `go-sdk-jwt`. Przy działającym dodatku nie powinno się to zdarzać.
+
+> `decathlon_cookie` zostało jako opcja awaryjna, ale w GO **nie ma ciasteczka sesji** —
+> w nagłówku `Cookie` znajdziesz wyłącznie Google Analytics i Hotjar. Zostaw puste.
+
+### Sprawdzenie tokenu bez czekania na wolny termin (`test_token`)
+
+Nie musisz czekać, aż kort się zwolni, żeby sprawdzić, czy token działa:
 
 1. **Konfiguracja** → `test_token: true` → **Zapisz** → **Uruchom ponownie**.
 2. W **Dzienniku** zobaczysz jeden z wpisów:
 
 ```
 ✓ Test poświadczeń: token OK, ważny do 2026-07-16 12:41:03 (jeszcze ~118 min).
-✗ Test poświadczeń: nie udało się pobrać tokenu cookiem: <HTTPError 401: 'Unauthorized'>
-✗ Test poświadczeń: brak tokenu Decathlon GO i brak decathlon_cookie — auto-rezerwacja nie zadziała.
+✗ Test poświadczeń: nie udało się odświeżyć tokenu: <HTTPError 401: 'Unauthorized'>
+✗ Test poświadczeń: brak tokenu Decathlon GO (wklej go-sdk-jwt w decathlon_token)
 ```
 
-3. Gdy zobaczysz `✓`, możesz wyłączyć `test_token` i włączyć `auto_register`.
+3. Gdy zobaczysz `✓`, wyłącz `test_token` i włącz `auto_register`.
 
 Test **niczego nie rezerwuje** — tylko pobiera token. Działa nawet przy zerowej liczbie
 wolnych terminów i przy wyłączonej auto-rejestracji. Gdy `auto_register` jest włączone,
