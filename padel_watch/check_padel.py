@@ -106,15 +106,23 @@ def write_state_doc(doc):
         f.write("\n")
 
 
-def save_state(free_ids, registered_ids=None, decathlon_jwt=None):
+def save_state(free_ids, registered_ids=None, decathlon_jwt=None, pending_ids=None, auth_alert_sent=None):
     old = load_state_doc() or {}
     if registered_ids is None:
         registered_ids = set(old.get("registered_ids", []))
     if decathlon_jwt is None:
         decathlon_jwt = old.get("decathlon_jwt")
+    if pending_ids is None:
+        pending_ids = old.get("pending_ids", [])
+    if auth_alert_sent is None:
+        auth_alert_sent = old.get("auth_alert_sent", False)
     doc = {"free_ids": sorted(free_ids), "registered_ids": sorted(registered_ids)}
     if decathlon_jwt:
         doc["decathlon_jwt"] = clean_decathlon_token(decathlon_jwt)
+    if pending_ids:
+        doc["pending_ids"] = sorted(pending_ids)  # terminy do ponowienia po naprawie tokenu
+    if auth_alert_sent:
+        doc["auth_alert_sent"] = True            # nie spamuj alertem o tokenie co iterację
     if old.get("clear_state_applied"):
         doc["clear_state_applied"] = old["clear_state_applied"]  # znacznik musi przetrwać zapis
     write_state_doc(doc)
@@ -580,6 +588,8 @@ def auto_register_new_slots(slots, listing_price_by_id, cfg, already_registered)
         log("! Auto-rejestracja: limit auto_register_max=0 — pomijam wszystkie.")
         return results, registered
 
+    cfg["auth_error"] = None
+    cfg["pending_ids"] = []
     done = 0
     skipped = []
     for slot in todo:
@@ -599,10 +609,14 @@ def auto_register_new_slots(slots, listing_price_by_id, cfg, already_registered)
                 log(f"✓ Auto-rejestracja: {when} — {msg}")
             continue
         # Twardy błąd autoryzacji -> nie ma sensu próbować kolejnych slotów w tym przebiegu.
+        # Zapamiętujemy tylko tyle terminów, ile i tak byśmy zapisali (limit), żeby po
+        # naprawieniu tokenu ponowić próbę — bez hurtowego nadrabiania zaległości.
         if any(m in msg for m in AUTH_FAILURE_MARKERS):
-            remaining = [fmt_when(s["start_utc"].astimezone(_log_tz()), short=True)
-                         for s in todo if s["id"] not in results]
-            log(f"! Auto-rejestracja przerwana ({msg}). Pominięto {len(remaining)} termin(y) w tym przebiegu.")
+            cfg["auth_error"] = msg
+            cfg["pending_ids"] = [s["id"] for s in todo[:limit]]
+            waiting = [fmt_when(s["start_utc"].astimezone(_log_tz()), short=True) for s in todo[:limit]]
+            log(f"! Auto-rejestracja przerwana ({msg}). "
+                f"Zapamiętano do ponowienia: {', '.join(waiting)}.")
             return results, registered
         log(f"! Auto-rejestracja nieudana dla {when}: {msg}")
 
@@ -690,6 +704,26 @@ def notify_new(topic, slots, tz, listing_price, book_url, registration_results=N
         if status is None:
             failed.add(s["id"])
     return failed
+
+
+def notify_auth_problem(topic, detail, book_url=None):
+    """Alert, że auto-rezerwacja nie działa przez token/cookie (raz na incydent)."""
+    if not topic:
+        log("! Brak NTFY_TOPIC — pomijam alert o tokenie (tryb testowy).")
+        return None
+    msg = (
+        "Auto-rezerwacja NIE działa — odśwież decathlon_cookie / decathlon_token "
+        "w konfiguracji dodatku.\nMonitorowanie i powiadomienia o wolnych terminach "
+        f"działają normalnie.\n\nSzczegóły: {detail}"
+    )
+    return ntfy_post(
+        topic,
+        "⚠️ Token Decathlon wygasł",
+        msg,
+        click=book_url,
+        priority="high",
+        tags="warning",
+    )
 
 
 def notify_startup(topic, count, tz, book_url=None):
@@ -806,12 +840,34 @@ def run_once(announce_startup=False):
     failed_ids = set()
     registered_ids = load_registered_ids()
     registration_results = {}
+
+    # Auto-rejestracja: kandydaci to NOWE terminy + te zapamiętane po awarii tokenu
+    # (pending), o ile nadal są wolne i jeszcze niezapisane. Dzięki temu naprawienie
+    # cookie sprawia, że automat dogoni termin, którego wcześniej nie mógł zająć.
+    pending_prev = set(state_doc.get("pending_ids", []))
+    candidate_ids = ((new_ids | pending_prev) & current_ids) - registered_ids
+    retried = (pending_prev & candidate_ids) - new_ids
+    if candidate_ids and reg_cfg.get("enabled"):
+        if retried:
+            log(f"↻ Ponawiam auto-rejestrację dla {len(retried)} zapamiętanego(-ych) "
+                f"terminu(-ów) po wcześniejszym błędzie tokenu.")
+        registration_results, registered_ids = auto_register_new_slots(
+            [current[i] for i in candidate_ids], listing_price_by_id, reg_cfg, registered_ids
+        )
+
+    # Alert o tokenie: raz na incydent (kasowany, gdy token znów działa).
+    auth_error = reg_cfg.get("auth_error")
+    auth_alert_sent = bool(state_doc.get("auth_alert_sent"))
+    if auth_error and not auth_alert_sent:
+        notify_auth_problem(topic, auth_error, book_url)
+        auth_alert_sent = True
+    elif not auth_error and auth_alert_sent and candidate_ids and reg_cfg.get("enabled"):
+        log("✓ Token Decathlon znów działa — kasuję alert.")
+        auth_alert_sent = False
+
     if new_ids:
         log(f"NOWE wolne terminy: {len(new_ids)}")
         new_slots = sorted((current[i] for i in new_ids), key=lambda x: x["start_utc"])
-        registration_results, registered_ids = auto_register_new_slots(
-            new_slots, listing_price_by_id, reg_cfg, registered_ids
-        )
         # grupuj powiadomienia per listing (book_url)
         by_url = {}
         for s in new_slots:
@@ -827,7 +883,13 @@ def run_once(announce_startup=False):
 
     # Sloty z nieudaną wysyłką NIE trafiają do stanu -> następna iteracja
     # potraktuje je znów jako nowe i ponowi powiadomienie.
-    save_state(current_ids - failed_ids, registered_ids, reg_cfg.get("token"))
+    save_state(
+        current_ids - failed_ids,
+        registered_ids,
+        reg_cfg.get("token"),
+        pending_ids=reg_cfg.get("pending_ids") or [],
+        auth_alert_sent=auth_alert_sent,
+    )
     return 0
 
 

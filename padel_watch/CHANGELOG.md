@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.8.0
+- **Alert ntfy, gdy token/cookie Decathlon przestanie działać** ("⚠️ Token Decathlon
+  wygasł") — raz na incydent, kasowany gdy token znów działa. Wcześniej o awarii
+  auto-rezerwacji dowiadywałeś się tylko z logów HA.
+- **Ponawianie po naprawie tokenu:** termin, którego nie udało się zarezerwować przez
+  błąd autoryzacji, jest zapamiętywany (`pending_ids`) i ponawiany w kolejnych
+  przebiegach — także gdy nie ma już "nowych" terminów. Wcześniej taki termin był
+  trwale pomijany, mimo że dalej był wolny.
+- Zapamiętywane jest maksymalnie tyle terminów, ile i tak zapisałby `auto_register_max`,
+  więc naprawa tokenu nie powoduje hurtowego nadrabiania zaległości.
+- Monitorowanie i powiadomienia o wolnych terminach nigdy nie zależą od tokenu.
+
 ## 1.7.0
 - **Nowa opcja `auto_register_order`** (`earliest` | `latest`): kolejność prób zapisu.
   `latest` = zaczyna od najpóźniejszego wolnego terminu. Domyślnie `earliest`.

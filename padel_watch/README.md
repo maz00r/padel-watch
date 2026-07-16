@@ -43,6 +43,19 @@ pojawi się **nowy wolny termin** w wybranych godzinach.
 > (`speculative`), niczego nie rezerwując. Dopiero gdy w logach zobaczysz
 > `~ Auto-rejestracja (test, bez rezerwacji): … walidacja OK`, przełącz `dry_run` na `false`.
 
+### Gdy token przestanie działać
+
+JWT Decathlona żyje krótko, ale przy podanym `decathlon_cookie` app **sam go odnawia**
+(`/api/auth/refresh`) i zapisuje w stanie — cookie wklejasz raz i zwykle starcza na długo.
+Gdy jednak i cookie wygaśnie:
+
+- dostaniesz **push ntfy „⚠️ Token Decathlon wygasł"** (raz na incydent, nie co minutę),
+- w logu zobaczysz `token odrzucony (HTTP 401) — sprawdź decathlon_cookie / token`,
+- **monitorowanie i powiadomienia o wolnych terminach działają dalej normalnie** —
+  po prostu zarezerwujesz ręcznie z linku w powiadomieniu,
+- termin, którego nie udało się zająć, jest **zapamiętany i ponawiany** po wklejeniu
+  świeżego cookie (max tyle terminów, ile i tak zapisałby `auto_register_max`).
+
 ### Czyszczenie zapisanych terminów (`clear_state`)
 
 App pamięta w `state.json` (katalog `/data` dodatku), na które terminy już się zapisał —

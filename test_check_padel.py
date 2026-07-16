@@ -9,7 +9,7 @@ import sys
 import tempfile
 import unittest
 import urllib.error
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest import mock
 from zoneinfo import ZoneInfo
 
@@ -459,6 +459,83 @@ class TestAutoRegisterLimits(unittest.TestCase):
         cfg = {"enabled": True, "max_per_run": 1, "order": "bzdura"}
         calls, _, _ = self.run_auto(self.slots(3), cfg, lambda s: (True, "ok"))
         self.assertEqual(calls, ["L:0"])
+
+
+class TestPendingAfterAuthFailure(unittest.TestCase):
+    """Po awarii tokenu zapamiętujemy termin(y) do ponowienia — ale nie hurtowo."""
+
+    @staticmethod
+    def slots(n):
+        base = datetime(2026, 7, 7, 9, 0, tzinfo=timezone.utc)
+        return [
+            {"id": f"L:{i}", "listing_id": "L", "date_id": f"D{i}",
+             "start_utc": base + timedelta(hours=i), "price": None}
+            for i in range(n)
+        ]
+
+    def test_auth_failure_records_pending_limited_to_max(self):
+        cfg = {"enabled": True, "max_per_run": 1}
+        with mock.patch.object(cp, "register_slot", lambda *a, **k: (False, "token odrzucony (HTTP 401)")):
+            cp.auto_register_new_slots(self.slots(30), {}, cfg, set())
+        self.assertEqual(cfg["auth_error"], "token odrzucony (HTTP 401)")
+        self.assertEqual(cfg["pending_ids"], ["L:0"],
+                         "zapamiętujemy tylko tyle, ile zapisalibyśmy (max_per_run)")
+
+    def test_pending_respects_latest_order(self):
+        cfg = {"enabled": True, "max_per_run": 2, "order": "latest"}
+        with mock.patch.object(cp, "register_slot", lambda *a, **k: (False, "brak tokenu Decathlon GO")):
+            cp.auto_register_new_slots(self.slots(5), {}, cfg, set())
+        self.assertEqual(cfg["pending_ids"], ["L:4", "L:3"])
+
+    def test_success_clears_pending_and_auth_error(self):
+        cfg = {"enabled": True, "max_per_run": 1}
+        with mock.patch.object(cp, "register_slot", lambda *a, **k: (True, "accepted")):
+            cp.auto_register_new_slots(self.slots(3), {}, cfg, set())
+        self.assertIsNone(cfg["auth_error"])
+        self.assertEqual(cfg["pending_ids"], [])
+
+    def test_non_auth_failure_is_not_pending(self):
+        cfg = {"enabled": True, "max_per_run": 1}
+        with mock.patch.object(cp, "register_slot", lambda *a, **k: (False, "termin płatny — pomijam")):
+            cp.auto_register_new_slots(self.slots(2), {}, cfg, set())
+        self.assertIsNone(cfg["auth_error"])
+        self.assertEqual(cfg["pending_ids"], [], "płatny termin nie jest 'do ponowienia'")
+
+
+class TestStatePendingAndAlert(unittest.TestCase):
+    """Trwałość pending_ids / auth_alert_sent w state.json."""
+
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        self.addCleanup(self.td.cleanup)
+        self.path = os.path.join(self.td.name, "state.json")
+        p = mock.patch.object(cp, "STATE_PATH", self.path)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def read(self):
+        with open(self.path, encoding="utf-8") as f:
+            return json.load(f)
+
+    def test_pending_and_alert_persisted(self):
+        cp.save_state({"L:1"}, set(), pending_ids=["L:1"], auth_alert_sent=True)
+        d = self.read()
+        self.assertEqual(d["pending_ids"], ["L:1"])
+        self.assertTrue(d["auth_alert_sent"])
+
+    def test_pending_carried_over_when_not_passed(self):
+        cp.save_state({"L:1"}, set(), pending_ids=["L:1"], auth_alert_sent=True)
+        cp.save_state({"L:1", "L:2"})  # bez podania -> ma przenieść poprzednie
+        d = self.read()
+        self.assertEqual(d["pending_ids"], ["L:1"])
+        self.assertTrue(d["auth_alert_sent"])
+
+    def test_alert_cleared_explicitly(self):
+        cp.save_state({"L:1"}, set(), pending_ids=["L:1"], auth_alert_sent=True)
+        cp.save_state({"L:1"}, set(), pending_ids=[], auth_alert_sent=False)
+        d = self.read()
+        self.assertNotIn("pending_ids", d)
+        self.assertNotIn("auth_alert_sent", d)
 
 
 class TestClearState(unittest.TestCase):
