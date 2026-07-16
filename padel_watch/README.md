@@ -33,6 +33,8 @@ pojawi się **nowy wolny termin** w wybranych godzinach.
 | `auto_register_age` | wiek uczestnika, jeśli wydarzenie go wymaga | `34` |
 | `auto_register_paid` | pozwól tworzyć transakcje także dla płatnych terminów; płatność nadal trzeba dokończyć ręcznie | `false` |
 | `auto_register_max` | ile terminów maksymalnie zapisać w jednym przebiegu (0–10); `0` = nic | `1` |
+| `auto_register_order` | kolejność prób: `earliest` (od najwcześniejszego) lub `latest` (od najpóźniejszego) | `earliest` |
+| `clear_state` | jednorazowe czyszczenie stanu: `registered` lub `all`; puste = nic nie rób | `` |
 
 > **Bezpieczniki auto-rejestracji.** Domyślnie `auto_register_max: 1`, więc gdy pojawi się
 > naraz wiele wolnych terminów, zapis obejmie tylko **najwcześniejszy** — reszta poczeka na
@@ -40,6 +42,26 @@ pojawi się **nowy wolny termin** w wybranych godzinach.
 > Zacznij od `auto_register_dry_run: true` — wtedy app tylko **waliduje** zapis
 > (`speculative`), niczego nie rezerwując. Dopiero gdy w logach zobaczysz
 > `~ Auto-rejestracja (test, bez rezerwacji): … walidacja OK`, przełącz `dry_run` na `false`.
+
+### Czyszczenie zapisanych terminów (`clear_state`)
+
+App pamięta w `state.json` (katalog `/data` dodatku), na które terminy już się zapisał —
+dzięki temu nie próbuje drugi raz. Jeśli **anulowałeś rezerwację** i chcesz, by app mógł
+zapisać się ponownie, wyczyść tę listę:
+
+1. **Konfiguracja** → `clear_state` ustaw na **`registered`** → **Zapisz** → **Uruchom ponownie**.
+2. W **Dzienniku** zobaczysz: `🧹 Wyczyszczono listę zapisanych terminów (N szt.)`.
+3. Możesz zostawić opcję ustawioną — czyszczenie działa **jednorazowo** i nie powtórzy się
+   przy kolejnych restartach.
+
+| Wartość | Co czyści |
+|---------|-----------|
+| `registered` | tylko listę zapisanych terminów (śledzone terminy i token zostają) |
+| `all` | cały stan: zapisane + śledzone terminy **oraz zapisany token** |
+
+> Żeby wyczyścić **ponownie** tą samą opcją, zmień wartość (np. na puste i z powrotem) —
+> to celowe, żeby włączona opcja nie kasowała stanu przy każdym restarcie.
+> Po `all` pierwszy przebieg zapisze nowy baseline (bez alertów o istniejących terminach).
 
 **`filters`:** DNI to zakres (`mon-fri`) lub lista (`sat,sun`); dni: `mon tue wed thu fri sat sun`.
 Okno przez północ jest OK (`15:00-02:00` = wieczór + noc do 2:00). Cały dzień = `00:00-24:00`.

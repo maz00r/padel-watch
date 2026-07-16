@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.7.0
+- **Nowa opcja `auto_register_order`** (`earliest` | `latest`): kolejność prób zapisu.
+  `latest` = zaczyna od najpóźniejszego wolnego terminu. Domyślnie `earliest`.
+- **Nowa opcja `clear_state`** (`registered` | `all`): jednorazowe wyczyszczenie stanu.
+  `registered` kasuje listę zapisanych terminów (śledzone terminy i token zostają),
+  `all` czyści cały `state.json` razem z zapisanym tokenem. Działa **raz** — kolejne
+  restarty z tą samą wartością nie czyszczą ponownie (znacznik `clear_state_applied`).
+
 ## 1.6.0
 - **Bezpiecznik: `auto_register_max` (domyślnie 1)** — auto-rejestracja nigdy nie
   rezerwuje hurtem całego grafiku. Wcześniej pojawienie się np. 39 nowych wolnych

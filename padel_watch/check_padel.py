@@ -100,6 +100,12 @@ def load_state_doc():
         return None
 
 
+def write_state_doc(doc):
+    with open(STATE_PATH, "w", encoding="utf-8") as f:
+        json.dump(doc, f, ensure_ascii=False, indent=2)
+        f.write("\n")
+
+
 def save_state(free_ids, registered_ids=None, decathlon_jwt=None):
     old = load_state_doc() or {}
     if registered_ids is None:
@@ -109,9 +115,41 @@ def save_state(free_ids, registered_ids=None, decathlon_jwt=None):
     doc = {"free_ids": sorted(free_ids), "registered_ids": sorted(registered_ids)}
     if decathlon_jwt:
         doc["decathlon_jwt"] = clean_decathlon_token(decathlon_jwt)
-    with open(STATE_PATH, "w", encoding="utf-8") as f:
-        json.dump(doc, f, ensure_ascii=False, indent=2)
-        f.write("\n")
+    if old.get("clear_state_applied"):
+        doc["clear_state_applied"] = old["clear_state_applied"]  # znacznik musi przetrwać zapis
+    write_state_doc(doc)
+
+
+def apply_clear_state():
+    """Jednorazowo czyści zapisany stan wg opcji clear_state: 'registered' albo 'all'.
+
+    Semantyka jednorazowa: w stanie zapamiętujemy zastosowaną wartość, więc kolejne
+    restarty NIE czyszczą ponownie. Aby wyczyścić znowu, zmień wartość opcji
+    (np. na "" i z powrotem) — dzięki temu włączona opcja nie kasuje stanu w kółko.
+    """
+    cfg = load_config()
+    want = (os.environ.get("CLEAR_STATE") or cfg.get("clear_state") or "").strip().lower()
+    if want not in ("registered", "all"):
+        return
+    doc = load_state_doc()
+    if doc is None:
+        return  # brak stanu — nie ma czego czyścić
+    if doc.get("clear_state_applied") == want:
+        return  # już zastosowane dla tej wartości
+    n_reg = len(doc.get("registered_ids", []))
+    n_free = len(doc.get("free_ids", []))
+    new_doc = {
+        "free_ids": [] if want == "all" else sorted(doc.get("free_ids", [])),
+        "registered_ids": [],
+        "clear_state_applied": want,
+    }
+    if want != "all" and doc.get("decathlon_jwt"):
+        new_doc["decathlon_jwt"] = doc["decathlon_jwt"]  # 'all' czyści też zapisany token
+    write_state_doc(new_doc)
+    if want == "all":
+        log(f"🧹 Wyczyszczono CAŁY stan (było: {n_reg} zapisanych terminów, {n_free} śledzonych, token skasowany).")
+    else:
+        log(f"🧹 Wyczyszczono listę zapisanych terminów ({n_reg} szt.). Śledzone terminy i token zostają.")
 
 
 # ----------------------------------------------------------------------- helpers
@@ -503,6 +541,7 @@ def register_slot(slot, listing_price, cfg, speculative=False):
 
 
 AUTH_FAILURE_MARKERS = ("token odrzucony", "brak tokenu")
+LATEST_FIRST_VALUES = ("latest", "last", "desc", "najpozniejszy", "najpóźniejszy")
 
 
 def auto_register_new_slots(slots, listing_price_by_id, cfg, already_registered):
@@ -524,9 +563,12 @@ def auto_register_new_slots(slots, listing_price_by_id, cfg, already_registered)
     except (TypeError, ValueError):
         limit = 1
 
+    # Kolejność prób: 'earliest' (domyślnie) albo 'latest' — patrz opcja auto_register_order.
+    latest_first = str(cfg.get("order") or "earliest").strip().lower() in LATEST_FIRST_VALUES
     todo = sorted(
         (s for s in slots if s["id"] not in registered),
-        key=lambda s: s["start_utc"],  # najwcześniejszy termin ma pierwszeństwo
+        key=lambda s: s["start_utc"],
+        reverse=latest_first,
     )
     for s in slots:
         if s["id"] in registered:
@@ -686,6 +728,7 @@ def run_once(announce_startup=False):
         "age": os.environ.get("AUTO_REGISTER_AGE") or cfg.get("auto_register_age") or None,
         "free_only": not boolish(os.environ.get("AUTO_REGISTER_PAID") or cfg.get("auto_register_paid")),
         "max_per_run": os.environ.get("AUTO_REGISTER_MAX") or cfg.get("auto_register_max") or 1,
+        "order": os.environ.get("AUTO_REGISTER_ORDER") or cfg.get("auto_register_order") or "earliest",
     }
     tzname = os.environ.get("TIMEZONE") or cfg.get("timezone") or "Europe/Warsaw"
     tz = ZoneInfo(tzname) if ZoneInfo else timezone.utc
@@ -799,6 +842,12 @@ def main():
         interval = int(os.environ.get("CHECK_INTERVAL", "0"))
     except ValueError:
         interval = 0
+
+    # Czyszczenie stanu wykonujemy RAZ przy starcie procesu, nie w każdej iteracji.
+    try:
+        apply_clear_state()
+    except OSError as e:
+        log(f"! Nie udało się wyczyścić stanu: {e!r} — kontynuuję.")
 
     if interval <= 0:
         run_once()

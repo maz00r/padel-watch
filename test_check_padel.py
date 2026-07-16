@@ -441,6 +441,105 @@ class TestAutoRegisterLimits(unittest.TestCase):
         calls, results, registered = self.run_auto(self.slots(3), {"enabled": False}, lambda s: (True, "ok"))
         self.assertEqual((calls, results, registered), ([], {}, set()))
 
+    def test_order_latest_first(self):
+        cfg = {"enabled": True, "max_per_run": 1, "order": "latest"}
+        calls, _, _ = self.run_auto(self.slots(4), cfg, lambda s: (True, "ok"))
+        self.assertEqual(calls, ["L:3"], "przy order=latest bierze najpóźniejszy termin")
+
+    def test_order_earliest_is_default(self):
+        calls, _, _ = self.run_auto(self.slots(4), {"enabled": True}, lambda s: (True, "ok"))
+        self.assertEqual(calls, ["L:0"])
+
+    def test_order_latest_respects_limit_and_sequence(self):
+        cfg = {"enabled": True, "max_per_run": 2, "order": "latest"}
+        calls, _, _ = self.run_auto(self.slots(5), cfg, lambda s: (True, "ok"))
+        self.assertEqual(calls, ["L:4", "L:3"], "od najpóźniejszego, malejąco")
+
+    def test_unknown_order_falls_back_to_earliest(self):
+        cfg = {"enabled": True, "max_per_run": 1, "order": "bzdura"}
+        calls, _, _ = self.run_auto(self.slots(3), cfg, lambda s: (True, "ok"))
+        self.assertEqual(calls, ["L:0"])
+
+
+class TestClearState(unittest.TestCase):
+    """Jednorazowe czyszczenie stanu (opcja clear_state)."""
+
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        self.addCleanup(self.td.cleanup)
+        self.path = os.path.join(self.td.name, "state.json")
+        patcher = mock.patch.object(cp, "STATE_PATH", self.path)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        for var in ("CLEAR_STATE", "CONFIG_PATH"):
+            os.environ.pop(var, None)
+        os.environ["CONFIG_PATH"] = os.path.join(self.td.name, "brak.json")
+        self.addCleanup(lambda: os.environ.pop("CLEAR_STATE", None))
+        cp.CONFIG_PATH = os.path.join(self.td.name, "brak.json")
+
+    def seed(self, **extra):
+        doc = {"free_ids": ["L:1"], "registered_ids": ["L:1", "L:2"], "decathlon_jwt": "a.b.c"}
+        doc.update(extra)
+        cp.write_state_doc(doc)
+
+    def read(self):
+        with open(self.path, encoding="utf-8") as f:
+            return json.load(f)
+
+    def test_clear_registered_only(self):
+        self.seed()
+        os.environ["CLEAR_STATE"] = "registered"
+        cp.apply_clear_state()
+        d = self.read()
+        self.assertEqual(d["registered_ids"], [])
+        self.assertEqual(d["free_ids"], ["L:1"], "śledzone terminy zostają")
+        self.assertEqual(d["decathlon_jwt"], "a.b.c", "token zostaje")
+        self.assertEqual(d["clear_state_applied"], "registered")
+
+    def test_clear_all_wipes_everything(self):
+        self.seed()
+        os.environ["CLEAR_STATE"] = "all"
+        cp.apply_clear_state()
+        d = self.read()
+        self.assertEqual(d["registered_ids"], [])
+        self.assertEqual(d["free_ids"], [])
+        self.assertNotIn("decathlon_jwt", d, "'all' kasuje też token")
+
+    def test_is_one_shot_across_restarts(self):
+        self.seed()
+        os.environ["CLEAR_STATE"] = "registered"
+        cp.apply_clear_state()
+        cp.save_state({"L:9"}, {"L:9"})          # nowy zapis po czyszczeniu
+        cp.apply_clear_state()                    # "restart" z tą samą opcją
+        self.assertEqual(self.read()["registered_ids"], ["L:9"], "nie wolno czyścić ponownie")
+
+    def test_marker_survives_save_state(self):
+        self.seed()
+        os.environ["CLEAR_STATE"] = "registered"
+        cp.apply_clear_state()
+        cp.save_state({"L:5"}, {"L:5"})
+        self.assertEqual(self.read()["clear_state_applied"], "registered")
+
+    def test_changed_value_clears_again(self):
+        self.seed()
+        os.environ["CLEAR_STATE"] = "registered"
+        cp.apply_clear_state()
+        cp.save_state({"L:9"}, {"L:9"})
+        os.environ["CLEAR_STATE"] = "all"        # zmiana wartości -> czyść znowu
+        cp.apply_clear_state()
+        self.assertEqual(self.read()["registered_ids"], [])
+
+    def test_empty_option_does_nothing(self):
+        self.seed()
+        os.environ["CLEAR_STATE"] = ""
+        cp.apply_clear_state()
+        self.assertEqual(self.read()["registered_ids"], ["L:1", "L:2"])
+
+    def test_no_state_file_is_safe(self):
+        os.environ["CLEAR_STATE"] = "all"
+        cp.apply_clear_state()  # nie może rzucić
+        self.assertFalse(os.path.exists(self.path))
+
 
 if __name__ == "__main__":
     unittest.main()
