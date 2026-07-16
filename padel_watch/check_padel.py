@@ -100,18 +100,64 @@ def load_state_doc():
         return None
 
 
-def save_state(free_ids, registered_ids=None, decathlon_jwt=None):
+def write_state_doc(doc):
+    with open(STATE_PATH, "w", encoding="utf-8") as f:
+        json.dump(doc, f, ensure_ascii=False, indent=2)
+        f.write("\n")
+
+
+def save_state(free_ids, registered_ids=None, decathlon_jwt=None, pending_ids=None, auth_alert_sent=None):
     old = load_state_doc() or {}
     if registered_ids is None:
         registered_ids = set(old.get("registered_ids", []))
     if decathlon_jwt is None:
         decathlon_jwt = old.get("decathlon_jwt")
+    if pending_ids is None:
+        pending_ids = old.get("pending_ids", [])
+    if auth_alert_sent is None:
+        auth_alert_sent = old.get("auth_alert_sent", False)
     doc = {"free_ids": sorted(free_ids), "registered_ids": sorted(registered_ids)}
     if decathlon_jwt:
         doc["decathlon_jwt"] = clean_decathlon_token(decathlon_jwt)
-    with open(STATE_PATH, "w", encoding="utf-8") as f:
-        json.dump(doc, f, ensure_ascii=False, indent=2)
-        f.write("\n")
+    if pending_ids:
+        doc["pending_ids"] = sorted(pending_ids)  # terminy do ponowienia po naprawie tokenu
+    if auth_alert_sent:
+        doc["auth_alert_sent"] = True            # nie spamuj alertem o tokenie co iterację
+    if old.get("clear_state_applied"):
+        doc["clear_state_applied"] = old["clear_state_applied"]  # znacznik musi przetrwać zapis
+    write_state_doc(doc)
+
+
+def apply_clear_state():
+    """Jednorazowo czyści zapisany stan wg opcji clear_state: 'registered' albo 'all'.
+
+    Semantyka jednorazowa: w stanie zapamiętujemy zastosowaną wartość, więc kolejne
+    restarty NIE czyszczą ponownie. Aby wyczyścić znowu, zmień wartość opcji
+    (np. na "" i z powrotem) — dzięki temu włączona opcja nie kasuje stanu w kółko.
+    """
+    cfg = load_config()
+    want = (os.environ.get("CLEAR_STATE") or cfg.get("clear_state") or "").strip().lower()
+    if want not in ("registered", "all"):
+        return
+    doc = load_state_doc()
+    if doc is None:
+        return  # brak stanu — nie ma czego czyścić
+    if doc.get("clear_state_applied") == want:
+        return  # już zastosowane dla tej wartości
+    n_reg = len(doc.get("registered_ids", []))
+    n_free = len(doc.get("free_ids", []))
+    new_doc = {
+        "free_ids": [] if want == "all" else sorted(doc.get("free_ids", [])),
+        "registered_ids": [],
+        "clear_state_applied": want,
+    }
+    if want != "all" and doc.get("decathlon_jwt"):
+        new_doc["decathlon_jwt"] = doc["decathlon_jwt"]  # 'all' czyści też zapisany token
+    write_state_doc(new_doc)
+    if want == "all":
+        log(f"🧹 Wyczyszczono CAŁY stan (było: {n_reg} zapisanych terminów, {n_free} śledzonych, token skasowany).")
+    else:
+        log(f"🧹 Wyczyszczono listę zapisanych terminów ({n_reg} szt.). Śledzone terminy i token zostają.")
 
 
 # ----------------------------------------------------------------------- helpers
@@ -502,27 +548,82 @@ def register_slot(slot, listing_price, cfg, speculative=False):
     return True, state or "zarejestrowano"
 
 
+AUTH_FAILURE_MARKERS = ("token odrzucony", "brak tokenu")
+LATEST_FIRST_VALUES = ("latest", "last", "desc", "najpozniejszy", "najpóźniejszy")
+
+
 def auto_register_new_slots(slots, listing_price_by_id, cfg, already_registered):
+    """Zapisuje na NOWE wolne terminy, od najwcześniejszego, z limitem na przebieg.
+
+    Bezpieczniki:
+    - `max_per_run` (domyślnie 1) — nigdy nie rezerwuje hurtem całego grafiku,
+    - twardy błąd autoryzacji przerywa resztę przebiegu (nie dobijamy się do API),
+    - w trybie speculative nic nie jest oznaczane jako zapisane.
+    """
     if not cfg.get("enabled"):
         return {}, already_registered
     results = {}
     registered = set(already_registered)
     speculative = bool(cfg.get("speculative"))
-    for slot in slots:
+    limit = cfg.get("max_per_run", 1)
+    try:
+        limit = max(0, int(limit))
+    except (TypeError, ValueError):
+        limit = 1
+
+    # Kolejność prób: 'earliest' (domyślnie) albo 'latest' — patrz opcja auto_register_order.
+    latest_first = str(cfg.get("order") or "earliest").strip().lower() in LATEST_FIRST_VALUES
+    todo = sorted(
+        (s for s in slots if s["id"] not in registered),
+        key=lambda s: s["start_utc"],
+        reverse=latest_first,
+    )
+    for s in slots:
+        if s["id"] in registered:
+            results[s["id"]] = (True, "już zarejestrowane")
+
+    if not todo:
+        return results, registered
+    if limit == 0:
+        log("! Auto-rejestracja: limit auto_register_max=0 — pomijam wszystkie.")
+        return results, registered
+
+    cfg["auth_error"] = None
+    cfg["pending_ids"] = []
+    done = 0
+    skipped = []
+    for slot in todo:
         sid = slot["id"]
-        if sid in registered:
-            results[sid] = (True, "już zarejestrowane")
+        when = fmt_when(slot["start_utc"].astimezone(_log_tz()), short=True)
+        if done >= limit:
+            skipped.append(when)
             continue
         ok, msg = register_slot(slot, listing_price_by_id.get(sid), cfg, speculative=speculative)
         results[sid] = (ok, msg)
-        when = fmt_when(slot["start_utc"].astimezone(_log_tz()), short=True)
-        if ok and not speculative:
-            registered.add(sid)  # w trybie speculative NIE oznaczamy jako zapisane
-            log(f"✓ Auto-rejestracja: {when} — {msg}")
-        elif ok:
-            log(f"~ Auto-rejestracja (test): {when} — {msg}")
-        else:
-            log(f"! Auto-rejestracja pominięta/nieudana dla {when}: {msg}")
+        if ok:
+            done += 1
+            if speculative:
+                log(f"~ Auto-rejestracja (test, bez rezerwacji): {when} — {msg}")
+            else:
+                registered.add(sid)
+                log(f"✓ Auto-rejestracja: {when} — {msg}")
+            continue
+        # Twardy błąd autoryzacji -> nie ma sensu próbować kolejnych slotów w tym przebiegu.
+        # Zapamiętujemy tylko tyle terminów, ile i tak byśmy zapisali (limit), żeby po
+        # naprawieniu tokenu ponowić próbę — bez hurtowego nadrabiania zaległości.
+        if any(m in msg for m in AUTH_FAILURE_MARKERS):
+            cfg["auth_error"] = msg
+            cfg["pending_ids"] = [s["id"] for s in todo[:limit]]
+            waiting = [fmt_when(s["start_utc"].astimezone(_log_tz()), short=True) for s in todo[:limit]]
+            log(f"! Auto-rejestracja przerwana ({msg}). "
+                f"Zapamiętano do ponowienia: {', '.join(waiting)}.")
+            return results, registered
+        log(f"! Auto-rejestracja nieudana dla {when}: {msg}")
+
+    if skipped:
+        log(f"= Auto-rejestracja: limit {limit}/przebieg wykorzystany; "
+            f"czeka {len(skipped)} termin(ów): {', '.join(skipped[:5])}"
+            f"{' …' if len(skipped) > 5 else ''}")
     return results, registered
 
 
@@ -605,6 +706,26 @@ def notify_new(topic, slots, tz, listing_price, book_url, registration_results=N
     return failed
 
 
+def notify_auth_problem(topic, detail, book_url=None):
+    """Alert, że auto-rezerwacja nie działa przez token/cookie (raz na incydent)."""
+    if not topic:
+        log("! Brak NTFY_TOPIC — pomijam alert o tokenie (tryb testowy).")
+        return None
+    msg = (
+        "Auto-rezerwacja NIE działa — odśwież decathlon_cookie / decathlon_token "
+        "w konfiguracji dodatku.\nMonitorowanie i powiadomienia o wolnych terminach "
+        f"działają normalnie.\n\nSzczegóły: {detail}"
+    )
+    return ntfy_post(
+        topic,
+        "⚠️ Token Decathlon wygasł",
+        msg,
+        click=book_url,
+        priority="high",
+        tags="warning",
+    )
+
+
 def notify_startup(topic, count, tz, book_url=None):
     if not topic:
         log("! Brak NTFY_TOPIC — pomijam powiadomienie startowe (tryb testowy).")
@@ -640,6 +761,8 @@ def run_once(announce_startup=False):
         "name": os.environ.get("AUTO_REGISTER_NAME") or cfg.get("auto_register_name") or "",
         "age": os.environ.get("AUTO_REGISTER_AGE") or cfg.get("auto_register_age") or None,
         "free_only": not boolish(os.environ.get("AUTO_REGISTER_PAID") or cfg.get("auto_register_paid")),
+        "max_per_run": os.environ.get("AUTO_REGISTER_MAX") or cfg.get("auto_register_max") or 1,
+        "order": os.environ.get("AUTO_REGISTER_ORDER") or cfg.get("auto_register_order") or "earliest",
     }
     tzname = os.environ.get("TIMEZONE") or cfg.get("timezone") or "Europe/Warsaw"
     tz = ZoneInfo(tzname) if ZoneInfo else timezone.utc
@@ -717,12 +840,34 @@ def run_once(announce_startup=False):
     failed_ids = set()
     registered_ids = load_registered_ids()
     registration_results = {}
+
+    # Auto-rejestracja: kandydaci to NOWE terminy + te zapamiętane po awarii tokenu
+    # (pending), o ile nadal są wolne i jeszcze niezapisane. Dzięki temu naprawienie
+    # cookie sprawia, że automat dogoni termin, którego wcześniej nie mógł zająć.
+    pending_prev = set(state_doc.get("pending_ids", []))
+    candidate_ids = ((new_ids | pending_prev) & current_ids) - registered_ids
+    retried = (pending_prev & candidate_ids) - new_ids
+    if candidate_ids and reg_cfg.get("enabled"):
+        if retried:
+            log(f"↻ Ponawiam auto-rejestrację dla {len(retried)} zapamiętanego(-ych) "
+                f"terminu(-ów) po wcześniejszym błędzie tokenu.")
+        registration_results, registered_ids = auto_register_new_slots(
+            [current[i] for i in candidate_ids], listing_price_by_id, reg_cfg, registered_ids
+        )
+
+    # Alert o tokenie: raz na incydent (kasowany, gdy token znów działa).
+    auth_error = reg_cfg.get("auth_error")
+    auth_alert_sent = bool(state_doc.get("auth_alert_sent"))
+    if auth_error and not auth_alert_sent:
+        notify_auth_problem(topic, auth_error, book_url)
+        auth_alert_sent = True
+    elif not auth_error and auth_alert_sent and candidate_ids and reg_cfg.get("enabled"):
+        log("✓ Token Decathlon znów działa — kasuję alert.")
+        auth_alert_sent = False
+
     if new_ids:
         log(f"NOWE wolne terminy: {len(new_ids)}")
         new_slots = sorted((current[i] for i in new_ids), key=lambda x: x["start_utc"])
-        registration_results, registered_ids = auto_register_new_slots(
-            new_slots, listing_price_by_id, reg_cfg, registered_ids
-        )
         # grupuj powiadomienia per listing (book_url)
         by_url = {}
         for s in new_slots:
@@ -738,7 +883,13 @@ def run_once(announce_startup=False):
 
     # Sloty z nieudaną wysyłką NIE trafiają do stanu -> następna iteracja
     # potraktuje je znów jako nowe i ponowi powiadomienie.
-    save_state(current_ids - failed_ids, registered_ids, reg_cfg.get("token"))
+    save_state(
+        current_ids - failed_ids,
+        registered_ids,
+        reg_cfg.get("token"),
+        pending_ids=reg_cfg.get("pending_ids") or [],
+        auth_alert_sent=auth_alert_sent,
+    )
     return 0
 
 
@@ -753,6 +904,12 @@ def main():
         interval = int(os.environ.get("CHECK_INTERVAL", "0"))
     except ValueError:
         interval = 0
+
+    # Czyszczenie stanu wykonujemy RAZ przy starcie procesu, nie w każdej iteracji.
+    try:
+        apply_clear_state()
+    except OSError as e:
+        log(f"! Nie udało się wyczyścić stanu: {e!r} — kontynuuję.")
 
     if interval <= 0:
         run_once()

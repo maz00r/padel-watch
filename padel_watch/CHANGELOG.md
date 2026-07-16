@@ -1,5 +1,36 @@
 # Changelog
 
+## 1.8.0
+- **Alert ntfy, gdy token/cookie Decathlon przestanie działać** ("⚠️ Token Decathlon
+  wygasł") — raz na incydent, kasowany gdy token znów działa. Wcześniej o awarii
+  auto-rezerwacji dowiadywałeś się tylko z logów HA.
+- **Ponawianie po naprawie tokenu:** termin, którego nie udało się zarezerwować przez
+  błąd autoryzacji, jest zapamiętywany (`pending_ids`) i ponawiany w kolejnych
+  przebiegach — także gdy nie ma już "nowych" terminów. Wcześniej taki termin był
+  trwale pomijany, mimo że dalej był wolny.
+- Zapamiętywane jest maksymalnie tyle terminów, ile i tak zapisałby `auto_register_max`,
+  więc naprawa tokenu nie powoduje hurtowego nadrabiania zaległości.
+- Monitorowanie i powiadomienia o wolnych terminach nigdy nie zależą od tokenu.
+
+## 1.7.0
+- **Nowa opcja `auto_register_order`** (`earliest` | `latest`): kolejność prób zapisu.
+  `latest` = zaczyna od najpóźniejszego wolnego terminu. Domyślnie `earliest`.
+- **Nowa opcja `clear_state`** (`registered` | `all`): jednorazowe wyczyszczenie stanu.
+  `registered` kasuje listę zapisanych terminów (śledzone terminy i token zostają),
+  `all` czyści cały `state.json` razem z zapisanym tokenem. Działa **raz** — kolejne
+  restarty z tą samą wartością nie czyszczą ponownie (znacznik `clear_state_applied`).
+
+## 1.6.0
+- **Bezpiecznik: `auto_register_max` (domyślnie 1)** — auto-rejestracja nigdy nie
+  rezerwuje hurtem całego grafiku. Wcześniej pojawienie się np. 39 nowych wolnych
+  terminów oznaczało próbę zapisu na wszystkie naraz.
+- Zapis zaczyna od **najwcześniejszego** pasującego terminu; reszta czeka na kolejny
+  przebieg (logowana zbiorczo).
+- Twardy błąd autoryzacji (brak/odrzucony token) **przerywa przebieg** zamiast
+  ponawiać żądania dla każdego slotu z osobna (koniec dobijania się do API i spamu
+  w logach: 39 linii -> 1).
+- Testy bezpieczników (limit, kolejność, przerwanie po auth, tryb speculative).
+
 ## 1.5.2
 - Auto-rejestracja potrafi odświeżyć krótkotrwały JWT Decathlon GO przez
   `/api/auth/refresh`, jeśli podano cookie sesji w `decathlon_cookie`.
