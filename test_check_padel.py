@@ -367,5 +367,80 @@ class TestAutoRegister(unittest.TestCase):
         self.assertEqual(seen["payload"]["extend"], {})
 
 
+class TestAutoRegisterLimits(unittest.TestCase):
+    """Bezpieczniki: limit na przebieg, przerwanie po błędzie auth, kolejność."""
+
+    @staticmethod
+    def slots(n):
+        return [
+            {"id": f"L:{i}", "listing_id": "L", "date_id": f"D{i}",
+             "start_utc": datetime(2026, 7, 7, 9 + i, 0, tzinfo=timezone.utc), "price": None}
+            for i in range(n)
+        ]
+
+    def run_auto(self, slots, cfg, side_effect):
+        calls = []
+
+        def fake_register(slot, price, c, speculative=False):
+            calls.append(slot["id"])
+            return side_effect(slot)
+
+        with mock.patch.object(cp, "register_slot", fake_register):
+            results, registered = cp.auto_register_new_slots(slots, {}, cfg, set())
+        return calls, results, registered
+
+    def test_default_limit_is_one(self):
+        cfg = {"enabled": True}  # brak max_per_run -> domyślnie 1
+        calls, _, registered = self.run_auto(self.slots(5), cfg, lambda s: (True, "ok"))
+        self.assertEqual(len(calls), 1, "bez limitu zarezerwowałoby wszystkie!")
+        self.assertEqual(registered, {"L:0"})
+
+    def test_limit_respected(self):
+        cfg = {"enabled": True, "max_per_run": 2}
+        calls, _, registered = self.run_auto(self.slots(5), cfg, lambda s: (True, "ok"))
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(registered, {"L:0", "L:1"})
+
+    def test_earliest_slot_first(self):
+        cfg = {"enabled": True, "max_per_run": 1}
+        shuffled = list(reversed(self.slots(4)))  # najpóźniejszy na początku listy
+        calls, _, _ = self.run_auto(shuffled, cfg, lambda s: (True, "ok"))
+        self.assertEqual(calls, ["L:0"], "powinien wybrać najwcześniejszy termin")
+
+    def test_zero_limit_registers_nothing(self):
+        cfg = {"enabled": True, "max_per_run": 0}
+        calls, _, registered = self.run_auto(self.slots(3), cfg, lambda s: (True, "ok"))
+        self.assertEqual(calls, [])
+        self.assertEqual(registered, set())
+
+    def test_auth_failure_aborts_run(self):
+        cfg = {"enabled": True, "max_per_run": 5}
+        calls, _, _ = self.run_auto(
+            self.slots(5), cfg, lambda s: (False, "token odrzucony (HTTP 401) — sprawdź cookie"))
+        self.assertEqual(len(calls), 1, "po błędzie auth nie wolno dobijać się kolejnymi slotami")
+
+    def test_non_auth_failure_continues(self):
+        cfg = {"enabled": True, "max_per_run": 5}
+        calls, _, _ = self.run_auto(self.slots(3), cfg, lambda s: (False, "termin płatny — pomijam"))
+        self.assertEqual(len(calls), 3, "zwykłe pominięcie nie przerywa przebiegu")
+
+    def test_speculative_does_not_mark_registered(self):
+        cfg = {"enabled": True, "max_per_run": 2, "speculative": True}
+        _, _, registered = self.run_auto(self.slots(3), cfg, lambda s: (True, "walidacja OK"))
+        self.assertEqual(registered, set())
+
+    def test_already_registered_not_retried(self):
+        cfg = {"enabled": True, "max_per_run": 5}
+        slots = self.slots(2)
+        with mock.patch.object(cp, "register_slot", lambda *a, **k: (True, "ok")):
+            results, registered = cp.auto_register_new_slots(slots, {}, cfg, {"L:0"})
+        self.assertEqual(results["L:0"], (True, "już zarejestrowane"))
+        self.assertIn("L:1", registered)
+
+    def test_disabled_does_nothing(self):
+        calls, results, registered = self.run_auto(self.slots(3), {"enabled": False}, lambda s: (True, "ok"))
+        self.assertEqual((calls, results, registered), ([], {}, set()))
+
+
 if __name__ == "__main__":
     unittest.main()

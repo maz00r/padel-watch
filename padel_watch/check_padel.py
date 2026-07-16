@@ -502,27 +502,72 @@ def register_slot(slot, listing_price, cfg, speculative=False):
     return True, state or "zarejestrowano"
 
 
+AUTH_FAILURE_MARKERS = ("token odrzucony", "brak tokenu")
+
+
 def auto_register_new_slots(slots, listing_price_by_id, cfg, already_registered):
+    """Zapisuje na NOWE wolne terminy, od najwcześniejszego, z limitem na przebieg.
+
+    Bezpieczniki:
+    - `max_per_run` (domyślnie 1) — nigdy nie rezerwuje hurtem całego grafiku,
+    - twardy błąd autoryzacji przerywa resztę przebiegu (nie dobijamy się do API),
+    - w trybie speculative nic nie jest oznaczane jako zapisane.
+    """
     if not cfg.get("enabled"):
         return {}, already_registered
     results = {}
     registered = set(already_registered)
     speculative = bool(cfg.get("speculative"))
-    for slot in slots:
+    limit = cfg.get("max_per_run", 1)
+    try:
+        limit = max(0, int(limit))
+    except (TypeError, ValueError):
+        limit = 1
+
+    todo = sorted(
+        (s for s in slots if s["id"] not in registered),
+        key=lambda s: s["start_utc"],  # najwcześniejszy termin ma pierwszeństwo
+    )
+    for s in slots:
+        if s["id"] in registered:
+            results[s["id"]] = (True, "już zarejestrowane")
+
+    if not todo:
+        return results, registered
+    if limit == 0:
+        log("! Auto-rejestracja: limit auto_register_max=0 — pomijam wszystkie.")
+        return results, registered
+
+    done = 0
+    skipped = []
+    for slot in todo:
         sid = slot["id"]
-        if sid in registered:
-            results[sid] = (True, "już zarejestrowane")
+        when = fmt_when(slot["start_utc"].astimezone(_log_tz()), short=True)
+        if done >= limit:
+            skipped.append(when)
             continue
         ok, msg = register_slot(slot, listing_price_by_id.get(sid), cfg, speculative=speculative)
         results[sid] = (ok, msg)
-        when = fmt_when(slot["start_utc"].astimezone(_log_tz()), short=True)
-        if ok and not speculative:
-            registered.add(sid)  # w trybie speculative NIE oznaczamy jako zapisane
-            log(f"✓ Auto-rejestracja: {when} — {msg}")
-        elif ok:
-            log(f"~ Auto-rejestracja (test): {when} — {msg}")
-        else:
-            log(f"! Auto-rejestracja pominięta/nieudana dla {when}: {msg}")
+        if ok:
+            done += 1
+            if speculative:
+                log(f"~ Auto-rejestracja (test, bez rezerwacji): {when} — {msg}")
+            else:
+                registered.add(sid)
+                log(f"✓ Auto-rejestracja: {when} — {msg}")
+            continue
+        # Twardy błąd autoryzacji -> nie ma sensu próbować kolejnych slotów w tym przebiegu.
+        if any(m in msg for m in AUTH_FAILURE_MARKERS):
+            remaining = [fmt_when(s["start_utc"].astimezone(_log_tz()), short=True)
+                         for s in todo if s["id"] not in results]
+            log(f"! Auto-rejestracja przerwana ({msg}). Pominięto {len(remaining)} termin(y) w tym przebiegu.")
+            return results, registered
+        log(f"! Auto-rejestracja nieudana dla {when}: {msg}")
+
+    if skipped:
+        log(f"= Auto-rejestracja: limit {limit}/przebieg wykorzystany; "
+            f"czeka {len(skipped)} termin(ów): {', '.join(skipped[:5])}"
+            f"{' …' if len(skipped) > 5 else ''}")
     return results, registered
 
 
@@ -640,6 +685,7 @@ def run_once(announce_startup=False):
         "name": os.environ.get("AUTO_REGISTER_NAME") or cfg.get("auto_register_name") or "",
         "age": os.environ.get("AUTO_REGISTER_AGE") or cfg.get("auto_register_age") or None,
         "free_only": not boolish(os.environ.get("AUTO_REGISTER_PAID") or cfg.get("auto_register_paid")),
+        "max_per_run": os.environ.get("AUTO_REGISTER_MAX") or cfg.get("auto_register_max") or 1,
     }
     tzname = os.environ.get("TIMEZONE") or cfg.get("timezone") or "Europe/Warsaw"
     tz = ZoneInfo(tzname) if ZoneInfo else timezone.utc

@@ -32,6 +32,14 @@ pojawi się **nowy wolny termin** w wybranych godzinach.
 | `auto_register_name` | imię i nazwisko uczestnika wysyłane w rezerwacji | `Jan Kowalski` |
 | `auto_register_age` | wiek uczestnika, jeśli wydarzenie go wymaga | `34` |
 | `auto_register_paid` | pozwól tworzyć transakcje także dla płatnych terminów; płatność nadal trzeba dokończyć ręcznie | `false` |
+| `auto_register_max` | ile terminów maksymalnie zapisać w jednym przebiegu (0–10); `0` = nic | `1` |
+
+> **Bezpieczniki auto-rejestracji.** Domyślnie `auto_register_max: 1`, więc gdy pojawi się
+> naraz wiele wolnych terminów, zapis obejmie tylko **najwcześniejszy** — reszta poczeka na
+> kolejny przebieg. Twardy błąd autoryzacji przerywa przebieg (bez dobijania się do API).
+> Zacznij od `auto_register_dry_run: true` — wtedy app tylko **waliduje** zapis
+> (`speculative`), niczego nie rezerwując. Dopiero gdy w logach zobaczysz
+> `~ Auto-rejestracja (test, bez rezerwacji): … walidacja OK`, przełącz `dry_run` na `false`.
 
 **`filters`:** DNI to zakres (`mon-fri`) lub lista (`sat,sun`); dni: `mon tue wed thu fri sat sun`.
 Okno przez północ jest OK (`15:00-02:00` = wieczór + noc do 2:00). Cały dzień = `00:00-24:00`.

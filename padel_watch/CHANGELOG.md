@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.6.0
+- **Bezpiecznik: `auto_register_max` (domyślnie 1)** — auto-rejestracja nigdy nie
+  rezerwuje hurtem całego grafiku. Wcześniej pojawienie się np. 39 nowych wolnych
+  terminów oznaczało próbę zapisu na wszystkie naraz.
+- Zapis zaczyna od **najwcześniejszego** pasującego terminu; reszta czeka na kolejny
+  przebieg (logowana zbiorczo).
+- Twardy błąd autoryzacji (brak/odrzucony token) **przerywa przebieg** zamiast
+  ponawiać żądania dla każdego slotu z osobna (koniec dobijania się do API i spamu
+  w logach: 39 linii -> 1).
+- Testy bezpieczników (limit, kolejność, przerwanie po auth, tryb speculative).
+
 ## 1.5.2
 - Auto-rejestracja potrafi odświeżyć krótkotrwały JWT Decathlon GO przez
   `/api/auth/refresh`, jeśli podano cookie sesji w `decathlon_cookie`.

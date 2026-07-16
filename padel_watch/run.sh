@@ -19,6 +19,7 @@ export DECATHLON_COOKIE="$(opt decathlon_cookie)"
 export AUTO_REGISTER_NAME="$(opt auto_register_name)"
 export AUTO_REGISTER_AGE="$(opt auto_register_age)"
 export AUTO_REGISTER_PAID="$(opt auto_register_paid)"
+export AUTO_REGISTER_MAX="$(opt auto_register_max)"
 # opcja pominięta w UI -> Python zwraca "None"; traktuj jak pustą
 [ "$FILTERS" = "None" ] && export FILTERS=""
 [ "$INTERVALS" = "None" ] && export INTERVALS=""
@@ -29,6 +30,7 @@ export AUTO_REGISTER_PAID="$(opt auto_register_paid)"
 [ "$AUTO_REGISTER_NAME" = "None" ] && export AUTO_REGISTER_NAME=""
 [ "$AUTO_REGISTER_AGE" = "None" ] && export AUTO_REGISTER_AGE=""
 [ "$AUTO_REGISTER_PAID" = "None" ] && export AUTO_REGISTER_PAID=""
+[ "$AUTO_REGISTER_MAX" = "None" ] && export AUTO_REGISTER_MAX=""
 export STATE_DIR="/data"           # stan (state.json) trwały między restartami dodatku
 export CONFIG_PATH="/data/__none__.json"   # brak pliku -> skrypt bierze wszystko z ENV
 
