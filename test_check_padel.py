@@ -202,7 +202,30 @@ class TestIntervals(unittest.TestCase):
 
     def test_parse_clamps_minimum(self):
         w = cp.parse_intervals_env("mon-fri:10:00-12:00=1")
-        self.assertEqual(w[0]["seconds"], 10)  # min 10 s
+        self.assertEqual(w[0]["seconds"], cp.MIN_INTERVAL_SECONDS)
+
+    def test_minimum_is_two_seconds(self):
+        self.assertEqual(cp.MIN_INTERVAL_SECONDS, 2)
+
+    def test_value_above_minimum_is_kept(self):
+        w = cp.parse_intervals_env("mon-fri:10:45-11:15=3")
+        self.assertEqual(w[0]["seconds"], 3, "wartość >= minimum nie może być zmieniana")
+
+    def test_clamp_is_logged(self):
+        with mock.patch.object(cp, "log") as fake_log:
+            cp.parse_intervals_env("mon-fri:10:00-12:00=1")
+        self.assertTrue(any("żądano 1s" in str(c) for c in fake_log.call_args_list),
+                        "podbicie do minimum musi być widoczne w logu")
+
+    def test_aggressive_value_warns(self):
+        with mock.patch.object(cp, "log") as fake_log:
+            cp.parse_intervals_env("mon-fri:10:45-11:15=3")
+        self.assertTrue(any("agresywne" in str(c) for c in fake_log.call_args_list))
+
+    def test_normal_value_does_not_warn(self):
+        with mock.patch.object(cp, "log") as fake_log:
+            cp.parse_intervals_env("mon-fri:17:00-22:00=30")
+        self.assertEqual(fake_log.call_args_list, [])
 
     def _at(self, *args):
         return datetime(*args, tzinfo=TZ).astimezone(timezone.utc)

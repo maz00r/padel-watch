@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.9.0
+- **Minimalny interwał w `intervals` obniżony z 10 s do 2 s** — pozwala na agresywne
+  „snajpowanie" w wąskim oknie (np. `mon-fri:10:45-11:15=2`).
+- Podbicie do minimum jest teraz **widoczne w logu** (`żądano 1s — używam 2s`), zamiast
+  po cichu ignorować ustawienie.
+- Interwał poniżej 5 s loguje ostrzeżenie z liczbą zapytań/h — poniżej 2 s realnie
+  ryzykujesz blokadę po IP, dlatego zostaje twardy limit.
+
 ## 1.8.0
 - **Alert ntfy, gdy token/cookie Decathlon przestanie działać** ("⚠️ Token Decathlon
   wygasł") — raz na incydent, kasowany gdy token znów działa. Wcześniej o awarii
