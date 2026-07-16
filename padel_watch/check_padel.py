@@ -435,20 +435,29 @@ def newer_decathlon_token(config_token, state_token):
 
 
 def refresh_decathlon_token(token, cookie):
+    """Pozyskuje świeży JWT z /api/auth/refresh na podstawie cookie sesji.
+
+    To cookie uwierzytelnia refresh (aplikacja Decathlona woła go z withCredentials).
+    Nagłówek Authorization dokładamy tylko, gdy mamy jakiś token — przy jego braku
+    (albo gdy jest wygasły) refresh i tak opiera się na cookie.
+    """
     cookie = (cookie or "").strip()
     if not cookie:
         raise ValueError("brak cookie sesji Decathlon GO")
+    headers = {
+        "User-Agent": UA,
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "Accept-Encoding": "gzip",
+        "Cookie": cookie,
+    }
+    token = clean_decathlon_token(token)
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
     req = urllib.request.Request(
         f"{DECATHLON_API_URL}/auth/refresh",
         data=json.dumps({}).encode("utf-8"),
-        headers={
-            "User-Agent": UA,
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-            "Accept-Encoding": "gzip",
-            "Authorization": f"Bearer {clean_decathlon_token(token)}",
-            "Cookie": cookie,
-        },
+        headers=headers,
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=30) as resp:
@@ -460,6 +469,36 @@ def refresh_decathlon_token(token, cookie):
     if not refreshed:
         raise ValueError("Decathlon GO nie zwrócił nowego JWT")
     return refreshed
+
+
+def ensure_decathlon_token(cfg):
+    """Zwraca (token, błąd). Sam pozyskuje/odświeża JWT na podstawie cookie.
+
+    Dzięki temu `decathlon_token` jest OPCJONALNY — wystarczy `decathlon_cookie`:
+    - brak tokenu + cookie      -> pobieramy świeży JWT,
+    - token wygasa/wygasł + cookie -> odświeżamy PROAKTYWNIE (bez czekania na 401),
+    - token ważny               -> używamy bez ruchu sieciowego,
+    - nie umiemy odczytać `exp`  -> próbujemy jak jest (401 obsłuży fallback).
+    """
+    token = clean_decathlon_token(cfg.get("token"))
+    cookie = (cfg.get("refresh_cookie") or "").strip()
+    exp = jwt_expiry(token) if token else 0
+    expired = bool(token) and exp > 0 and exp <= time.time() + TOKEN_EXPIRY_MARGIN
+    if token and not expired:
+        return token, None
+    if not cookie:
+        if token:
+            return token, None  # wygasły, ale spróbujmy — 401 i tak jest obsłużone
+        return None, "brak tokenu Decathlon GO i brak decathlon_cookie"
+    try:
+        fresh = refresh_decathlon_token(token, cookie)
+    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ValueError) as e:
+        return (token or None), f"nie udało się pobrać tokenu cookiem: {e!r}"
+    cfg["token"] = fresh
+    cfg["token_refreshed"] = True
+    log("~ Pobrano świeży token Decathlon GO na podstawie cookie."
+        if not token else "~ Token Decathlon GO wygasał — odświeżony cookiem.")
+    return fresh, None
 
 
 def decathlon_rpc(method, token, payload, extend=None):
@@ -491,10 +530,10 @@ def register_slot(slot, listing_price, cfg, speculative=False):
     Domyślnie tylko darmowe terminy (płatne wymagają osobnego kroku płatności).
     Payload i endpoint odtworzone z aplikacji Decathlon GO.
     """
-    token = clean_decathlon_token(cfg.get("token"))
+    token, token_error = ensure_decathlon_token(cfg)
     name = (cfg.get("name") or "").strip()
-    if not token:
-        return False, "brak tokenu Decathlon GO"
+    if token_error:
+        return False, token_error
     if not name:
         return False, "brak imienia i nazwiska uczestnika (auto_register_name)"
     if price_amount(slot, listing_price) > 0 and cfg.get("free_only", True):
@@ -555,7 +594,8 @@ def register_slot(slot, listing_price, cfg, speculative=False):
     return True, state or "zarejestrowano"
 
 
-AUTH_FAILURE_MARKERS = ("token odrzucony", "brak tokenu")
+AUTH_FAILURE_MARKERS = ("token odrzucony", "brak tokenu", "nie udało się pobrać tokenu")
+TOKEN_EXPIRY_MARGIN = 60  # odśwież JWT, gdy zostało mniej niż tyle sekund ważności
 LATEST_FIRST_VALUES = ("latest", "last", "desc", "najpozniejszy", "najpóźniejszy")
 MIN_INTERVAL_SECONDS = 2         # twarda dolna granica INTERVALS (ochrona przed blokadą IP)
 AGGRESSIVE_INTERVAL_SECONDS = 5  # poniżej tego logujemy ostrzeżenie

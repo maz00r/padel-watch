@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.10.0
+- **`decathlon_token` jest teraz opcjonalny — wystarczy `decathlon_cookie`.** App sam
+  pobiera JWT z `/api/auth/refresh` (to cookie uwierzytelnia refresh, nie token).
+  Wcześniej bez wklejonego tokenu auto-rejestracja w ogóle nie ruszała ("brak tokenu"),
+  więc refresh nigdy nie miał szansy zadziałać.
+- **Proaktywne odświeżanie**: token jest odnawiany na podstawie `exp` (z zapasem 60 s),
+  zanim wygaśnie — zamiast czekać na 401 i marnować żądanie. Fallback po 401 zostaje.
+- `/api/auth/refresh` nie wysyła pustego nagłówka `Authorization`, gdy nie mamy tokenu.
+- Czytelniejsze błędy: `brak tokenu Decathlon GO i brak decathlon_cookie` oraz
+  `nie udało się pobrać tokenu cookiem: ...` (oba przerywają przebieg jak błąd auth).
+
 ## 1.9.0
 - **Minimalny interwał w `intervals` obniżony z 10 s do 2 s** — pozwala na agresywne
   „snajpowanie" w wąskim oknie (np. `mon-fri:10:45-11:15=2`).

@@ -27,8 +27,8 @@ pojawi się **nowy wolny termin** w wybranych godzinach.
 | `timezone` | strefa czasowa filtrów i logów | `Europe/Warsaw` |
 | `auto_register` | próba automatycznego zapisu na nowy termin | `false` |
 | `auto_register_dry_run` | testuje zapis bez tworzenia rezerwacji | `true` |
-| `decathlon_token` | JWT z zalogowanej sesji Decathlon GO (`go-sdk-jwt`) | `eyJ...` |
-| `decathlon_cookie` | cookie sesji Decathlon GO do automatycznego odświeżania JWT | `connect.sid=...` |
+| `decathlon_cookie` | **cookie sesji Decathlon GO — to wystarczy**, app sam pobiera i odnawia token | `connect.sid=...` |
+| `decathlon_token` | **opcjonalny** JWT (`go-sdk-jwt`). Podaj tylko, jeśli nie chcesz dawać cookie — wygasa po kilku godzinach i trzeba go wklejać ręcznie | `eyJ...` |
 | `auto_register_name` | imię i nazwisko uczestnika wysyłane w rezerwacji | `Jan Kowalski` |
 | `auto_register_age` | wiek uczestnika, jeśli wydarzenie go wymaga | `34` |
 | `auto_register_paid` | pozwól tworzyć transakcje także dla płatnych terminów; płatność nadal trzeba dokończyć ręcznie | `false` |
@@ -94,13 +94,28 @@ ostrzeżenie — używaj tylko w wąskich oknach, bo grozi blokadą po IP). Zmia
 
 ## Automatyczna rejestracja
 
-Automatyczna rejestracja jest domyślnie wyłączona. Po włączeniu app próbuje utworzyć
-transakcję Decathlon GO dla nowych terminów, które przeszły filtry czasu. Używa endpointu
-`/api/v2/transactions.create`, więc wymaga sesji zalogowanego użytkownika Decathlon GO.
-JWT z localStorage (`go-sdk-jwt`) zwykle wygasa po kilkunastu minutach, dlatego do
-działania w tle podaj też `decathlon_cookie`: wartość nagłówka `Cookie` z zalogowanej
-strony Decathlon GO. App użyje go do `/api/auth/refresh`, zapisze odświeżony JWT w
-`/data/state.json` i będzie ponawiać refresh bez ręcznego wklejania tokenu co 15 minut.
+Automatyczna rejestracja jest domyślnie wyłączona. Po włączeniu app tworzy transakcję
+Decathlon GO (`/api/v2/transactions.create`) dla terminów, które przeszły filtry czasu —
+wymaga to sesji zalogowanego użytkownika.
+
+### Wystarczy samo cookie (token jest opcjonalny)
+
+Podaj **tylko `decathlon_cookie`** — wartość nagłówka `Cookie` z zalogowanej strony
+Decathlon GO. App sam:
+
+1. pobierze świeży JWT z `/api/auth/refresh` (to cookie uwierzytelnia refresh),
+2. sprawdzi `exp` tokenu i **odświeży go proaktywnie**, zanim wygaśnie,
+3. zapisze token w `/data/state.json`, więc przeżyje restart,
+4. w razie `401` odświeży i ponowi próbę.
+
+JWT (`go-sdk-jwt`) żyje krótko, więc wklejanie go ręcznie ma sens tylko jako jednorazowy
+test — `decathlon_token` zostawiliśmy jako opcję, ale przy podanym cookie jest zbędny.
+
+**Skąd wziąć cookie:** zalogowana strona `go.decathlon.pl` → DevTools → **Network** →
+dowolne żądanie do `go.decathlon.pl` → **Request Headers** → skopiuj wartość `Cookie`.
+
+> Cookie to **pełne poświadczenie sesji** — leży jawnym tekstem w `/data/options.json`
+> dodatku i w backupach HA. Traktuj je jak hasło.
 
 `auto_register_dry_run` jest domyślnie włączone: app wykonuje walidację/wstępną wycenę,
 ale nie zapisuje uczestnika. Ustaw `auto_register_dry_run: false` dopiero po sprawdzeniu
