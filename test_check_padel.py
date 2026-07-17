@@ -665,6 +665,36 @@ class TestJwtOnlyAuth(unittest.TestCase):
         self.assertEqual(d["decathlon_rt"], "rt1")
 
 
+class TestTokenExpiryMargin(unittest.TestCase):
+    """Margines musi dawać zapas na check_interval — inaczej token wygasa między biegami."""
+
+    def test_margin_is_generous(self):
+        self.assertGreaterEqual(
+            cp.TOKEN_EXPIRY_MARGIN, 300,
+            "margines 60s < typowy check_interval -> token wygasa miedzy sprawdzeniami, "
+            "a refresh wygaslego JWT to 401")
+
+    def test_token_refreshed_before_expiry_not_after(self):
+        """Token ważny jeszcze 2 min musi być odświeżony ZAWCZASU (a nie dopiero po wygaśnięciu)."""
+        soon = jwt_with_exp(int(datetime.now(timezone.utc).timestamp()) + 120)
+        cfg = {"token": soon}
+        with mock.patch.object(cp, "refresh_decathlon_token",
+                               lambda t, c=None, r=None: ("swiezy.jwt.token", "")):
+            token, err = cp.ensure_decathlon_token(cfg)
+        self.assertIsNone(err)
+        self.assertEqual(token, "swiezy.jwt.token",
+                         "przy 2 min do konca i marginesie 300s trzeba odswiezyc")
+
+    def test_token_with_long_life_not_refreshed(self):
+        long_lived = jwt_with_exp(int(datetime.now(timezone.utc).timestamp()) + 3600)
+        cfg = {"token": long_lived}
+        with mock.patch.object(cp, "refresh_decathlon_token",
+                               side_effect=AssertionError("nie wolno odswiezac zywego tokenu")):
+            token, err = cp.ensure_decathlon_token(cfg)
+        self.assertEqual(token, long_lived)
+        self.assertIsNone(err)
+
+
 class TestCredentialSelfTest(unittest.TestCase):
     """Test poświadczeń działa BEZ wolnych terminów (opcja test_token / start)."""
 
