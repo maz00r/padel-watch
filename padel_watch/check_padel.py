@@ -645,7 +645,10 @@ def register_slot(slot, listing_price, cfg, speculative=False):
 
 
 AUTH_FAILURE_MARKERS = ("token odrzucony", "brak tokenu", "nie udało się odświeżyć tokenu")
-TOKEN_EXPIRY_MARGIN = 60  # odśwież JWT, gdy zostało mniej niż tyle sekund ważności
+# Odśwież JWT, gdy zostało mniej niż tyle sekund ważności. Musi być WYRAŹNIE większe
+# niż check_interval — inaczej token zdąży wygasnąć między jednym a drugim sprawdzeniem,
+# a /auth/refresh wygasłego tokenu zwraca 401 (sesja ślizgowa: odnawiamy żywy token).
+TOKEN_EXPIRY_MARGIN = 300
 LATEST_FIRST_VALUES = ("latest", "last", "desc", "najpozniejszy", "najpóźniejszy")
 MIN_INTERVAL_SECONDS = 2         # twarda dolna granica INTERVALS (ochrona przed blokadą IP)
 AGGRESSIVE_INTERVAL_SECONDS = 5  # poniżej tego logujemy ostrzeżenie
@@ -937,6 +940,16 @@ def run_once(announce_startup=False):
     test_token = boolish(os.environ.get("TEST_TOKEN") or cfg.get("test_token"))
     if (announce_startup or test_token) and (reg_cfg.get("enabled") or test_token):
         check_decathlon_credentials(reg_cfg, topic, book_url)
+    elif reg_cfg.get("enabled"):
+        # PODTRZYMANIE SESJI: token trzeba odnawiać w KAŻDEJ iteracji, nie tylko gdy jest
+        # co rezerwować. Inaczej po dłuższej ciszy (brak wolnych terminów) JWT wygasa, a
+        # /auth/refresh wygasłego tokenu zwraca 401 — i pierwsza okazja przepada.
+        # Wywołanie jest tanie: bez ruchu sieciowego, dopóki do wygaśnięcia > marginesu.
+        _tok, _err = ensure_decathlon_token(reg_cfg)
+        reg_cfg["auth_checked"] = True  # pozwala skasować alert, gdy token znów działa
+        if _err:
+            reg_cfg["auth_error"] = _err
+            log(f"! Podtrzymanie sesji Decathlon GO nieudane: {_err}")
 
     if prev is None:
         log("Pierwszy bieg — zapisuję baseline, bez alertów o pojedynczych terminach.")

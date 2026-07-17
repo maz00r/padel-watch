@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.12.2
+- **Naprawa: token gnił podczas ciszy i pierwsza okazja przepadała.** Sesja była
+  odnawiana tylko przy starcie dodatku albo gdy było co rezerwować. Po dłuższym okresie
+  bez wolnych terminów JWT wygasał, a `/auth/refresh` wygasłego tokenu zwraca **401**
+  (sesja ślizgowa — odnawia się ŻYWY token). Efekt: gdy termin w końcu się pojawiał,
+  auto-rejestracja padała na `nie udało się odświeżyć tokenu: HTTPError 401`.
+  Teraz sesja jest podtrzymywana w **każdej iteracji** (bez ruchu sieciowego, dopóki
+  do wygaśnięcia jest zapas).
+- `TOKEN_EXPIRY_MARGIN` podniesiony z 60 s do **300 s** — margines musi być wyraźnie
+  większy niż `check_interval`, inaczej token wygasa między jednym a drugim sprawdzeniem.
+
 ## 1.12.1
 - Alert „Token wygasł" mówi teraz wprost: wklej świeży `go-sdk-jwt` w `decathlon_token`
   (wcześniej odsyłał do nieaktualnego `decathlon_cookie`).
