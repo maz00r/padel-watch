@@ -47,9 +47,8 @@ pojawi się **nowy wolny termin** w wybranych godzinach.
 
 ### Gdy token przestanie działać
 
-JWT Decathlona żyje krótko, ale app **sam go odnawia** (`/api/auth/refresh`) i zapisuje
-w stanie — wklejasz go raz. Gdy jednak łańcuch odnowień się urwie (np. dodatek był długo
-wyłączony):
+Bez `decathlon_sso_cookie` JWT żyje ~15 min i nie da się go odnowić. Z ciasteczkiem SSO
+dodatek odtwarza sesję sam. Gdy jednak i to zawiedzie (cookie SSO wygasło po ~18 dniach):
 
 - dostaniesz **push ntfy „⚠️ Token Decathlon wygasł"** (raz na incydent, nie co minutę),
 - w logu zobaczysz `token odrzucony (HTTP 401) — wklej świeży go-sdk-jwt`,
@@ -109,20 +108,18 @@ potrzebna jest jedna wartość: **`go-sdk-jwt`**.
 (Firefox: **Storage**) → **Local Storage** → `https://go.decathlon.pl` → klucz
 **`go-sdk-jwt`** → skopiuj wartość do opcji `decathlon_token`.
 
-Dalej app radzi sobie sam:
+> ⚠️ **Sam JWT wystarcza tylko na ~15 minut.** Tyle żyje token, a **odświeżyć go się nie
+> da** — `/api/auth/refresh` zwraca 401 nawet dla tokenu, który jest jeszcze ważny.
+> Powód: aplikacja webowa nigdy nie prosi o refresh token, więc `go-unsafe-rt` nie
+> istnieje i nie ma czego wysłać. Przeglądarka zamiast tego przechodzi przez SSO przy
+> każdym ładowaniu strony — dlatego po odświeżeniu wciąż jesteś zalogowany.
 
-1. sprawdza `exp` tokenu i **odświeża go proaktywnie**, zanim wygaśnie
-   (`/api/auth/refresh` z `Authorization: Bearer <obecny jwt>` — dokładnie jak robi to
-   strona Decathlona),
-2. zapisuje świeży JWT w `/data/state.json`, więc przeżywa restart,
-3. jeśli serwer zwróci rotowany refresh token (`rt`), też go zapamiętuje i odsyła,
-4. w razie `401` odświeża i ponawia próbę.
+**Kiedy sam `decathlon_token` wystarczy:** gdy polujesz w konkretnym oknie (np. kort
+publikuje grafik o 11:00). Wklej świeży JWT tuż przed — auto-rezerwacja działa przez ~15 min.
+Jedno wklejenie, zero dodatkowego ryzyka.
 
-Dzięki temu **wklejasz JWT raz** — łańcuch odnowień trwa, dopóki dodatek działa.
-
-> **Kiedy trzeba wkleić ponownie?** Gdy dodatek jest zatrzymany dłużej niż żywotność
-> tokenu, łańcuch się urywa. Dostaniesz wtedy push „⚠️ Token Decathlon wygasł" i wklejasz
-> świeży `go-sdk-jwt`. Przy działającym dodatku nie powinno się to zdarzać.
+**Gdy chcesz działanie bezobsługowe:** dodaj `decathlon_sso_cookie` (sekcja niżej) —
+dodatek sam odtworzy sesję, tak jak robi to przeglądarka.
 
 > `decathlon_cookie` zostało jako opcja awaryjna, ale w GO **nie ma ciasteczka sesji** —
 > w nagłówku `Cookie` znajdziesz wyłącznie Google Analytics i Hotjar. Zostaw puste.
