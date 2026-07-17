@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.14.0
+- **Nowa opcja `decathlon_sso_cookie` — koniec wklejania JWT co 15 minut.** Dodatek
+  potrafi odtworzyć sesję tak, jak robi to przeglądarka: `SESSION` → `authorize` →
+  `code` → `/auth/login/with-decathlon/token`.
+- **Prosimy JAWNIE o refresh token** (`useUnsafeRefreshToken: true`) — czego aplikacja
+  webowa nie robi. To wyjaśnia, dlaczego w `localStorage` nie ma `go-unsafe-rt`
+  i dlaczego `/auth/refresh` zwracał 401 nawet dla żywego tokenu: nie było czego wysłać.
+  Gdy serwer zwróci `rt`, kolejne odnowienia obejdą się **bez ciasteczka SSO**.
+- Kolejność prób w `ensure_decathlon_token()`: ważny token → refresh → bootstrap SSO.
+  Przy żywym tokenie SSO nie jest w ogóle ruszane.
+- Czytelna diagnostyka: `SSO odesłało do ekranu logowania — cookie SESSION nieważne
+  lub wygasłe` zamiast gołego 401.
+
 ## 1.13.0
 - **`test_token` sprawdza teraz token PRAWDZIWYM zapytaniem do API**, a nie tylko
   lokalnym odczytem `exp` z JWT. Wcześniej `✓ token OK` znaczyło jedynie „token się

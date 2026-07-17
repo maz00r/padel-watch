@@ -41,6 +41,8 @@ DECATHLON_API_URL = "https://go.decathlon.pl/api"
 # Lekki, uwierzytelniony GET bez skutków ubocznych — służy do sprawdzenia, czy serwer
 # akceptuje token (bez tokenu zwraca 403, ze złym 401, z dobrym 200).
 DECATHLON_VERIFY_PATH = "/user-consent/my-consents"
+GO_REDIRECT_URL = "https://go.decathlon.pl/logged-in"  # redirect_uri zarejestrowany w OAuth
+SSO_LOGIN_HOST = "login.decathlon.net"  # przekierowanie tutaj = sesja SSO nieważna
 UA = "padel-watch/1.0 (+https://go.decathlon.pl)"
 UUID_RE = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 
@@ -486,37 +488,165 @@ def refresh_decathlon_token(token, cookie=None, refresh_token=None):
     return refreshed, (doc.get("rt") or "").strip()
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Nie podążaj za przekierowaniem — chcemy odczytać `code` z nagłówka Location."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def sso_login_url():
+    """Pyta Decathlon GO o adres logowania OAuth (zawiera client_id, scope itd.)."""
+    url = (f"{DECATHLON_API_URL}/auth/login/with-decathlon/data"
+           f"?redirectUrl={urllib.parse.quote(GO_REDIRECT_URL, safe='')}&state=")
+    login_url = (http_get_json(url).get("loginUrl") or "").strip()
+    if not login_url:
+        raise ValueError("brak loginUrl w odpowiedzi Decathlon GO")
+    return login_url
+
+
+def sso_authorize_code(login_url, sso_cookie):
+    """Woła authorize z ciasteczkiem SSO i wyciąga `code` z przekierowania.
+
+    Zwraca (code, błąd). Przekierowanie na login.decathlon.net oznacza, że sesja SSO
+    jest nieważna — wtedy trzeba wkleić świeże ciasteczko.
+    """
+    req = urllib.request.Request(login_url, headers={
+        "User-Agent": UA,
+        "Accept": "text/html,application/xhtml+xml",
+        "Cookie": (sso_cookie or "").strip(),
+    })
+    try:
+        with urllib.request.build_opener(_NoRedirect).open(req, timeout=30) as resp:
+            return None, f"SSO nie przekierowało (HTTP {resp.status}) — nieoczekiwana odpowiedź"
+    except urllib.error.HTTPError as e:
+        location = e.headers.get("Location") or ""
+        try:
+            e.close()
+        except Exception:  # noqa: BLE001
+            pass
+        if e.code not in (301, 302, 303, 307, 308):
+            return None, f"authorize HTTP {e.code}"
+        if SSO_LOGIN_HOST in location:
+            return None, "SSO odesłało do ekranu logowania — cookie SESSION nieważne lub wygasłe"
+        found = re.search(r"[?&]code=([^&]+)", location)
+        if not found:
+            return None, f"brak `code` w przekierowaniu ({location[:100]})"
+        return urllib.parse.unquote(found.group(1)), None
+    except (urllib.error.URLError, TimeoutError) as e:
+        return None, f"SSO niedostępne: {e!r}"
+
+
+def exchange_code_for_token(code):
+    """Wymienia `code` na (jwt, rt), JAWNIE prosząc o refresh token.
+
+    Aplikacja webowa NIE prosi o `rt` (stąd brak `go-unsafe-rt` w localStorage i 401
+    z /auth/refresh — nie ma czego wysłać). My prosimy wprost, żeby móc potem odnawiać
+    sesję bez ciasteczka SSO.
+    """
+    payload = {"code": code, "redirectUrl": GO_REDIRECT_URL, "useUnsafeRefreshToken": True}
+    req = urllib.request.Request(
+        f"{DECATHLON_API_URL}/auth/login/with-decathlon/token",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "User-Agent": UA,
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "Accept-Encoding": "gzip",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        raw = resp.read()
+        if resp.headers.get("Content-Encoding") == "gzip":
+            raw = gzip.decompress(raw)
+    doc = json.loads(raw.decode("utf-8")) if raw else {}
+    jwt = clean_decathlon_token(doc.get("jwt"))
+    if not jwt:
+        raise ValueError("Decathlon GO nie zwrócił JWT przy wymianie code")
+    return jwt, (doc.get("rt") or "").strip()
+
+
+def bootstrap_decathlon_session(sso_cookie):
+    """Jednorazowy bootstrap sesji: SESSION -> authorize -> code -> (jwt, rt).
+
+    Gdy uda się zdobyć `rt`, kolejne odnowienia idą przez /auth/refresh i ciasteczko
+    SSO nie jest już potrzebne (można je usunąć z konfiguracji).
+    Zwraca (jwt, rt, błąd).
+    """
+    if not (sso_cookie or "").strip():
+        return None, None, "brak decathlon_sso_cookie"
+    try:
+        login_url = sso_login_url()
+    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ValueError) as e:
+        return None, None, f"nie pobrałem loginUrl: {e!r}"
+    code, err = sso_authorize_code(login_url, sso_cookie)
+    if err:
+        return None, None, err
+    try:
+        jwt, rt = exchange_code_for_token(code)
+    except urllib.error.HTTPError as e:
+        detail = ""
+        try:
+            detail = e.read().decode("utf-8", "replace")[:160]
+        except Exception:  # noqa: BLE001
+            pass
+        return None, None, f"wymiana code nieudana (HTTP {e.code}): {detail}"
+    except (urllib.error.URLError, TimeoutError, ValueError) as e:
+        return None, None, f"wymiana code nieudana: {e!r}"
+    return jwt, rt, None
+
+
 def ensure_decathlon_token(cfg):
     """Zwraca (token, błąd). Utrzymuje JWT przy życiu, odświeżając go PROAKTYWNIE.
 
-    W Decathlon GO poświadczeniem jest sam JWT (localStorage `go-sdk-jwt`) — wklejasz
-    go RAZ, a dodatek odnawia go zanim wygaśnie, więc łańcuch trwa dopóki działa:
-    - token ważny            -> używamy bez ruchu sieciowego,
-    - token wygasa/wygasł    -> refresh (JWT + opcjonalnie cookie/refresh token),
-    - nie umiemy odczytać exp -> próbujemy jak jest (401 obsłuży fallback).
+    Kolejność prób:
+    1. token wciąż ważny            -> używamy, bez ruchu sieciowego,
+    2. refresh (`rt` / token / cookie) -> najtańsze odnowienie,
+    3. bootstrap przez SSO           -> gdy mamy `decathlon_sso_cookie`; przy okazji
+       prosimy o `rt`, dzięki czemu kolejne odnowienia obejdą się bez cookie.
     """
     token = clean_decathlon_token(cfg.get("token"))
     cookie = (cfg.get("refresh_cookie") or "").strip()
     rt = (cfg.get("refresh_token") or "").strip()
+    sso = (cfg.get("sso_cookie") or "").strip()
     exp = jwt_expiry(token) if token else 0
     expired = bool(token) and exp > 0 and exp <= time.time() + TOKEN_EXPIRY_MARGIN
     if token and not expired:
         return token, None
-    if not (token or cookie or rt):
-        return None, "brak tokenu Decathlon GO (wklej go-sdk-jwt w decathlon_token)"
-    try:
-        fresh, new_rt = refresh_decathlon_token(token, cookie, rt)
-    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ValueError) as e:
-        if token and not expired:
-            return token, None
-        return (token or None), f"nie udało się odświeżyć tokenu: {e!r}"
-    cfg["token"] = fresh
-    cfg["token_refreshed"] = True
-    if new_rt:
-        cfg["refresh_token"] = new_rt  # serwer rotuje refresh token — zapamiętaj nowy
-    log("~ Token Decathlon GO wygasał — odświeżony." if token
-        else "~ Pobrano świeży token Decathlon GO.")
-    return fresh, None
+
+    last_err = None
+    if token or cookie or rt:
+        try:
+            fresh, new_rt = refresh_decathlon_token(token, cookie, rt)
+            cfg["token"] = fresh
+            cfg["token_refreshed"] = True
+            if new_rt:
+                cfg["refresh_token"] = new_rt  # serwer rotuje rt — zapamiętaj nowy
+            log("~ Token Decathlon GO wygasał — odświeżony." if token
+                else "~ Pobrano świeży token Decathlon GO.")
+            return fresh, None
+        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ValueError) as e:
+            last_err = f"nie udało się odświeżyć tokenu: {e!r}"
+
+    if sso:
+        jwt, new_rt, err = bootstrap_decathlon_session(sso)
+        if not err:
+            cfg["token"] = jwt
+            cfg["token_refreshed"] = True
+            if new_rt:
+                cfg["refresh_token"] = new_rt
+                log("~ Sesja odtworzona przez SSO; dostałem refresh token — "
+                    "cookie SSO nie będzie już potrzebne.")
+            else:
+                log("~ Sesja odtworzona przez SSO, ale serwer NIE zwrócił refresh tokenu "
+                    "— cookie SSO zostanie potrzebne przy kolejnym odnowieniu.")
+            return jwt, None
+        last_err = f"bootstrap SSO nieudany: {err}"
+
+    if last_err:
+        return (token or None), last_err
+    return None, "brak tokenu Decathlon GO (wklej go-sdk-jwt w decathlon_token)"
 
 
 def verify_decathlon_token(token):
@@ -559,7 +689,8 @@ def check_decathlon_credentials(cfg, topic=None, book_url=None):
     Weryfikuje token PRAWDZIWYM zapytaniem do API, a nie tylko lokalnym odczytem `exp`.
     """
     cfg["auth_checked"] = True
-    if not (cfg.get("token") or cfg.get("refresh_cookie") or cfg.get("refresh_token")):
+    if not (cfg.get("token") or cfg.get("refresh_cookie") or cfg.get("refresh_token")
+            or cfg.get("sso_cookie")):
         msg = "brak tokenu Decathlon GO (wklej go-sdk-jwt w decathlon_token)"
         log(f"✗ Test poświadczeń: {msg} — auto-rezerwacja nie zadziała.")
         cfg["auth_error"] = msg
@@ -694,7 +825,8 @@ def register_slot(slot, listing_price, cfg, speculative=False):
     return True, state or "zarejestrowano"
 
 
-AUTH_FAILURE_MARKERS = ("token odrzucony", "brak tokenu", "nie udało się odświeżyć tokenu")
+AUTH_FAILURE_MARKERS = ("token odrzucony", "brak tokenu",
+                        "nie udało się odświeżyć tokenu", "bootstrap SSO nieudany")
 # Odśwież JWT, gdy zostało mniej niż tyle sekund ważności. Musi być WYRAŹNIE większe
 # niż check_interval — inaczej token zdąży wygasnąć między jednym a drugim sprawdzeniem,
 # a /auth/refresh wygasłego tokenu zwraca 401 (sesja ślizgowa: odnawiamy żywy token).
@@ -910,6 +1042,7 @@ def run_once(announce_startup=False):
             (state_doc or {}).get("decathlon_jwt") or "",
         ),
         "refresh_cookie": os.environ.get("DECATHLON_COOKIE") or cfg.get("decathlon_cookie") or "",
+        "sso_cookie": os.environ.get("DECATHLON_SSO_COOKIE") or cfg.get("decathlon_sso_cookie") or "",
         # rt bywa zwracany przez serwer przy odświeżaniu i zapisywany w stanie (rotacja).
         "refresh_token": (state_doc or {}).get("decathlon_rt") or "",
         "name": os.environ.get("AUTO_REGISTER_NAME") or cfg.get("auto_register_name") or "",

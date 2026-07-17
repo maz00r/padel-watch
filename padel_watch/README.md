@@ -29,6 +29,7 @@ pojawi się **nowy wolny termin** w wybranych godzinach.
 | `auto_register_dry_run` | testuje zapis bez tworzenia rezerwacji | `true` |
 | `decathlon_token` | **JWT z localStorage (`go-sdk-jwt`) — to wystarczy**, app sam go odnawia | `eyJ...` |
 | `decathlon_cookie` | opcjonalne; zwykle **niepotrzebne** — GO nie używa ciasteczka sesji | `` |
+| `decathlon_sso_cookie` | ciasteczko `SESSION` z SSO (`decathlon.net`, `Path=/connect/`). Pozwala odtworzyć sesję **bez wklejania JWT co 15 min** | `SESSION=...` |
 | `auto_register_name` | imię i nazwisko uczestnika wysyłane w rezerwacji | `Jan Kowalski` |
 | `auto_register_age` | wiek uczestnika, jeśli wydarzenie go wymaga | `34` |
 | `auto_register_paid` | pozwól tworzyć transakcje także dla płatnych terminów; płatność nadal trzeba dokończyć ręcznie | `false` |
@@ -125,6 +126,41 @@ Dzięki temu **wklejasz JWT raz** — łańcuch odnowień trwa, dopóki dodatek 
 
 > `decathlon_cookie` zostało jako opcja awaryjna, ale w GO **nie ma ciasteczka sesji** —
 > w nagłówku `Cookie` znajdziesz wyłącznie Google Analytics i Hotjar. Zostaw puste.
+
+### Automatyczne odnawianie sesji (`decathlon_sso_cookie`)
+
+JWT z `go-sdk-jwt` żyje **~15 minut** i **nie da się go odświeżyć** — `/auth/refresh`
+zwraca 401 nawet dla żywego tokenu, bo aplikacja webowa nigdy nie prosi o refresh token
+(w `localStorage` nie ma `go-unsafe-rt`). Przeglądarka po prostu przechodzi przez SSO
+przy każdym ładowaniu strony — dlatego po odświeżeniu wciąż jesteś zalogowany.
+
+Dodatek potrafi zrobić to samo:
+
+```
+SESSION → /auth/login/with-decathlon/data → authorize → code
+        → /auth/login/with-decathlon/token  { useUnsafeRefreshToken: true }
+        → { jwt, rt }
+```
+
+Prosimy **jawnie o `rt`** (czego aplikacja webowa nie robi). Jeśli serwer go zwróci,
+kolejne odnowienia idą przez `/auth/refresh` i **ciasteczko SSO nie jest już potrzebne**
+— możesz je wtedy usunąć z konfiguracji.
+
+**Skąd wziąć `SESSION`:**
+
+1. Zalogowany, otwórz `https://go.decathlon.pl` i w DevTools włącz **Network**
+2. Wejdź na adres `authorize` (patrz log dodatku albo `/auth/login/with-decathlon/data`)
+3. Znajdź żądanie `authorize` → **Request Headers** → `Cookie:` → skopiuj fragment `SESSION=...`
+4. Wklej do `decathlon_sso_cookie` **w HA** (nie do czatu!)
+
+> ⚠️ `SESSION` to **pełna tożsamość Decathlona** (sklep, zamówienia, dane płatnicze),
+> ważna ~18 dni. Leży jawnym tekstem w `/data/options.json` i w backupach HA.
+> Po udanym bootstrapie (gdy w logu zobaczysz „dostałem refresh token") **usuń je**.
+
+Diagnostyka w logu:
+- `~ Sesja odtworzona przez SSO; dostałem refresh token` — sukces, cookie zbędne
+- `~ ...ale serwer NIE zwrócił refresh tokenu` — cookie będzie potrzebne dalej
+- `bootstrap SSO nieudany: SSO odesłało do ekranu logowania` — cookie nieważne/wygasłe
 
 ### Sprawdzenie tokenu bez czekania na wolny termin (`test_token`)
 
