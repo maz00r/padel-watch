@@ -1,17 +1,18 @@
 # Changelog
 
-## 1.14.0
-- **Nowa opcja `decathlon_sso_cookie` — koniec wklejania JWT co 15 minut.** Dodatek
-  potrafi odtworzyć sesję tak, jak robi to przeglądarka: `SESSION` → `authorize` →
-  `code` → `/auth/login/with-decathlon/token`.
-- **Prosimy JAWNIE o refresh token** (`useUnsafeRefreshToken: true`) — czego aplikacja
-  webowa nie robi. To wyjaśnia, dlaczego w `localStorage` nie ma `go-unsafe-rt`
-  i dlaczego `/auth/refresh` zwracał 401 nawet dla żywego tokenu: nie było czego wysłać.
-  Gdy serwer zwróci `rt`, kolejne odnowienia obejdą się **bez ciasteczka SSO**.
-- Kolejność prób w `ensure_decathlon_token()`: ważny token → refresh → bootstrap SSO.
-  Przy żywym tokenie SSO nie jest w ogóle ruszane.
-- Czytelna diagnostyka: `SSO odesłało do ekranu logowania — cookie SESSION nieważne
-  lub wygasłe` zamiast gołego 401.
+## 1.15.0
+- **Usunięta opcja `decathlon_sso_cookie` (wprowadzona w 1.14.0) — ta droga nie działa
+  i jest szkodliwa.** Odtwarzanie logowania SSO z serwera (`SESSION` → `authorize` →
+  `code` → `token`) Decathlon traktuje jako logowanie z nowego urządzenia i **wysyła kod
+  weryfikacyjny na e-mail**. To celowa kontrola bezpieczeństwa (step-up auth), której nie
+  należy obchodzić. Zostawienie opcji oznaczałoby generowanie alertów bezpieczeństwa na
+  koncie użytkownika przy każdej próbie.
+- Dokumentacja mówi teraz prawdę zamiast obietnicy: **JWT żyje ~15 min i NIE da się go
+  odnowić** (`/api/auth/refresh` zwraca 401 nawet dla żywego tokenu — sprawdzone na
+  tokenie z 4 min życia). Aplikacja webowa nigdy nie prosi o refresh token, więc
+  `go-unsafe-rt` nie istnieje i nie ma czego wysłać.
+- Praktyczne użycie auto-rezerwacji: wklej świeży `go-sdk-jwt` tuż przed oknem, w którym
+  polujesz. Monitorowanie i powiadomienia ntfy działają non-stop i nie zależą od tokenu.
 
 ## 1.13.0
 - **`test_token` sprawdza teraz token PRAWDZIWYM zapytaniem do API**, a nie tylko
