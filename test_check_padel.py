@@ -695,6 +695,88 @@ class TestTokenExpiryMargin(unittest.TestCase):
         self.assertIsNone(err)
 
 
+class TestVerifyToken(unittest.TestCase):
+    """`token OK` musi znaczyc 'serwer potwierdzil', a nie 'exp wyglada dobrze'."""
+
+    class _Resp(io.BytesIO):
+        status = 200
+        headers = {"get": staticmethod(lambda n: None)}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def test_valid_token_verified_against_server(self):
+        seen = {}
+
+        def fake_urlopen(req, timeout=30):
+            seen["url"] = req.full_url
+            seen["auth"] = dict(req.header_items()).get("Authorization")
+            return self._Resp(b"{}")
+
+        with mock.patch.object(cp.urllib.request, "urlopen", fake_urlopen):
+            ok, detail = cp.verify_decathlon_token("a.b.c")
+        self.assertTrue(ok)
+        self.assertEqual(seen["url"], "https://go.decathlon.pl/api/user-consent/my-consents")
+        self.assertEqual(seen["auth"], "Bearer a.b.c")
+
+    def test_rejected_token_is_false(self):
+        err = urllib.error.HTTPError("u", 401, "Unauthorized", {}, io.BytesIO(b"{}"))
+        with mock.patch.object(cp.urllib.request, "urlopen", side_effect=err):
+            ok, detail = cp.verify_decathlon_token("a.b.c")
+        self.assertFalse(ok)
+        self.assertIn("401", detail)
+
+    def test_network_error_is_unknown_not_failure(self):
+        with mock.patch.object(cp.urllib.request, "urlopen",
+                               side_effect=urllib.error.URLError("brak sieci")):
+            ok, _ = cp.verify_decathlon_token("a.b.c")
+        self.assertIsNone(ok, "awaria sieci to nie jest odrzucenie tokenu")
+
+    def test_empty_token_short_circuits(self):
+        with mock.patch.object(cp.urllib.request, "urlopen",
+                               side_effect=AssertionError("nie wolno strzelac bez tokenu")):
+            ok, _ = cp.verify_decathlon_token("")
+        self.assertFalse(ok)
+
+    def test_check_reports_failure_when_server_rejects(self):
+        """Kluczowe: lokalnie wazny JWT, ale serwer go odrzuca -> musi byc ✗, nie ✓."""
+        valid_locally = jwt_with_exp(int(datetime.now(timezone.utc).timestamp()) + 3600)
+        cfg = {"token": valid_locally}
+        with mock.patch.object(cp, "verify_decathlon_token", lambda t: (False, "HTTP 401")), \
+                mock.patch.object(cp, "notify_auth_problem") as fake_notify, \
+                mock.patch.object(cp, "log") as fake_log:
+            ok = cp.check_decathlon_credentials(cfg, topic="temat")
+        self.assertFalse(ok)
+        self.assertIn("ODRZUCIŁ", cfg["auth_error"])
+        fake_notify.assert_called_once()
+        self.assertTrue(any("✗" in str(c) for c in fake_log.call_args_list))
+
+    def test_check_reports_success_when_server_accepts(self):
+        valid = jwt_with_exp(int(datetime.now(timezone.utc).timestamp()) + 3600)
+        cfg = {"token": valid}
+        with mock.patch.object(cp, "verify_decathlon_token", lambda t: (True, "HTTP 200")), \
+                mock.patch.object(cp, "log") as fake_log:
+            ok = cp.check_decathlon_credentials(cfg)
+        self.assertTrue(ok)
+        self.assertIsNone(cfg["auth_error"])
+        joined = " ".join(str(c) for c in fake_log.call_args_list)
+        self.assertIn("serwer potwierdził", joined)
+
+    def test_network_unknown_does_not_raise_alert(self):
+        valid = jwt_with_exp(int(datetime.now(timezone.utc).timestamp()) + 3600)
+        cfg = {"token": valid}
+        with mock.patch.object(cp, "verify_decathlon_token", lambda t: (None, "sieć")), \
+                mock.patch.object(cp, "notify_auth_problem") as fake_notify, \
+                mock.patch.object(cp, "log"):
+            ok = cp.check_decathlon_credentials(cfg, topic="temat")
+        self.assertTrue(ok)
+        self.assertIsNone(cfg["auth_error"])
+        fake_notify.assert_not_called()
+
+
 class TestCredentialSelfTest(unittest.TestCase):
     """Test poświadczeń działa BEZ wolnych terminów (opcja test_token / start)."""
 
@@ -702,13 +784,14 @@ class TestCredentialSelfTest(unittest.TestCase):
         exp = int(datetime.now(timezone.utc).timestamp()) + 3600
         cfg = {"token": "", "refresh_cookie": "sid=abc"}
         with mock.patch.object(cp, "refresh_decathlon_token", lambda t, c=None, r=None: (jwt_with_exp(exp), "")), \
+                mock.patch.object(cp, "verify_decathlon_token", lambda t: (True, "HTTP 200")), \
                 mock.patch.object(cp, "log") as fake_log:
             ok = cp.check_decathlon_credentials(cfg)
         self.assertTrue(ok)
         self.assertIsNone(cfg["auth_error"])
         joined = " ".join(str(c) for c in fake_log.call_args_list)
-        self.assertIn("token OK", joined)
-        self.assertIn("ważny do", joined, "log ma podać do kiedy token jest ważny")
+        self.assertIn("token DZIAŁA", joined)
+        self.assertIn("Ważny do", joined, "log ma podać do kiedy token jest ważny")
 
     def test_missing_everything_reports_and_sets_error(self):
         cfg = {"token": "", "refresh_cookie": ""}
@@ -732,10 +815,35 @@ class TestCredentialSelfTest(unittest.TestCase):
         """Test poświadczeń nie może niczego rezerwować."""
         cfg = {"token": "", "refresh_cookie": "sid=abc"}
         with mock.patch.object(cp, "refresh_decathlon_token", lambda t, c=None, r=None: ("a.b.c", "")), \
+                mock.patch.object(cp, "verify_decathlon_token", lambda t: (True, "HTTP 200")), \
                 mock.patch.object(cp, "register_slot", side_effect=AssertionError("nie wolno rezerwować!")), \
                 mock.patch.object(cp, "decathlon_rpc", side_effect=AssertionError("nie wolno wołać RPC!")), \
                 mock.patch.object(cp, "log"):
             self.assertTrue(cp.check_decathlon_credentials(cfg))
+
+    def test_verification_is_a_plain_get(self):
+        """Weryfikacja musi byc GET-em bez skutkow ubocznych (nie POST)."""
+        seen = {}
+
+        class _R(io.BytesIO):
+            status = 200
+            headers = {"get": staticmethod(lambda n: None)}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        def fake_urlopen(req, timeout=30):
+            seen["method"] = req.get_method()
+            seen["data"] = req.data
+            return _R(b"{}")
+
+        with mock.patch.object(cp.urllib.request, "urlopen", fake_urlopen):
+            cp.verify_decathlon_token("a.b.c")
+        self.assertEqual(seen["method"], "GET")
+        self.assertIsNone(seen["data"], "GET nie moze miec body")
 
     def test_marks_auth_checked(self):
         cfg = {"token": "", "refresh_cookie": ""}

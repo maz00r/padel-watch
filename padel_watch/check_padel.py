@@ -38,6 +38,9 @@ LISTING_URL = "https://go.decathlon.pl/api/listing/{id}"  # lekki (~1 KB): kort 
 LISTING_DATES_URL = LISTING_URL + "?include=dates"        # ciężki (~257 KB): + wszystkie terminy
 LISTING_PAGE_URL = "https://go.decathlon.pl/l/{id}"       # strona kortu (podąża za 301 na nowe ID)
 DECATHLON_API_URL = "https://go.decathlon.pl/api"
+# Lekki, uwierzytelniony GET bez skutków ubocznych — służy do sprawdzenia, czy serwer
+# akceptuje token (bez tokenu zwraca 403, ze złym 401, z dobrym 200).
+DECATHLON_VERIFY_PATH = "/user-consent/my-consents"
 UA = "padel-watch/1.0 (+https://go.decathlon.pl)"
 UUID_RE = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 
@@ -516,12 +519,44 @@ def ensure_decathlon_token(cfg):
     return fresh, None
 
 
-def check_decathlon_credentials(cfg, topic=None, book_url=None):
-    """Test poświadczeń — sprawdza, czy da się zdobyć token. NIE wymaga wolnego terminu.
+def verify_decathlon_token(token):
+    """Pyta SERWER, czy token faktycznie działa (GET, bez skutków ubocznych).
 
-    Uruchamiany przy starcie (gdy auto_register jest włączone) albo na żądanie opcją
-    `test_token`. Nic nie rezerwuje — tylko próbuje pobrać/odświeżyć JWT i mówi wprost,
-    czy cookie działa i do kiedy token jest ważny.
+    Samo sprawdzenie `exp` z JWT jest lokalne i nic nie dowodzi — token może być
+    poprawnie zbudowany i niewygasły, a serwer i tak go odrzuci. Tu robimy prawdziwe
+    uwierzytelnione zapytanie: 200 = działa, 401/403 = nie.
+    Zwraca (ok, szczegóły), gdzie ok: True/False/None (None = nie dało się ustalić).
+    """
+    token = clean_decathlon_token(token)
+    if not token:
+        return False, "brak tokenu"
+    req = urllib.request.Request(
+        f"{DECATHLON_API_URL}{DECATHLON_VERIFY_PATH}",
+        headers={
+            "User-Agent": UA,
+            "Accept": "application/json",
+            "Accept-Encoding": "gzip",
+            "Authorization": f"Bearer {token}",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return (200 <= resp.status < 300), f"HTTP {resp.status}"
+    except urllib.error.HTTPError as e:
+        try:
+            e.close()
+        except Exception:  # noqa: BLE001
+            pass
+        return False, f"HTTP {e.code}"
+    except (urllib.error.URLError, TimeoutError) as e:
+        return None, f"sieć niedostępna: {e!r}"
+
+
+def check_decathlon_credentials(cfg, topic=None, book_url=None):
+    """Test poświadczeń — NIE wymaga wolnego terminu i nic nie rezerwuje.
+
+    Uruchamiany przy starcie (gdy auto_register jest włączone) albo opcją `test_token`.
+    Weryfikuje token PRAWDZIWYM zapytaniem do API, a nie tylko lokalnym odczytem `exp`.
     """
     cfg["auth_checked"] = True
     if not (cfg.get("token") or cfg.get("refresh_cookie") or cfg.get("refresh_token")):
@@ -536,13 +571,28 @@ def check_decathlon_credentials(cfg, topic=None, book_url=None):
         if topic:
             notify_auth_problem(topic, err, book_url)
         return False
+
+    ok, detail = verify_decathlon_token(token)
+    left_txt = ""
     exp = jwt_expiry(token)
     if exp:
         left = max(0, int(exp - time.time()))
         when = datetime.fromtimestamp(exp, _log_tz()).strftime("%Y-%m-%d %H:%M:%S")
-        log(f"✓ Test poświadczeń: token OK, ważny do {when} (jeszcze ~{left // 60} min).")
-    else:
-        log("✓ Test poświadczeń: token pobrany (nie odczytałem daty ważności).")
+        left_txt = f" Ważny do {when} (jeszcze ~{left // 60} min)."
+
+    if ok is False:
+        msg = f"serwer ODRZUCIŁ token ({detail}) — wklej świeży go-sdk-jwt"
+        log(f"✗ Test poświadczeń: {msg}.{left_txt}")
+        cfg["auth_error"] = msg
+        if topic:
+            notify_auth_problem(topic, msg, book_url)
+        return False
+    if ok is None:
+        # Nie wiadomo — nie traktujemy jak błędu auth, żeby awaria sieci nie wywołała alertu.
+        log(f"? Test poświadczeń: nie zweryfikowałem tokenu ({detail}).{left_txt}")
+        cfg["auth_error"] = None
+        return True
+    log(f"✓ Test poświadczeń: token DZIAŁA — serwer potwierdził ({detail}).{left_txt}")
     cfg["auth_error"] = None
     return True
 

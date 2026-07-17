@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.13.0
+- **`test_token` sprawdza teraz token PRAWDZIWYM zapytaniem do API**, a nie tylko
+  lokalnym odczytem `exp` z JWT. Wcześniej `✓ token OK` znaczyło jedynie „token się
+  parsuje i ma przyszłą datę ważności" — serwer nigdy nie był pytany, więc komunikat
+  dawał fałszywy spokój przy tokenie, którego API nie akceptuje.
+- Nowy `verify_decathlon_token()`: uwierzytelniony GET `/api/user-consent/my-consents`
+  (bez skutków ubocznych). 200 = działa, 401/403 = odrzucony, błąd sieci = „nie wiadomo"
+  (nie wywołuje fałszywego alertu).
+- Log rozróżnia trzy stany: `✓ token DZIAŁA — serwer potwierdził`,
+  `✗ serwer ODRZUCIŁ token (HTTP 401)`, `? nie zweryfikowałem tokenu (sieć)`.
+
 ## 1.12.2
 - **Naprawa: token gnił podczas ciszy i pierwsza okazja przepadała.** Sesja była
   odnawiana tylko przy starcie dodatku albo gdy było co rezerwować. Po dłuższym okresie
