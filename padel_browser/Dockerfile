@@ -17,6 +17,8 @@ RUN apk add --no-cache \
 
 COPY read_token.py /app/read_token.py
 COPY run.sh /run.sh
+# Strona startowa panelu (Ingress ładuje '/'): autopołączenie noVNC ścieżkami względnymi.
+COPY index.html /usr/share/novnc/index.html
 RUN chmod a+x /run.sh
 
 ENV CHROME_PROFILE=/data/chrome-profile \

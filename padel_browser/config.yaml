@@ -1,5 +1,5 @@
 name: Padel Browser (PoC)
-version: "0.1.0"
+version: "0.2.0"
 slug: padel_browser
 description: PoC — przeglądarka na serwerze do utrzymania sesji Decathlon GO. Logujesz się raz w panelu, dodatek odczytuje token.
 url: https://github.com/maz00r/padel-watch
