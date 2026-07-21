@@ -4,15 +4,23 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Padel Browser</title>
-<!-- Ingress ładuje '/'. Przekierowujemy na noVNC ze ścieżkami WZGLĘDNYMI, żeby
-     websocket ('path=websockify') rozwiązał się pod prefiksem Ingress HA. -->
-<meta http-equiv="refresh"
-      content="0; url=vnc.html?autoconnect=true&reconnect=true&resize=scale&path=websockify">
 <style>
   body { font-family: system-ui, sans-serif; background:#111; color:#eee;
          display:flex; height:100vh; margin:0; align-items:center; justify-content:center; }
   a { color:#4da3ff; }
 </style>
+<script>
+  // noVNC buduje adres websocketu OD KORZENIA (ws://host/PATH), a HA Ingress serwuje
+  // panel pod prefiksem /api/hassio_ingress/<token>/. Dlatego 'path' musi zawierać ten
+  // prefiks — obliczamy go z bieżącej ścieżki (katalog strony + 'websockify'),
+  // bez wiodącego '/', bo noVNC sam go dokleja.
+  (function () {
+    var dir = location.pathname.replace(/[^/]*$/, "");      // ".../ingress/<token>/"
+    var path = (dir + "websockify").replace(/^\/+/, "");     // "api/hassio_ingress/<token>/websockify"
+    var q = "autoconnect=true&reconnect=true&resize=scale&path=" + encodeURIComponent(path);
+    location.replace("vnc.html?" + q);
+  })();
+</script>
 </head>
 <body>
 <p>Ładowanie przeglądarki…
