@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Padel Browser</title>
+<!-- Ingress ładuje '/'. Przekierowujemy na noVNC ze ścieżkami WZGLĘDNYMI, żeby
+     websocket ('path=websockify') rozwiązał się pod prefiksem Ingress HA. -->
+<meta http-equiv="refresh"
+      content="0; url=vnc.html?autoconnect=true&reconnect=true&resize=scale&path=websockify">
+<style>
+  body { font-family: system-ui, sans-serif; background:#111; color:#eee;
+         display:flex; height:100vh; margin:0; align-items:center; justify-content:center; }
+  a { color:#4da3ff; }
+</style>
+</head>
+<body>
+<p>Ładowanie przeglądarki…
+   <a href="vnc.html?autoconnect=true&reconnect=true&resize=scale&path=websockify">otwórz ręcznie</a>
+</p>
+</body>
+</html>
