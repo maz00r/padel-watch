@@ -1,0 +1,21 @@
+name: Padel Browser (PoC)
+version: "0.1.0"
+slug: padel_browser
+description: PoC — przeglądarka na serwerze do utrzymania sesji Decathlon GO. Logujesz się raz w panelu, dodatek odczytuje token.
+url: https://github.com/maz00r/padel-watch
+arch:
+  - amd64
+  - aarch64
+init: false
+startup: application
+boot: manual
+ingress: true
+ingress_port: 8099
+panel_icon: mdi:web
+panel_title: Padel Browser
+options:
+  start_url: "https://go.decathlon.pl"
+  read_interval: 600
+schema:
+  start_url: url
+  read_interval: int(60,3600)
