@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.3.0 — scalenie: przeglądarka + monitor w jednym dodatku
+- **Dodatek `padel_browser` przejmuje silnik monitora** (`check_padel.py`, dawniej osobny
+  `padel_watch`). Teraz jeden dodatek: przeglądarka do logowania **oraz** monitorowanie i
+  auto-rejestracja. Osobny `padel_watch` został usunięty (dwa równoległe dodatki groziły
+  podwójnymi rezerwacjami).
+- **Auto-rejestracja bez wklejania tokenu.** PoC potwierdził (2026-07-21): po jednorazowym
+  ręcznym zalogowaniu w panelu sesja utrzymuje się na serwerze, a strona sama odnawia
+  `go-sdk-jwt`. Przeglądarka (`read_token.py`) zapisuje świeży token do `/data/token.json`,
+  monitor go stąd czyta (`DECATHLON_TOKEN_FILE`). `decathlon_token` w opcjach jest teraz
+  tylko awaryjnym obejściem.
+- Domyślny `read_interval` obniżony do 300 s, by token w pliku był zawsze świeższy niż
+  margines wygaśnięcia (żywotność JWT ~15 min).
+- `boot: auto` — dodatek wstaje po restarcie HA; profil Chromium w `/data` przeżywa restart,
+  więc logowanie jest potrzebne tylko po faktycznym wygaśnięciu sesji.
+
 ## 1.15.0
 - **Usunięta opcja `decathlon_sso_cookie` (wprowadzona w 1.14.0) — ta droga nie działa
   i jest szkodliwa.** Odtwarzanie logowania SSO z serwera (`SESSION` → `authorize` →

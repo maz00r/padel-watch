@@ -22,6 +22,22 @@ CDP_URL = "http://127.0.0.1:9222"
 START_URL = os.environ.get("START_URL") or "https://go.decathlon.pl"
 READ_INTERVAL = int(os.environ.get("READ_INTERVAL") or 600)
 JWT_KEY = "go-sdk-jwt"
+# Plik wymiany tokenu z monitorem (check_padel.py) w tym samym kontenerze. Gdy pusty,
+# działamy jak PoC — tylko raportujemy ważność, niczego nie zapisujemy.
+TOKEN_FILE = os.environ.get("DECATHLON_TOKEN_FILE") or ""
+
+
+def write_token_file(jwt, exp):
+    """Zapisuje świeży token atomowo (zapis do .tmp + rename), by monitor nie czytał połówki."""
+    if not TOKEN_FILE:
+        return
+    tmp = TOKEN_FILE + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"jwt": jwt, "exp": exp}, f)
+        os.replace(tmp, TOKEN_FILE)
+    except OSError as e:
+        log(f"! Nie zapisałem pliku tokenu {TOKEN_FILE}: {e!r}")
 
 
 def log(*args):
@@ -115,6 +131,7 @@ def main():
                 log(f"✗ {err}")
             else:
                 exp = jwt_expiry(jwt)
+                write_token_file(jwt, exp)  # udostępnij monitorowi w tym samym kontenerze
                 if exp:
                     left = int(exp - time.time())
                     when = datetime.fromtimestamp(exp, timezone.utc).astimezone()
