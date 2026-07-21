@@ -33,6 +33,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # CONFIG_PATH / STATE_DIR można nadpisać zmienną środowiskową (przydatne w Dockerze).
 CONFIG_PATH = os.environ.get("CONFIG_PATH") or os.path.join(HERE, "config.json")
 STATE_PATH = os.path.join(os.environ.get("STATE_DIR") or HERE, "state.json")
+# Gdy monitor działa w tym samym kontenerze co przeglądarka (scalony dodatek), przeglądarka
+# zapisuje świeży go-sdk-jwt do tego pliku, a monitor go stąd czyta — bez ręcznego wklejania.
+TOKEN_FILE = os.environ.get("DECATHLON_TOKEN_FILE") or ""
 
 LISTING_URL = "https://go.decathlon.pl/api/listing/{id}"  # lekki (~1 KB): kort + datesStats
 LISTING_DATES_URL = LISTING_URL + "?include=dates"        # ciężki (~257 KB): + wszystkie terminy
@@ -430,6 +433,23 @@ def jwt_expiry(token):
         return int(data.get("exp") or 0)
     except (TypeError, ValueError):
         return 0
+
+
+def token_from_file():
+    """Czyta go-sdk-jwt zapisany przez przeglądarkę (scalony dodatek). Zwraca '' gdy brak.
+
+    Format pliku: {"jwt": "...", "exp": 1721570000}. Plik może chwilowo nie istnieć
+    (przeglądarka jeszcze nie zalogowana) — wtedy po prostu spadamy na token z configu.
+    """
+    path = TOKEN_FILE
+    if not path:
+        return ""
+    try:
+        with open(path, encoding="utf-8") as f:
+            doc = json.load(f)
+    except (OSError, ValueError):
+        return ""
+    return clean_decathlon_token(doc.get("jwt"))
 
 
 def newer_decathlon_token(config_token, state_token):
@@ -905,8 +925,12 @@ def run_once(announce_startup=False):
     reg_cfg = {
         "enabled": boolish(os.environ.get("AUTO_REGISTER") or cfg.get("auto_register")),
         "speculative": boolish(os.environ.get("AUTO_REGISTER_DRY_RUN") or cfg.get("auto_register_dry_run")),
+        # Kolejność źródeł tokenu: przeglądarka (plik, zawsze najświeższy) > ręcznie
+        # wklejony w opcjach > zapamiętany w stanie. newer_decathlon_token wybierze ten
+        # o najdalszym exp, więc świeży token z przeglądarki naturalnie wygrywa.
         "token": newer_decathlon_token(
-            os.environ.get("DECATHLON_TOKEN") or cfg.get("decathlon_token") or "",
+            token_from_file()
+            or os.environ.get("DECATHLON_TOKEN") or cfg.get("decathlon_token") or "",
             (state_doc or {}).get("decathlon_jwt") or "",
         ),
         "refresh_cookie": os.environ.get("DECATHLON_COOKIE") or cfg.get("decathlon_cookie") or "",

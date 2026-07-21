@@ -1,21 +1,55 @@
-name: Padel Browser (PoC)
-version: "0.2.2"
+name: Padel (Decathlon) — monitor + logowanie
+version: "0.3.0"
 slug: padel_browser
-description: PoC — przeglądarka na serwerze do utrzymania sesji Decathlon GO. Logujesz się raz w panelu, dodatek odczytuje token.
+description: Monitoruje wolne terminy padla i (opcjonalnie) rejestruje automatycznie. Logujesz się raz w panelu, dodatek sam podtrzymuje sesję i token.
 url: https://github.com/maz00r/padel-watch
 arch:
   - amd64
   - aarch64
 init: false
 startup: application
-boot: manual
+boot: auto
 ingress: true
 ingress_port: 8099
-panel_icon: mdi:web
-panel_title: Padel Browser
+panel_icon: mdi:tennis
+panel_title: Padel
 options:
+  ntfy_topic: "your-ntfy-topic-here"
+  check_interval: 60
+  filters: "mon-fri:15:00-02:00; sat-sun:00:00-24:00"
+  intervals: ""
+  listing_url: "https://go.decathlon.pl/l/1c0ec93e-ca77-44b9-a3a6-c72a99d050dd"
+  timezone: "Europe/Warsaw"
+  auto_register: false
+  auto_register_dry_run: true
+  auto_register_name: ""
+  auto_register_age: ""
+  auto_register_paid: false
+  auto_register_max: 1
+  auto_register_order: "earliest"
+  clear_state: ""
+  test_token: false
   start_url: "https://go.decathlon.pl"
-  read_interval: 600
+  read_interval: 300
+  decathlon_token: ""
+  decathlon_cookie: ""
 schema:
+  ntfy_topic: str
+  check_interval: int(10,3600)
+  filters: str?
+  intervals: str?
+  listing_url: url
+  timezone: str
+  auto_register: bool
+  auto_register_dry_run: bool
+  auto_register_name: str?
+  auto_register_age: str?
+  auto_register_paid: bool
+  auto_register_max: int(0,10)
+  auto_register_order: list(earliest|latest)
+  clear_state: list(|registered|all)
+  test_token: bool
   start_url: url
   read_interval: int(60,3600)
+  decathlon_token: str?
+  decathlon_cookie: str?

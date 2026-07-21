@@ -16,6 +16,7 @@ RUN apk add --no-cache \
     && pip3 install --no-cache-dir --break-system-packages websocket-client
 
 COPY read_token.py /app/read_token.py
+COPY check_padel.py /app/check_padel.py
 COPY run.sh /run.sh
 # Strona startowa panelu (Ingress ładuje '/'): autopołączenie noVNC ścieżkami względnymi.
 COPY index.html /usr/share/novnc/index.html

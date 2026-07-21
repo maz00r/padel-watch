@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from unittest import mock
 from zoneinfo import ZoneInfo
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "padel_watch"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "padel_browser"))
 import check_padel as cp  # noqa: E402
 
 TZ = ZoneInfo("Europe/Warsaw")
@@ -1007,6 +1007,50 @@ class TestClearState(unittest.TestCase):
         os.environ["CLEAR_STATE"] = "all"
         cp.apply_clear_state()  # nie może rzucić
         self.assertFalse(os.path.exists(self.path))
+
+
+class TokenFromFileTest(unittest.TestCase):
+    """Token pisany przez przeglądarkę (scalony dodatek) i czytany przez monitor."""
+
+    def test_reads_jwt_from_file(self):
+        tok = jwt_with_exp(9999999999)
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+            json.dump({"jwt": tok, "exp": 9999999999}, f)
+            path = f.name
+        try:
+            with mock.patch.object(cp, "TOKEN_FILE", path):
+                self.assertEqual(cp.token_from_file(), tok)
+        finally:
+            os.unlink(path)
+
+    def test_strips_prefixes(self):
+        tok = jwt_with_exp(9999999999)
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+            json.dump({"jwt": f"Bearer {tok}"}, f)
+            path = f.name
+        try:
+            with mock.patch.object(cp, "TOKEN_FILE", path):
+                self.assertEqual(cp.token_from_file(), tok)
+        finally:
+            os.unlink(path)
+
+    def test_missing_file_returns_empty(self):
+        with mock.patch.object(cp, "TOKEN_FILE", "/nonexistent/definitely/xyz.json"):
+            self.assertEqual(cp.token_from_file(), "")
+
+    def test_disabled_when_unset(self):
+        with mock.patch.object(cp, "TOKEN_FILE", ""):
+            self.assertEqual(cp.token_from_file(), "")
+
+    def test_bad_json_returns_empty(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+            f.write("{ to nie jest json")
+            path = f.name
+        try:
+            with mock.patch.object(cp, "TOKEN_FILE", path):
+                self.assertEqual(cp.token_from_file(), "")
+        finally:
+            os.unlink(path)
 
 
 if __name__ == "__main__":

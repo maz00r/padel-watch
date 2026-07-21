@@ -16,4 +16,4 @@ jobs:
       - name: Testy jednostkowe
         run: python3 -m unittest -v test_check_padel
       - name: Składnia silnika
-        run: python3 -m py_compile padel_watch/check_padel.py
+        run: python3 -m py_compile padel_browser/check_padel.py padel_browser/read_token.py
