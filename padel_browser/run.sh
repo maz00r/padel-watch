@@ -22,9 +22,14 @@ Xvfb :1 -screen 0 1280x900x24 -nolisten tcp &
 sleep 2
 
 # 2) Chromium z TRWAŁYM profilem (/data przeżywa restarty) + CDP do odczytu tokenu.
-#    --no-sandbox jest konieczne w kontenerze bez uprawnień do user namespaces.
+#    --no-sandbox: konieczne w kontenerze bez user namespaces.
+#    Flagi GPU wymuszają czysty rendering programowy (SwiftShader) i wyciszają zalew
+#    błędów Vulkan/ANGLE/GPU-process w kontenerze bez akceleracji sprzętowej.
+#    --enable-logging=stderr --log-level=3 -> tylko błędy krytyczne (mniej szumu w Dzienniku).
 chromium-browser \
-  --no-sandbox --disable-gpu --disable-dev-shm-usage \
+  --no-sandbox --disable-dev-shm-usage \
+  --disable-gpu --disable-gpu-compositing \
+  --enable-logging=stderr --log-level=3 \
   --user-data-dir="$CHROME_PROFILE" \
   --remote-debugging-port=9222 --remote-allow-origins='*' \
   --window-position=0,0 --window-size=1280,900 \
