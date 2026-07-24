@@ -115,56 +115,55 @@ Automatyczna rejestracja jest domyślnie wyłączona. Po włączeniu app tworzy 
 Decathlon GO (`/api/v2/transactions.create`) dla terminów, które przeszły filtry czasu —
 wymaga to sesji zalogowanego użytkownika.
 
-### Wystarczy sam token (`go-sdk-jwt`)
+### Skąd bierze się token
 
-Decathlon GO trzyma uwierzytelnienie w **localStorage**, nie w ciasteczku — dlatego
-potrzebna jest jedna wartość: **`go-sdk-jwt`**.
+Decathlon GO trzyma uwierzytelnienie w **localStorage** przeglądarki (klucz
+**`go-sdk-jwt`**), a token żyje **~15 minut**. Serwerowo nie da się go odnowić
+(`/api/auth/refresh` zwraca 401), ale **zalogowana strona odnawia go sama** przy
+każdym ładowaniu. Dlatego dodatek trzyma prawdziwe Chromium: czytnik tokenu budzi się
+tuż po wygaśnięciu, wczytuje stronę, a świeży token zapisuje do `/data/token.json`,
+skąd bierze go monitor. Czytnik **nie przeszkadza Ci w panelu**: nie przeładowuje
+strony, gdy token jest ważny ani gdy trwa logowanie.
 
-**Skąd ją wziąć:** zalogowane `go.decathlon.pl` → DevTools → **Application**
-(Firefox: **Storage**) → **Local Storage** → `https://go.decathlon.pl` → klucz
-**`go-sdk-jwt`** → skopiuj wartość do opcji `decathlon_token`.
+W Dzienniku wygląda to tak:
 
-> ⚠️ **JWT żyje ~15 minut i nie da się go odnowić.** `/api/auth/refresh` zwraca 401
-> nawet dla tokenu, który jest jeszcze ważny (sprawdzone: token z 4 min życia → 401).
-> Powód: aplikacja webowa nigdy nie prosi o refresh token, więc `go-unsafe-rt` nie
-> istnieje i nie ma czego wysłać. Przeglądarka zamiast tego przechodzi przez SSO przy
-> każdym ładowaniu strony — dlatego po odświeżeniu strony wciąż jesteś zalogowany.
+```
+✓ JWT odczytany, ważny do 2026-07-21 13:18:10 (jeszcze ~14 min). Kolejny odczyt za ~14 min.
+✗ strona logowania otwarta (…) — czekam, dokończ w panelu
+⚠ JWT w localStorage WYGASŁ 3 min temu — sesja mogła paść; sprawdź panel i zaloguj się ponownie.
+```
 
-**Praktyczne użycie:** wklej świeży JWT tuż przed oknem, w którym polujesz (np. gdy kort
-publikuje grafik). Auto-rezerwacja działa przez ~15 min. Monitorowanie i powiadomienia
-ntfy działają non-stop i **nie zależą od tokenu**.
+> **Dlaczego nie w pełni serwerowo?** Odtworzenie logowania SSO z serwera Decathlon
+> traktuje jako logowanie z nowego urządzenia i **wysyła kod weryfikacyjny na e-mail**.
+> To celowa kontrola bezpieczeństwa i nie należy jej obchodzić. Dlatego logujesz się
+> ręcznie w panelu — raz, jak na każdym nowym urządzeniu.
 
-> **Dlaczego nie da się tego zautomatyzować?** Próbowaliśmy odtworzyć logowanie SSO
-> serwerowo (`SESSION` → `authorize` → `code` → `token`). Decathlon traktuje takie
-> żądanie jako logowanie z nowego urządzenia i **wysyła kod weryfikacyjny na e-mail**.
-> To celowa kontrola bezpieczeństwa i nie należy jej obchodzić. Jedyna sensowna droga do
-> pełnej automatyzacji to prawdziwa przeglądarka na serwerze, w której logujesz się
-> ręcznie (i sam przechodzisz weryfikację).
-
-> `decathlon_cookie` zostało jako opcja awaryjna, ale w GO **nie ma ciasteczka sesji** —
-> w nagłówku `Cookie` znajdziesz wyłącznie Google Analytics i Hotjar. Zostaw puste.
+> **Awaryjnie** możesz wkleić `go-sdk-jwt` ręcznie w opcję `decathlon_token`
+> (DevTools → Application → Local Storage). Wygrywa zawsze token o najdalszej dacie
+> ważności — niezależnie od źródła. `decathlon_cookie` zostaw puste (GO nie używa
+> ciasteczka sesji).
 
 ### Sprawdzenie tokenu bez czekania na wolny termin (`test_token`)
 
-Nie musisz czekać, aż kort się zwolni, żeby sprawdzić, czy token działa:
+Nie musisz czekać, aż kort się zwolni, żeby sprawdzić, czy auto-rezerwacja zadziała:
 
 1. **Konfiguracja** → `test_token: true` → **Zapisz** → **Uruchom ponownie**.
 2. W **Dzienniku** zobaczysz jeden z wpisów:
 
 ```
-✓ Test poświadczeń: token OK, ważny do 2026-07-16 12:41:03 (jeszcze ~118 min).
-✗ Test poświadczeń: nie udało się odświeżyć tokenu: <HTTPError 401: 'Unauthorized'>
-✗ Test poświadczeń: brak tokenu Decathlon GO (wklej go-sdk-jwt w decathlon_token)
+✓ Test poświadczeń: token DZIAŁA — serwer potwierdził (HTTP 200). Ważny do …
+✗ Test poświadczeń: serwer ODRZUCIŁ token (HTTP 401) — zaloguj się w panelu Padel
+✗ Test poświadczeń: brak tokenu — zaloguj się w panelu Padel
 ```
 
 3. Gdy zobaczysz `✓`, wyłącz `test_token` i włącz `auto_register`.
 
-Test **niczego nie rezerwuje** — tylko pobiera token. Działa nawet przy zerowej liczbie
-wolnych terminów i przy wyłączonej auto-rejestracji. Gdy `auto_register` jest włączone,
-ten sam test wykonuje się automatycznie przy każdym starcie dodatku.
+Test **niczego nie rezerwuje** — wykonuje jedno uwierzytelnione zapytanie GET. Działa
+nawet przy zerowej liczbie wolnych terminów i przy wyłączonej auto-rejestracji. Gdy
+`auto_register` jest włączone, ten sam test wykonuje się przy każdym starcie dodatku.
 
-> Cookie to **pełne poświadczenie sesji** — leży jawnym tekstem w `/data/options.json`
-> dodatku i w backupach HA. Traktuj je jak hasło.
+> Sesja w profilu Chromium (`/data`) i token w `/data/token.json` to **pełne
+> poświadczenia konta** — trafiają też do backupów HA. Traktuj je jak hasło.
 
 `auto_register_dry_run` jest domyślnie włączone: app wykonuje walidację/wstępną wycenę,
 ale nie zapisuje uczestnika. Ustaw `auto_register_dry_run: false` dopiero po sprawdzeniu

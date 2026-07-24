@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.3.1 — tryb przeglądarki: poprawki po pełnym przeglądzie projektu
+- **Monitor nie próbuje już serwerowego `/auth/refresh`** (w trybie przeglądarki zawsze
+  zwracał 401) — znika zalew `! Podtrzymanie sesji … nieudane` co iterację. Przy HTTP 401
+  podczas rejestracji monitor zamiast tego **czyta plik tokenu ponownie** (przeglądarka
+  mogła właśnie odnowić) i ponawia próbę.
+- **Naprawiony fałszywy alarm „token wygasł"**: margines 5 min (`TOKEN_EXPIRY_MARGIN`)
+  ma sens tylko dla proaktywnego refreshu, którego w trybie przeglądarki nie ma — strona
+  odnawia token dopiero po wygaśnięciu. Wcześniej token z <5 min życia był uznawany za
+  wygasły, co **blokowało rejestrację ważnym tokenem przez ~1/3 czasu**.
+- **Komunikaty trybu przeglądarki rozpoznawane jako błąd auth** (`AUTH_FAILURE_MARKERS`) —
+  bez tego nieudana rejestracja nie zapamiętywała terminu do ponowienia po zalogowaniu.
+- **Wygrywa najświeższy token niezależnie od źródła** (plik z przeglądarki / opcja
+  `decathlon_token` / stan) — wcześniej stary token z pliku zasłaniał ręcznie wklejony świeży.
+- **Czytnik tokenu nie przeszkadza w panelu**: nie przeładowuje strony gdy token ważny
+  ani gdy trwa logowanie (nie wyrywa formularza w trakcie wpisywania kodu z maila).
+- **Adaptacyjny harmonogram odczytu**: czytnik budzi się tuż po wygaśnięciu tokenu
+  (strona odnawia go dopiero wtedy), więc plik tokenu jest nieświeży najwyżej kilkanaście
+  sekund — wcześniej do 5 min, co groziło utratą gorącego terminu.
+- Wygasły token logowany jako `⚠ … WYGASŁ … sprawdź panel` zamiast mylącego
+  `✓ JWT odczytany (jeszcze ~-3 min)`; plik tokenu nie jest nadpisywany wygasłym.
+- Czytnik preferuje kartę z `go.decathlon.pl` (użytkownik może otworzyć inne zakładki).
+- **Chromium w pętli z autorestartem** — crash przeglądarki nie zostawia dodatku ślepym.
+- Alert ntfy o tokenie radzi teraz „otwórz panel Padel i zaloguj się" zamiast
+  „wklej go-sdk-jwt"; README opisuje tryb przeglądarki jako główną drogę.
+
 ## 0.3.0 — scalenie: przeglądarka + monitor w jednym dodatku
 - **Dodatek `padel_browser` przejmuje silnik monitora** (`check_padel.py`, dawniej osobny
   `padel_watch`). Teraz jeden dodatek: przeglądarka do logowania **oraz** monitorowanie i

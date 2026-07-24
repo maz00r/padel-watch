@@ -522,6 +522,20 @@ def ensure_decathlon_token(cfg):
     expired = bool(token) and exp > 0 and exp <= time.time() + TOKEN_EXPIRY_MARGIN
     if token and not expired:
         return token, None
+    if cfg.get("browser_mode"):
+        # Token pochodzi z zalogowanej przeglądarki (plik /data/token.json). To ONA odnawia
+        # sesję — serwerowy /auth/refresh i tak zwraca 401, więc nie zawracamy nim głowy.
+        # UWAGA na margines: TOKEN_EXPIRY_MARGIN istnieje dla proaktywnego refreshu, którego
+        # tu NIE ma. Strona odnawia token dopiero PO wygaśnięciu, więc tokeny spędzają
+        # ostatnie minuty życia „w marginesie" — a wciąż działają. Wygasły = faktycznie
+        # wygasły (exp w przeszłości), nie „wygasa za chwilę".
+        if token and (exp <= 0 or exp > time.time()):
+            return token, None
+        if not token:
+            return None, "brak tokenu — zaloguj się w panelu Padel"
+        # Faktycznie wygasły zwracamy mimo to (przeglądarka może właśnie go odnawiać —
+        # kolejna iteracja odczyta świeży z pliku), ale z czytelną wskazówką.
+        return token, "token wygasł — zaloguj się w panelu Padel"
     if not (token or cookie or rt):
         return None, "brak tokenu Decathlon GO (wklej go-sdk-jwt w decathlon_token)"
     try:
@@ -580,7 +594,9 @@ def check_decathlon_credentials(cfg, topic=None, book_url=None):
     """
     cfg["auth_checked"] = True
     if not (cfg.get("token") or cfg.get("refresh_cookie") or cfg.get("refresh_token")):
-        msg = "brak tokenu Decathlon GO (wklej go-sdk-jwt w decathlon_token)"
+        msg = ("brak tokenu — zaloguj się w panelu Padel"
+               if cfg.get("browser_mode")
+               else "brak tokenu Decathlon GO (wklej go-sdk-jwt w decathlon_token)")
         log(f"✗ Test poświadczeń: {msg} — auto-rezerwacja nie zadziała.")
         cfg["auth_error"] = msg
         return False
@@ -601,7 +617,9 @@ def check_decathlon_credentials(cfg, topic=None, book_url=None):
         left_txt = f" Ważny do {when} (jeszcze ~{left // 60} min)."
 
     if ok is False:
-        msg = f"serwer ODRZUCIŁ token ({detail}) — wklej świeży go-sdk-jwt"
+        hint = ("zaloguj się w panelu Padel" if cfg.get("browser_mode")
+                else "wklej świeży go-sdk-jwt")
+        msg = f"serwer ODRZUCIŁ token ({detail}) — {hint}"
         log(f"✗ Test poświadczeń: {msg}.{left_txt}")
         cfg["auth_error"] = msg
         if topic:
@@ -689,6 +707,17 @@ def register_slot(slot, listing_price, cfg, speculative=False):
                 except Exception:  # noqa: BLE001
                     pass
             if e.code == 401 and attempt == 0:
+                if cfg.get("browser_mode"):
+                    # Serwerowy refresh w GO nie działa (zawsze 401). Za to przeglądarka
+                    # mogła WŁAŚNIE odnowić token — przeczytaj plik jeszcze raz i ponów,
+                    # jeśli jest tam nowszy token niż ten, który dostał 401.
+                    fresh = token_from_file()
+                    if fresh and fresh != token:
+                        token = fresh
+                        cfg["token"] = fresh
+                        log("~ Świeższy token z przeglądarki po HTTP 401; ponawiam rejestrację")
+                        continue
+                    return False, "token odrzucony (HTTP 401) — zaloguj się w panelu Padel"
                 try:
                     token, new_rt = refresh_decathlon_token(
                         token, cfg.get("refresh_cookie"), cfg.get("refresh_token")
@@ -702,7 +731,9 @@ def register_slot(slot, listing_price, cfg, speculative=False):
                 except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ValueError) as refresh_error:
                     return False, f"token odrzucony (HTTP 401), refresh nieudany: {refresh_error!r}"
             if e.code in (401, 403):
-                return False, f"token odrzucony (HTTP {e.code}) — wklej świeży go-sdk-jwt"
+                hint = ("zaloguj się w panelu Padel" if cfg.get("browser_mode")
+                        else "wklej świeży go-sdk-jwt")
+                return False, f"token odrzucony (HTTP {e.code}) — {hint}"
             return False, f"Decathlon HTTP {e.code}: {detail or e.reason}"
         except (urllib.error.URLError, TimeoutError) as e:
             return False, f"Decathlon niedostępny: {e!r}"
@@ -714,7 +745,8 @@ def register_slot(slot, listing_price, cfg, speculative=False):
     return True, state or "zarejestrowano"
 
 
-AUTH_FAILURE_MARKERS = ("token odrzucony", "brak tokenu", "nie udało się odświeżyć tokenu")
+AUTH_FAILURE_MARKERS = ("token odrzucony", "brak tokenu", "nie udało się odświeżyć tokenu",
+                        "w panelu Padel")  # komunikaty trybu przeglądarki (scalony dodatek)
 # Odśwież JWT, gdy zostało mniej niż tyle sekund ważności. Musi być WYRAŹNIE większe
 # niż check_interval — inaczej token zdąży wygasnąć między jednym a drugim sprawdzeniem,
 # a /auth/refresh wygasłego tokenu zwraca 401 (sesja ślizgowa: odnawiamy żywy token).
@@ -883,9 +915,12 @@ def notify_auth_problem(topic, detail, book_url=None):
     if not topic:
         log("! Brak NTFY_TOPIC — pomijam alert o tokenie (tryb testowy).")
         return None
+    fix_hint = ("otwórz panel Padel w Home Assistant i zaloguj się ponownie"
+                if TOKEN_FILE else
+                "wklej świeży go-sdk-jwt w opcję decathlon_token "
+                "(DevTools → Application → Local Storage)")
     msg = (
-        "Auto-rezerwacja NIE działa — wklej świeży go-sdk-jwt w opcję decathlon_token "
-        "(DevTools → Application → Local Storage).\nMonitorowanie i powiadomienia o wolnych "
+        f"Auto-rezerwacja NIE działa — {fix_hint}.\nMonitorowanie i powiadomienia o wolnych "
         f"terminach działają normalnie.\n\nSzczegóły: {detail}"
     )
     return ntfy_post(
@@ -925,17 +960,22 @@ def run_once(announce_startup=False):
     reg_cfg = {
         "enabled": boolish(os.environ.get("AUTO_REGISTER") or cfg.get("auto_register")),
         "speculative": boolish(os.environ.get("AUTO_REGISTER_DRY_RUN") or cfg.get("auto_register_dry_run")),
-        # Kolejność źródeł tokenu: przeglądarka (plik, zawsze najświeższy) > ręcznie
-        # wklejony w opcjach > zapamiętany w stanie. newer_decathlon_token wybierze ten
-        # o najdalszym exp, więc świeży token z przeglądarki naturalnie wygrywa.
+        # Źródła tokenu: przeglądarka (plik) / ręcznie wklejony w opcjach / zapamiętany
+        # w stanie. Wygrywa ten o NAJDALSZYM exp — nie kolejność. Dzięki temu ręcznie
+        # wklejony świeży token działa nawet, gdy plik z przeglądarki trzyma stary
+        # (np. sesja padła), i odwrotnie.
         "token": newer_decathlon_token(
-            token_from_file()
-            or os.environ.get("DECATHLON_TOKEN") or cfg.get("decathlon_token") or "",
+            newer_decathlon_token(
+                token_from_file(),
+                os.environ.get("DECATHLON_TOKEN") or cfg.get("decathlon_token") or "",
+            ),
             (state_doc or {}).get("decathlon_jwt") or "",
         ),
         "refresh_cookie": os.environ.get("DECATHLON_COOKIE") or cfg.get("decathlon_cookie") or "",
         # rt bywa zwracany przez serwer przy odświeżaniu i zapisywany w stanie (rotacja).
         "refresh_token": (state_doc or {}).get("decathlon_rt") or "",
+        # Scalony dodatek: token odnawia przeglądarka, więc monitor NIE próbuje /auth/refresh.
+        "browser_mode": bool(TOKEN_FILE),
         "name": os.environ.get("AUTO_REGISTER_NAME") or cfg.get("auto_register_name") or "",
         "age": os.environ.get("AUTO_REGISTER_AGE") or cfg.get("auto_register_age") or None,
         "free_only": not boolish(os.environ.get("AUTO_REGISTER_PAID") or cfg.get("auto_register_paid")),
