@@ -1009,6 +1009,44 @@ class TestClearState(unittest.TestCase):
         self.assertFalse(os.path.exists(self.path))
 
 
+class BrowserModeTokenTest(unittest.TestCase):
+    """W trybie przeglądarki (scalony dodatek) monitor NIE robi /auth/refresh."""
+
+    @staticmethod
+    def fresh_jwt():
+        return jwt_with_exp(int(datetime.now(timezone.utc).timestamp()) + 3600)
+
+    @staticmethod
+    def expired_jwt():
+        return jwt_with_exp(int(datetime.now(timezone.utc).timestamp()) - 10)
+
+    def test_fresh_token_used_without_refresh(self):
+        valid = self.fresh_jwt()
+        cfg = {"token": valid, "browser_mode": True}
+        with mock.patch.object(cp, "refresh_decathlon_token",
+                               side_effect=AssertionError("w trybie przeglądarki nie wolno odświeżać")):
+            token, err = cp.ensure_decathlon_token(cfg)
+        self.assertIsNone(err)
+        self.assertEqual(token, valid)
+
+    def test_expired_token_not_refreshed_asks_login(self):
+        expired = self.expired_jwt()
+        cfg = {"token": expired, "browser_mode": True}
+        with mock.patch.object(cp, "refresh_decathlon_token",
+                               side_effect=AssertionError("w trybie przeglądarki nie wolno odświeżać")):
+            token, err = cp.ensure_decathlon_token(cfg)
+        self.assertEqual(token, expired)  # zwracamy jak jest — przeglądarka może właśnie odnawiać
+        self.assertIn("panel", err.lower())
+
+    def test_missing_token_asks_login(self):
+        cfg = {"token": "", "browser_mode": True}
+        with mock.patch.object(cp, "refresh_decathlon_token",
+                               side_effect=AssertionError("w trybie przeglądarki nie wolno odświeżać")):
+            token, err = cp.ensure_decathlon_token(cfg)
+        self.assertIsNone(token)
+        self.assertIn("panel", err.lower())
+
+
 class TokenFromFileTest(unittest.TestCase):
     """Token pisany przez przeglądarkę (scalony dodatek) i czytany przez monitor."""
 

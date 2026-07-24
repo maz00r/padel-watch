@@ -522,6 +522,15 @@ def ensure_decathlon_token(cfg):
     expired = bool(token) and exp > 0 and exp <= time.time() + TOKEN_EXPIRY_MARGIN
     if token and not expired:
         return token, None
+    if cfg.get("browser_mode"):
+        # Token pochodzi z zalogowanej przeglądarki (plik /data/token.json). To ONA odnawia
+        # sesję — serwerowy /auth/refresh i tak zwraca 401, więc nie zawracamy nim głowy.
+        # Token świeży obsłużył `return` wyżej; tutaj jest go brak albo wygasł -> trzeba
+        # (od)zalogować się w panelu. Wygasły zwracamy mimo to (przeglądarka może właśnie
+        # go odnawiać — kolejna iteracja odczyta nowy z pliku), ale z czytelną wskazówką.
+        if not token:
+            return None, "brak tokenu z przeglądarki — zaloguj się w panelu Padel"
+        return token, "token z przeglądarki wygasł — zaloguj się ponownie w panelu Padel"
     if not (token or cookie or rt):
         return None, "brak tokenu Decathlon GO (wklej go-sdk-jwt w decathlon_token)"
     try:
@@ -580,7 +589,9 @@ def check_decathlon_credentials(cfg, topic=None, book_url=None):
     """
     cfg["auth_checked"] = True
     if not (cfg.get("token") or cfg.get("refresh_cookie") or cfg.get("refresh_token")):
-        msg = "brak tokenu Decathlon GO (wklej go-sdk-jwt w decathlon_token)"
+        msg = ("brak tokenu z przeglądarki — zaloguj się w panelu Padel"
+               if cfg.get("browser_mode")
+               else "brak tokenu Decathlon GO (wklej go-sdk-jwt w decathlon_token)")
         log(f"✗ Test poświadczeń: {msg} — auto-rezerwacja nie zadziała.")
         cfg["auth_error"] = msg
         return False
@@ -936,6 +947,8 @@ def run_once(announce_startup=False):
         "refresh_cookie": os.environ.get("DECATHLON_COOKIE") or cfg.get("decathlon_cookie") or "",
         # rt bywa zwracany przez serwer przy odświeżaniu i zapisywany w stanie (rotacja).
         "refresh_token": (state_doc or {}).get("decathlon_rt") or "",
+        # Scalony dodatek: token odnawia przeglądarka, więc monitor NIE próbuje /auth/refresh.
+        "browser_mode": bool(TOKEN_FILE),
         "name": os.environ.get("AUTO_REGISTER_NAME") or cfg.get("auto_register_name") or "",
         "age": os.environ.get("AUTO_REGISTER_AGE") or cfg.get("auto_register_age") or None,
         "free_only": not boolish(os.environ.get("AUTO_REGISTER_PAID") or cfg.get("auto_register_paid")),

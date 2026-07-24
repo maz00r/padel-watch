@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.1 — tryb przeglądarki: koniec bezsensownego /auth/refresh
+- W scalonym dodatku (token z `/data/token.json`) monitor **nie próbuje już serwerowego
+  `/auth/refresh`** — to przeglądarka odnawia sesję, a refresh i tak zawsze zwracał 401.
+  Znika zalew `! Podtrzymanie sesji … nieudane: … HTTPError 401` co iterację oraz zbędne
+  zapytanie sieciowe.
+- Gdy token z przeglądarki wygasł lub go brak, komunikat mówi wprost **„zaloguj się w
+  panelu Padel"** zamiast „wklej go-sdk-jwt w decathlon_token".
+- Wygasły token z przeglądarki jest zwracany „jak jest" (kolejna iteracja odczyta świeży
+  z pliku, gdy przeglądarka go odnowi) — nie blokujemy się na jednej wygasłej próbie.
+
 ## 0.3.0 — scalenie: przeglądarka + monitor w jednym dodatku
 - **Dodatek `padel_browser` przejmuje silnik monitora** (`check_padel.py`, dawniej osobny
   `padel_watch`). Teraz jeden dodatek: przeglądarka do logowania **oraz** monitorowanie i
