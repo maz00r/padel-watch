@@ -48,6 +48,7 @@ export DECATHLON_TOKEN_FILE="/data/token.json" # wymiana tokenu: przeglądarka -
 case "$CHECK_INTERVAL" in "" | None) CHECK_INTERVAL=60 ;; esac
 case "$TIMEZONE" in "" | None) TIMEZONE="Europe/Warsaw" ;; esac
 export CHECK_INTERVAL TIMEZONE
+export TZ="$TIMEZONE"   # spójne znaczniki czasu w CAŁYM logu (czytnik tokenu też)
 
 mkdir -p "$CHROME_PROFILE"
 echo "[padel] start: url=${START_URL} read=${READ_INTERVAL}s check=${CHECK_INTERVAL}s listing=${LISTINGS}"
@@ -58,15 +59,20 @@ sleep 2
 
 # 2) Chromium z TRWAŁYM profilem (/data przeżywa restarty) + CDP do odczytu tokenu.
 #    Flagi GPU wymuszają rendering programowy i wyciszają szum błędów Vulkan/GPU-process.
-chromium-browser \
-  --no-sandbox --disable-dev-shm-usage \
-  --disable-gpu --disable-gpu-compositing \
-  --enable-logging=stderr --log-level=3 \
-  --user-data-dir="$CHROME_PROFILE" \
-  --remote-debugging-port=9222 --remote-allow-origins='*' \
-  --window-position=0,0 --window-size=1280,900 \
-  --no-first-run --no-default-browser-check \
-  "$START_URL" &
+#    Pętla z autorestartem: crash przeglądarki nie może zostawić dodatku ślepym —
+#    profil jest trwały, więc po restarcie sesja (zwykle) wraca bez logowania.
+( while true; do
+    chromium-browser \
+      --no-sandbox --disable-dev-shm-usage \
+      --disable-gpu --disable-gpu-compositing \
+      --enable-logging=stderr --log-level=3 \
+      --user-data-dir="$CHROME_PROFILE" \
+      --remote-debugging-port=9222 --remote-allow-origins='*' \
+      --window-position=0,0 --window-size=1280,900 \
+      --no-first-run --no-default-browser-check \
+      "$START_URL" || echo "[padel] Chromium zakończony — restart za 5s"
+    sleep 5
+  done ) &
 sleep 4
 
 # 3) VNC na ekran :1 (tylko lokalnie — na zewnątrz wychodzi wyłącznie noVNC przez Ingress)

@@ -1037,6 +1037,8 @@ class BrowserModeTokenTest(unittest.TestCase):
             token, err = cp.ensure_decathlon_token(cfg)
         self.assertEqual(token, expired)  # zwracamy jak jest — przeglądarka może właśnie odnawiać
         self.assertIn("panel", err.lower())
+        self.assertTrue(any(m in err for m in cp.AUTH_FAILURE_MARKERS),
+                        "musi być rozpoznane jako błąd auth (pending_ids + przerwanie przebiegu)")
 
     def test_missing_token_asks_login(self):
         cfg = {"token": "", "browser_mode": True}
@@ -1045,6 +1047,65 @@ class BrowserModeTokenTest(unittest.TestCase):
             token, err = cp.ensure_decathlon_token(cfg)
         self.assertIsNone(token)
         self.assertIn("panel", err.lower())
+        self.assertTrue(any(m in err for m in cp.AUTH_FAILURE_MARKERS))
+
+    def test_token_inside_margin_is_still_valid(self):
+        """Strona odnawia token dopiero PO wygaśnięciu — token z <5 min życia MUSI działać.
+
+        Regresja: margines TOKEN_EXPIRY_MARGIN (300 s) uznawał taki token za wygasły,
+        co blokowało rejestrację ważnym tokenem przez ~1/3 jego życia.
+        """
+        soon = jwt_with_exp(int(datetime.now(timezone.utc).timestamp()) + 120)  # 2 min < margines
+        cfg = {"token": soon, "browser_mode": True}
+        with mock.patch.object(cp, "refresh_decathlon_token",
+                               side_effect=AssertionError("w trybie przeglądarki nie wolno odświeżać")):
+            token, err = cp.ensure_decathlon_token(cfg)
+        self.assertIsNone(err)
+        self.assertEqual(token, soon)
+
+    def test_register_401_rereads_token_file(self):
+        """Po HTTP 401 w trybie przeglądarki monitor czyta plik tokenu ponownie i ponawia."""
+        seen = []
+
+        def fake_rpc(method, token, payload):
+            seen.append(token)
+            if len(seen) == 1:
+                raise urllib.error.HTTPError("u", 401, "Unauthorized", {}, io.BytesIO(b"{}"))
+            return {"processState": "accepted"}
+
+        now = int(datetime.now(timezone.utc).timestamp())
+        fresh = jwt_with_exp(now + 3700)  # świeższy niż token w cfg — MUSI się różnić
+        slot = {"id": "L:D", "listing_id": "L", "date_id": "D",
+                "start_utc": datetime(2026, 7, 7, 10, 0, tzinfo=timezone.utc), "price": None}
+        cfg = {"token": jwt_with_exp(now + 3600), "browser_mode": True,
+               "name": "Jan Kowalski", "free_only": True}
+        with mock.patch.object(cp, "decathlon_rpc", fake_rpc), \
+                mock.patch.object(cp, "token_from_file", lambda: fresh), \
+                mock.patch.object(cp, "refresh_decathlon_token",
+                                  side_effect=AssertionError("w trybie przeglądarki nie wolno odświeżać")):
+            ok, msg = cp.register_slot(slot, None, cfg, speculative=True)
+        self.assertTrue(ok)
+        self.assertEqual(seen[1], fresh, "druga próba musi iść świeżym tokenem z pliku")
+        self.assertEqual(cfg["token"], fresh)
+
+    def test_register_401_without_fresher_file_asks_login(self):
+        """Gdy plik nie ma świeższego tokenu, błąd mówi o panelu i jest błędem auth."""
+        same = self.fresh_jwt()
+
+        def fake_rpc(method, token, payload):
+            raise urllib.error.HTTPError("u", 401, "Unauthorized", {}, io.BytesIO(b"{}"))
+
+        slot = {"id": "L:D", "listing_id": "L", "date_id": "D",
+                "start_utc": datetime(2026, 7, 7, 10, 0, tzinfo=timezone.utc), "price": None}
+        cfg = {"token": same, "browser_mode": True, "name": "Jan Kowalski", "free_only": True}
+        with mock.patch.object(cp, "decathlon_rpc", fake_rpc), \
+                mock.patch.object(cp, "token_from_file", lambda: same), \
+                mock.patch.object(cp, "refresh_decathlon_token",
+                                  side_effect=AssertionError("w trybie przeglądarki nie wolno odświeżać")):
+            ok, msg = cp.register_slot(slot, None, cfg, speculative=True)
+        self.assertFalse(ok)
+        self.assertIn("panel", msg.lower())
+        self.assertTrue(any(m in msg for m in cp.AUTH_FAILURE_MARKERS))
 
 
 class TokenFromFileTest(unittest.TestCase):
