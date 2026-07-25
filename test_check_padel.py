@@ -1029,8 +1029,10 @@ class BrowserModeTokenTest(unittest.TestCase):
         self.assertIsNone(err)
         self.assertEqual(token, valid)
 
-    def test_expired_token_not_refreshed_asks_login(self):
-        expired = self.expired_jwt()
+    def test_long_expired_token_asks_login(self):
+        """Token martwy dłużej niż karencja -> błąd auth z instrukcją logowania."""
+        expired = jwt_with_exp(
+            int(datetime.now(timezone.utc).timestamp()) - cp.BROWSER_RENEW_GRACE - 60)
         cfg = {"token": expired, "browser_mode": True}
         with mock.patch.object(cp, "refresh_decathlon_token",
                                side_effect=AssertionError("w trybie przeglądarki nie wolno odświeżać")):
@@ -1039,6 +1041,20 @@ class BrowserModeTokenTest(unittest.TestCase):
         self.assertIn("panel", err.lower())
         self.assertTrue(any(m in err for m in cp.AUTH_FAILURE_MARKERS),
                         "musi być rozpoznane jako błąd auth (pending_ids + przerwanie przebiegu)")
+
+    def test_freshly_expired_token_is_renewal_dip_not_alarm(self):
+        """Dołek odnowy: świeżo wygasły token to norma (czytnik zaraz odnowi) — bez alarmu.
+
+        Regresja: bez karencji każdy ~15-minutowy cykl odnowy wysyłał fałszywy push
+        „token wygasł" w kilkunastosekundowym oknie między exp a zapisem świeżego pliku.
+        """
+        just_expired = self.expired_jwt()  # wygasł 10 s temu — głęboko w karencji
+        cfg = {"token": just_expired, "browser_mode": True}
+        with mock.patch.object(cp, "refresh_decathlon_token",
+                               side_effect=AssertionError("w trybie przeglądarki nie wolno odświeżać")):
+            token, err = cp.ensure_decathlon_token(cfg)
+        self.assertIsNone(err)
+        self.assertEqual(token, just_expired)
 
     def test_missing_token_asks_login(self):
         cfg = {"token": "", "browser_mode": True}
@@ -1100,6 +1116,7 @@ class BrowserModeTokenTest(unittest.TestCase):
         cfg = {"token": same, "browser_mode": True, "name": "Jan Kowalski", "free_only": True}
         with mock.patch.object(cp, "decathlon_rpc", fake_rpc), \
                 mock.patch.object(cp, "token_from_file", lambda: same), \
+                mock.patch.object(cp.time, "sleep"), \
                 mock.patch.object(cp, "refresh_decathlon_token",
                                   side_effect=AssertionError("w trybie przeglądarki nie wolno odświeżać")):
             ok, msg = cp.register_slot(slot, None, cfg, speculative=True)

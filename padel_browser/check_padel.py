@@ -533,8 +533,12 @@ def ensure_decathlon_token(cfg):
             return token, None
         if not token:
             return None, "brak tokenu — zaloguj się w panelu Padel"
-        # Faktycznie wygasły zwracamy mimo to (przeglądarka może właśnie go odnawiać —
-        # kolejna iteracja odczyta świeży z pliku), ale z czytelną wskazówką.
+        # DOŁEK ODNOWY: strona odnawia token dopiero po wygaśnięciu, a czytnik budzi się
+        # chwilę później — świeżo wygasły token to NORMALNY stan przejściowy (kilkanaście
+        # sekund co ~15 min). Alarmujemy dopiero, gdy leży martwy dłużej niż karencja —
+        # inaczej każdy cykl odnowy wysyłałby fałszywy push „token wygasł".
+        if time.time() - exp <= BROWSER_RENEW_GRACE:
+            return token, None
         return token, "token wygasł — zaloguj się w panelu Padel"
     if not (token or cookie or rt):
         return None, "brak tokenu Decathlon GO (wklej go-sdk-jwt w decathlon_token)"
@@ -709,10 +713,18 @@ def register_slot(slot, listing_price, cfg, speculative=False):
             if e.code == 401 and attempt == 0:
                 if cfg.get("browser_mode"):
                     # Serwerowy refresh w GO nie działa (zawsze 401). Za to przeglądarka
-                    # mogła WŁAŚNIE odnowić token — przeczytaj plik jeszcze raz i ponów,
-                    # jeśli jest tam nowszy token niż ten, który dostał 401.
-                    fresh = token_from_file()
-                    if fresh and fresh != token:
+                    # odnawia token tuż po jego wygaśnięciu (dołek odnowy trwa kilkanaście
+                    # sekund) — dlatego czekamy chwilę na świeży token w pliku, zamiast
+                    # oddawać gorący termin walkowerem. Czekanie jest ograniczone, żeby
+                    # przy faktycznie martwej sesji nie wisieć w nieskończoność.
+                    fresh = None
+                    for _ in range(8):  # do ~24 s: pokrywa cykl budzik->nawigacja->zapis
+                        got = token_from_file()
+                        if got and got != token:
+                            fresh = got
+                            break
+                        time.sleep(3)
+                    if fresh:
                         token = fresh
                         cfg["token"] = fresh
                         log("~ Świeższy token z przeglądarki po HTTP 401; ponawiam rejestrację")
@@ -751,6 +763,10 @@ AUTH_FAILURE_MARKERS = ("token odrzucony", "brak tokenu", "nie udało się odśw
 # niż check_interval — inaczej token zdąży wygasnąć między jednym a drugim sprawdzeniem,
 # a /auth/refresh wygasłego tokenu zwraca 401 (sesja ślizgowa: odnawiamy żywy token).
 TOKEN_EXPIRY_MARGIN = 300
+# Tryb przeglądarki: ile sekund po wygaśnięciu tokenu czekać na odnowienie przez stronę,
+# zanim uznamy to za problem. Czytnik budzi się ~10 s po exp i potrzebuje ~6 s na
+# załadowanie strony; karencja kryje też pojedynczy nieudany odczyt (retry po ~45 s).
+BROWSER_RENEW_GRACE = 180
 LATEST_FIRST_VALUES = ("latest", "last", "desc", "najpozniejszy", "najpóźniejszy")
 MIN_INTERVAL_SECONDS = 2         # twarda dolna granica INTERVALS (ochrona przed blokadą IP)
 AGGRESSIVE_INTERVAL_SECONDS = 5  # poniżej tego logujemy ostrzeżenie

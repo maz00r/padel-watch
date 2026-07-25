@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.3.2 — dołek odnowy tokenu bez fałszywych alarmów
+- **Karencja na dołek odnowy** (`BROWSER_RENEW_GRACE`, 3 min): strona odnawia token
+  dopiero PO wygaśnięciu, więc kilkanaście sekund „martwego" tokenu co ~15 min to norma.
+  Wcześniej każdy cykl odnowy potrafił wysłać fałszywy push „⚠️ Token wygasł" i dwa
+  wpisy `! Podtrzymanie sesji … nieudane` (widoczne w logu użytkownika z 0.3.1).
+  Alarm pojawia się teraz dopiero, gdy token leży martwy dłużej niż karencja.
+- **Rejestracja w dołku odnowy nie oddaje terminu walkowerem**: po HTTP 401 monitor
+  czeka do ~24 s na świeży token z przeglądarki (plik) i ponawia — zamiast od razu
+  meldować porażkę i odkładać termin do następnej iteracji.
+- Czytnik tokenu: po nieudanym odczycie (błąd CDP, wygasły token, czekanie na
+  logowanie) ponawia po ~45 s zamiast po pełnym `read_interval` — szybciej domyka
+  dołek i mieści się w karencji monitora nawet po pojedynczej wpadce.
+- Log czytnika pokazuje sekundy dla krótkich czasów (`jeszcze ~19 s`) zamiast
+  mylącego `~0 min`.
+
 ## 0.3.1 — tryb przeglądarki: poprawki po pełnym przeglądzie projektu
 - **Monitor nie próbuje już serwerowego `/auth/refresh`** (w trybie przeglądarki zawsze
   zwracał 401) — znika zalew `! Podtrzymanie sesji … nieudane` co iterację. Przy HTTP 401

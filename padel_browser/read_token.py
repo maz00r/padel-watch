@@ -34,6 +34,15 @@ LOGIN_URL_HINTS = ("login", "connect/oauth", "account.decathlon", "logged-in")
 # Minimalna przerwa między odczytami (nie młócimy CDP), oraz zapas po wygaśnięciu tokenu.
 MIN_SLEEP = 20
 RENEW_DELAY = 10
+# Po nieudanym odczycie (błąd CDP, wygasły token, czekanie na logowanie) próbujemy
+# szybciej niż READ_INTERVAL — monitor daje ~3 min karencji na dołek odnowy i ten
+# retry musi się w niej zmieścić nawet po pojedynczej wpadce.
+ERROR_RETRY = 45
+
+
+def fmt_left(seconds):
+    seconds = int(seconds)
+    return f"~{seconds} s" if seconds < 90 else f"~{seconds // 60} min"
 
 
 def log(*args):
@@ -165,24 +174,24 @@ def main():
     log(f"Czytnik tokenu wystartował. Strona: {START_URL}, max co {READ_INTERVAL}s.")
     log("Zaloguj się w panelu — profil Chromium zostaje w /data (przeżywa restarty).")
     while True:
-        sleep_s = READ_INTERVAL
+        # Domyślnie szybki retry — pełny READ_INTERVAL tylko po UDANYM odczycie.
+        sleep_s = ERROR_RETRY
         try:
             jwt, exp, err = read_jwt_once()
             if err:
                 log(f"✗ {err}")
             elif exp and exp <= time.time():
                 # Nie nadpisujemy pliku wygasłym tokenem — monitor mógłby zgubić lepszy.
-                left = int(time.time() - exp)
-                log(f"⚠ JWT w localStorage WYGASŁ {left // 60} min temu — sesja mogła paść; "
-                    f"sprawdź panel i zaloguj się ponownie.")
+                log(f"⚠ JWT w localStorage WYGASŁ {fmt_left(time.time() - exp)} temu — sesja "
+                    f"mogła paść; sprawdź panel i zaloguj się ponownie.")
             else:
                 write_token_file(jwt, exp)  # udostępnij monitorowi w tym samym kontenerze
                 sleep_s = next_sleep(exp)
                 if exp:
                     when = datetime.fromtimestamp(exp, timezone.utc).astimezone()
                     log(f"✓ JWT odczytany, ważny do {when:%Y-%m-%d %H:%M:%S} "
-                        f"(jeszcze ~{int(exp - time.time()) // 60} min). "
-                        f"Kolejny odczyt za ~{int(sleep_s) // 60} min.")
+                        f"(jeszcze {fmt_left(exp - time.time())}). "
+                        f"Kolejny odczyt za {fmt_left(sleep_s)}.")
                 else:
                     log(f"✓ JWT odczytany, ale nie odczytałem exp. Długość: {len(jwt)} zn.")
         except Exception as e:  # noqa: BLE001 - czytnik ma przetrwać każdy błąd
