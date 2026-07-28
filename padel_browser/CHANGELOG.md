@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.4.0 — moje rezerwacje: podgląd, anulowanie, kalendarz
+- **Nowa zakładka „Rezerwacje" w panelu**: lista wszystkich rezerwacji z konta Decathlon GO
+  (data, godziny, kort, adres, uczestnicy, stan), a przy każdej nadchodzącej dwa przyciski:
+  **Dodaj do kalendarza** (plik `.ics` — telefon proponuje dodanie, z przypomnieniem 60 min
+  przed) i **Anuluj rezerwację** (po potwierdzeniu; dodatek nigdy nie anuluje sam).
+  Przycisk **Wszystkie do kalendarza** pobiera jeden plik ze wszystkimi terminami.
+- **Panel serwuje teraz `panel.py`** (zakładki Rezerwacje / Przeglądarka). Ingress udostępnia
+  jeden port, więc panel serwuje też pliki noVNC, a ruch websocketu przepuszcza do
+  websockify (przeniesionego na lokalny 6080). Obraz z Chromium ładuje się dopiero po
+  wejściu w zakładkę „Przeglądarka" — wcześniej strumień szedł zawsze.
+- Odczyt rezerwacji korzysta z `users.getMe` + `transactions.list`, anulowanie z
+  `transactions.cancel`. Odpowiedzi czytane są defensywnie (płaskie i `attributes`),
+  a zakładka **Diagnostyka** pokazuje surową odpowiedź serwera.
+- Uwaga: po anulowaniu auto-rejestracja **nie zajmie tego terminu ponownie** (jest na
+  liście „już zapisane"). Żeby mogła — `clear_state: registered`.
+
 ## 0.3.2 — dołek odnowy tokenu bez fałszywych alarmów
 - **Karencja na dołek odnowy** (`BROWSER_RENEW_GRACE`, 3 min): strona odnawia token
   dopiero PO wygaśnięciu, więc kilkanaście sekund „martwego" tokenu co ~15 min to norma.
