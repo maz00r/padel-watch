@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.2 — ukrywanie anulowanych rezerwacji
+- **Anulowane rezerwacje są domyślnie ukryte** — po anulowaniu termin znika z listy
+  zamiast zostawać jako wyszarzona karta. Przełącznik **anulowane** (obok **minione**)
+  przywraca je na widok.
+- **Panel pamięta ustawienie obu filtrów** (`localStorage`), więc nie trzeba ich
+  klikać przy każdym wejściu.
+- Gdy filtry ukryją wszystko, panel mówi ile i czym — zamiast sugerować, że rezerwacji
+  w ogóle nie ma.
+
 ## 0.4.1 — panel odporny na dołek odnowy tokenu
 - **Naprawiony czerwony błąd w panelu mimo udanej operacji.** Panel nie miał osłony,
   którą monitor dostał w 0.3.2: strona odnawia JWT dopiero PO wygaśnięciu, więc
