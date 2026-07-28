@@ -1402,6 +1402,119 @@ class ReservationsIcsTest(unittest.TestCase):
         self.assertEqual(cp._ics_fold("SUMMARY:Padel"), "SUMMARY:Padel")
 
 
+class PanelRenewalDipTest(unittest.TestCase):
+    """Dołek odnowy: strona odnawia JWT dopiero PO wygaśnięciu, więc 401 bywa przejściowy."""
+
+    def setUp(self):
+        self.cfg = {"token": jwt_with_exp(int(datetime.now(timezone.utc).timestamp()) + 3600),
+                    "browser_mode": True}
+
+    def http_401(self):
+        return urllib.error.HTTPError("u", 401, "Unauthorized", {}, io.BytesIO(b""))
+
+    def test_retries_with_fresher_token(self):
+        calls = []
+
+        def rpc(method, token, payload, extend=None):
+            calls.append(token)
+            if len(calls) == 1:
+                raise self.http_401()
+            return {"ok": True}
+
+        with mock.patch.object(cp, "decathlon_rpc", side_effect=rpc), \
+                mock.patch.object(cp, "wait_for_fresher_token", return_value="swiezy"):
+            doc, token = cp.panel_rpc("users.getMe", self.cfg, "stary", {})
+        self.assertEqual(doc, {"ok": True})
+        self.assertEqual((calls, token), (["stary", "swiezy"], "swiezy"))
+        self.assertEqual(self.cfg["token"], "swiezy")  # kolejne wywołania mają już nowy
+
+    def test_gives_up_when_no_fresher_token_arrives(self):
+        with mock.patch.object(cp, "decathlon_rpc", side_effect=self.http_401()), \
+                mock.patch.object(cp, "wait_for_fresher_token", return_value=""):
+            with self.assertRaises(urllib.error.HTTPError):
+                cp.panel_rpc("users.getMe", self.cfg, "stary", {})
+
+    def test_no_retry_without_browser_mode(self):
+        """Bez przeglądarki nikt tokenu nie odnowi — czekanie byłoby tylko zwłoką."""
+        waited = []
+        with mock.patch.object(cp, "decathlon_rpc", side_effect=self.http_401()), \
+                mock.patch.object(cp, "wait_for_fresher_token", side_effect=lambda *a, **k: waited.append(1) or ""):
+            with self.assertRaises(urllib.error.HTTPError):
+                cp.panel_rpc("users.getMe", {"browser_mode": False}, "stary", {})
+        self.assertEqual(waited, [])
+
+    def test_other_http_errors_are_not_retried(self):
+        error_500 = urllib.error.HTTPError("u", 500, "Boom", {}, io.BytesIO(b""))
+        with mock.patch.object(cp, "decathlon_rpc", side_effect=error_500), \
+                mock.patch.object(cp, "wait_for_fresher_token", return_value="swiezy"):
+            with self.assertRaises(urllib.error.HTTPError):
+                cp.panel_rpc("users.getMe", self.cfg, "stary", {})
+
+    def test_reservations_survive_the_dip(self):
+        calls = []
+
+        def rpc(method, token, payload, extend=None):
+            calls.append((method, token))
+            if method == "users.getMe" and len(calls) == 1:
+                raise self.http_401()
+            if method == "users.getMe":
+                return {"id": "user-1"}
+            return {"items": [transaction()], "totalCount": 1}
+
+        with mock.patch.object(cp, "decathlon_rpc", side_effect=rpc), \
+                mock.patch.object(cp, "wait_for_fresher_token", return_value="swiezy"):
+            items, error = cp.fetch_my_reservations(self.cfg)
+        self.assertIsNone(error)
+        self.assertEqual(len(items), 1)
+
+    def test_cancel_survives_the_dip(self):
+        calls = []
+
+        def rpc(method, token, payload, extend=None):
+            calls.append(token)
+            if len(calls) == 1:
+                raise self.http_401()
+            return {"processState": "cancelled"}
+
+        with mock.patch.object(cp, "decathlon_rpc", side_effect=rpc), \
+                mock.patch.object(cp, "wait_for_fresher_token", return_value="swiezy"):
+            ok, message = cp.cancel_reservation("tx-1", self.cfg)
+        self.assertTrue(ok)
+        self.assertEqual(message, "cancelled")
+
+    def test_wait_returns_first_different_token(self):
+        tokens = iter(["stary", "stary", "nowy"])
+        with mock.patch.object(cp, "token_from_file", side_effect=lambda: next(tokens)), \
+                mock.patch.object(cp.time, "sleep"):
+            self.assertEqual(cp.wait_for_fresher_token("stary"), "nowy")
+
+    def test_wait_gives_up_after_attempts(self):
+        with mock.patch.object(cp, "token_from_file", return_value="stary"), \
+                mock.patch.object(cp.time, "sleep") as slept:
+            self.assertEqual(cp.wait_for_fresher_token("stary", attempts=3), "")
+        self.assertEqual(slept.call_count, 3)
+
+
+class LoadConfigNoiseTest(unittest.TestCase):
+    def test_missing_config_reported_once_per_process(self):
+        """Ta linia leciała przy każdej iteracji monitora i każdym zapytaniu panelu."""
+        out = io.StringIO()
+        with mock.patch.object(cp, "CONFIG_PATH", "/nie/ma/takiego.json"), \
+                mock.patch.object(cp, "_config_warned", False), \
+                mock.patch("sys.stdout", out):
+            cp.load_config()
+            cp.load_config()
+        self.assertEqual(out.getvalue().count("używam wartości z ENV"), 1)
+
+    def test_quiet_never_logs(self):
+        out = io.StringIO()
+        with mock.patch.object(cp, "CONFIG_PATH", "/nie/ma/takiego.json"), \
+                mock.patch.object(cp, "_config_warned", False), \
+                mock.patch("sys.stdout", out):
+            self.assertEqual(cp.load_config(quiet=True), {})
+        self.assertEqual(out.getvalue(), "")
+
+
 class PanelTest(unittest.TestCase):
     """Panel HTTP — sprawdzamy to, co da się sprawdzić bez sieci i przeglądarki."""
 

@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.4.1 — panel odporny na dołek odnowy tokenu
+- **Naprawiony czerwony błąd w panelu mimo udanej operacji.** Panel nie miał osłony,
+  którą monitor dostał w 0.3.2: strona odnawia JWT dopiero PO wygaśnięciu, więc
+  kliknięcie w tym kilkunastosekundowym dołku kończyło się komunikatem „sesja
+  odrzucona", choć sesja żyła (potwierdzone logiem użytkownika: anulowanie przeszło,
+  a odświeżenie listy tuż po nim — nie). Teraz po HTTP 401 panel czeka do ~24 s na
+  token odnowiony przez przeglądarkę i ponawia zapytanie.
+- **Błędy panelu trafiają do Dziennika.** Wcześniej czerwony komunikat w interfejsie
+  nie zostawiał żadnego śladu w logu i nie dało się dojść, co się stało.
+- **Koniec ze spamem `(brak /data/__none__.json — używam wartości z ENV)`** — ta linia
+  leciała przy każdej iteracji monitora i każdym zapytaniu panelu. Teraz raz na proces.
+
 ## 0.4.0 — moje rezerwacje: podgląd, anulowanie, kalendarz
 - **Nowa zakładka „Rezerwacje" w panelu**: lista wszystkich rezerwacji z konta Decathlon GO
   (data, godziny, kort, adres, uczestnicy, stan), a przy każdej nadchodzącej dwa przyciski:

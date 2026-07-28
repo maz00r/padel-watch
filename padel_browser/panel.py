@@ -72,6 +72,10 @@ def reservations(force=False):
         items, error = check_padel.reservations_view(cfg, _tz())
     except Exception as e:  # noqa: BLE001 - panel ma pokazać błąd, nie paść
         items, error = None, f"nieoczekiwany błąd: {e!r}"
+    if error:
+        # Bez tego czerwony komunikat w panelu nie zostawiał ŻADNEGO śladu w Dzienniku
+        # i nie dało się dojść, co właściwie się stało.
+        log(f"! nie pobrałem rezerwacji: {error}")
     with _cache_lock:
         _cache.update(at=time.time(), items=items, error=error)
     return items, error
@@ -209,6 +213,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"ok": False, "message": "brak identyfikatora rezerwacji"}, 400)
         log(f"żądanie anulowania rezerwacji {tx_id}")
         ok, message = check_padel.cancel_reservation(tx_id, check_padel.credentials_cfg())
+        if not ok:
+            log(f"! anulowanie nieudane: {message}")
         if ok:
             reservations(force=True)  # lista właśnie się zmieniła — nie pokazuj starej
         self._json({"ok": ok, "message": message})
