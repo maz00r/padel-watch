@@ -22,7 +22,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 try:
     from zoneinfo import ZoneInfo
@@ -755,6 +755,264 @@ def register_slot(slot, listing_price, cfg, speculative=False):
     if state == "pending-payment":
         return False, "utworzono rezerwację, ale wymaga płatności"
     return True, state or "zarejestrowano"
+
+
+# ------------------------------------------------------- moje rezerwacje (panel)
+
+# Gdy API nie poda długości terminu — kort padlowy w GO to „Rezerwacja godzinna".
+DEFAULT_SLOT_MINUTES = 60
+# Ile rezerwacji naraz i ile stron maksymalnie (zabezpieczenie przed pętlą bez końca).
+RESERVATIONS_PAGE_SIZE = 100
+RESERVATIONS_MAX_PAGES = 10
+# Rozszerzenia odpowiedzi: bez nich transakcja to same identyfikatory, a panel
+# potrzebuje terminu (data, długość), kortu (nazwa, adres) i listy uczestników.
+RESERVATIONS_EXTEND = {"items": {"listingDate": {}, "listing": {}, "participants": {}}}
+# Stany, w których rezerwacja już nie obowiązuje (nie ma czego anulować ani wpisywać
+# do kalendarza). Nazwy odtworzone z aplikacji GO; nieznane stany traktujemy jak aktywne.
+CANCELLED_STATES = ("cancelled", "canceled", "declined", "expired", "payment-expired")
+
+
+def _ident(value):
+    """ID z API bywa stringiem albo {'uuid': …} (starsze endpointy). Zwraca string."""
+    if isinstance(value, dict):
+        return str(value.get("uuid") or value.get("id") or "")
+    return str(value or "")
+
+
+def _flat(obj):
+    """Ujednolica obiekt API: {'id':…, 'attributes':{…}} czytamy tak samo jak płaski {…}."""
+    if not isinstance(obj, dict):
+        return {}
+    attrs = obj.get("attributes")
+    if isinstance(attrs, dict):
+        merged = dict(attrs)
+        merged.setdefault("id", _ident(obj.get("id")))
+        return merged
+    return obj
+
+
+def _rpc_error(e, what):
+    """Zamienia wyjątek z decathlon_rpc na komunikat dla użytkownika panelu."""
+    if isinstance(e, urllib.error.HTTPError):
+        detail = ""
+        try:
+            detail = e.read().decode("utf-8", "replace")[:200]
+        except Exception:  # noqa: BLE001
+            pass
+        finally:
+            try:
+                e.close()
+            except Exception:  # noqa: BLE001
+                pass
+        if e.code in (401, 403):
+            return f"{what}: sesja odrzucona (HTTP {e.code}) — zaloguj się w zakładce Przeglądarka"
+        return f"{what}: Decathlon HTTP {e.code}{': ' + detail if detail else ''}"
+    return f"{what}: Decathlon niedostępny ({e!r})"
+
+
+def credentials_cfg():
+    """Poświadczenia dla procesów spoza pętli monitora (panel rezerwacji).
+
+    Ten sam wybór źródeł tokenu co w run_once: wygrywa token o najdalszym exp,
+    a w scalonym dodatku odnawia go zalogowana przeglądarka (browser_mode).
+    """
+    cfg = load_config()
+    state_doc = load_state_doc()
+    return {
+        "token": newer_decathlon_token(
+            newer_decathlon_token(
+                token_from_file(),
+                os.environ.get("DECATHLON_TOKEN") or cfg.get("decathlon_token") or "",
+            ),
+            (state_doc or {}).get("decathlon_jwt") or "",
+        ),
+        "refresh_cookie": os.environ.get("DECATHLON_COOKIE") or cfg.get("decathlon_cookie") or "",
+        "refresh_token": (state_doc or {}).get("decathlon_rt") or "",
+        "browser_mode": bool(TOKEN_FILE),
+    }
+
+
+def decathlon_my_user_id(token):
+    """ID zalogowanego konta (users.getMe) — filtr listy transakcji."""
+    doc = _flat(decathlon_rpc("users.getMe", token, {}) or {})
+    return _ident(doc.get("id") or _flat(doc.get("user")).get("id"))
+
+
+def fetch_my_reservations(cfg):
+    """Zwraca (surowe transakcje konta, błąd). Nie modyfikuje niczego po stronie GO."""
+    token, token_error = ensure_decathlon_token(cfg)
+    if token_error:
+        return None, token_error
+    try:
+        user_id = decathlon_my_user_id(token)
+    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, ValueError) as e:
+        return None, _rpc_error(e, "odczyt konta")
+    if not user_id:
+        return None, "nie udało się ustalić konta (users.getMe nie zwrócił id)"
+
+    items, seen, page = [], set(), 0
+    while page < RESERVATIONS_MAX_PAGES:
+        payload = {"customerId": user_id, "limit": RESERVATIONS_PAGE_SIZE, "page": page}
+        try:
+            doc = decathlon_rpc("transactions.list", token, payload, RESERVATIONS_EXTEND) or {}
+        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, ValueError) as e:
+            return None, _rpc_error(e, "lista rezerwacji")
+        batch = doc.get("items") or []
+        for raw in batch:
+            # Numeracja stron w GO bywa 0- i 1-based, więc pierwsza strona potrafi
+            # przyjść dwa razy — odsiewamy po ID zamiast ufać numerom.
+            key = _ident(_flat(raw).get("id"))
+            if key and key in seen:
+                continue
+            seen.add(key)
+            items.append(raw)
+        page += 1
+        if not batch or len(items) >= int(doc.get("totalCount") or 0):
+            break
+    return items, None
+
+
+def normalize_reservation(raw, now_utc=None):
+    """Spłaszcza transakcję z API do pól, których używa panel i kalendarz."""
+    tx = _flat(raw)
+    date = _flat(tx.get("listingDate"))
+    listing = _flat(tx.get("listing"))
+    try:
+        start = parse_dt(date.get("date"))
+    except (ValueError, TypeError):
+        start = None
+    try:
+        minutes = int(date.get("duration") or DEFAULT_SLOT_MINUTES)
+    except (ValueError, TypeError):
+        minutes = DEFAULT_SLOT_MINUTES
+    state = str(tx.get("processState") or tx.get("state") or "")
+    participants = [
+        n for n in (_flat(p).get("name") for p in (tx.get("participants") or [])) if n
+    ]
+    now = now_utc or datetime.now(timezone.utc)
+    return {
+        "id": _ident(tx.get("id")),
+        "state": state,
+        "cancelled": state.lower() in CANCELLED_STATES or bool(date.get("cancelled")),
+        "start_utc": start,
+        "minutes": minutes if minutes > 0 else DEFAULT_SLOT_MINUTES,
+        "past": bool(start and start < now),
+        "title": listing.get("title") or listing.get("name") or date.get("name") or "Rezerwacja",
+        "slot_name": date.get("name") or "",
+        "address": (_flat(listing.get("location")).get("address") or ""),
+        "listing_id": _ident(listing.get("id")),
+        "participants": participants,
+    }
+
+
+def reservations_view(cfg, tz, now_utc=None):
+    """(lista rezerwacji dla panelu, błąd) — posortowana, najbliższa pierwsza."""
+    raw_items, error = fetch_my_reservations(cfg)
+    if error:
+        return None, error
+    now = now_utc or datetime.now(timezone.utc)
+    out = []
+    for raw in raw_items:
+        res = normalize_reservation(raw, now)
+        if not res["start_utc"]:
+            continue  # transakcja bez terminu (np. sam bilet) — nie ma czego pokazać
+        local = res["start_utc"].astimezone(tz)
+        end = local + timedelta(minutes=res["minutes"])
+        res["when"] = fmt_when(local)                              # pełny opis (potwierdzenia)
+        res["date_label"] = f"{PL_DAYS[local.weekday()]} {local:%d.%m}"  # nagłówek karty
+        res["day"] = f"{local:%d.%m.%Y}"
+        res["hours"] = f"{local:%H:%M}–{end:%H:%M}"
+        res["book_url"] = LISTING_PAGE_URL.format(id=res["listing_id"]) if res["listing_id"] else ""
+        out.append(res)
+    # Najpierw nadchodzące (rosnąco), potem minione (od najświeższych).
+    out.sort(key=lambda r: (r["past"], r["start_utc"].timestamp() * (-1 if r["past"] else 1)))
+    return out, None
+
+
+def cancel_reservation(tx_id, cfg):
+    """Anuluje rezerwację w Decathlon GO. Zwraca (ok, komunikat). Nieodwracalne."""
+    tx_id = (tx_id or "").strip()
+    if not tx_id:
+        return False, "brak identyfikatora rezerwacji"
+    token, token_error = ensure_decathlon_token(cfg)
+    if token_error:
+        return False, token_error
+    try:
+        doc = _flat(decathlon_rpc("transactions.cancel", token, {"id": tx_id}) or {})
+    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, ValueError) as e:
+        return False, _rpc_error(e, "anulowanie")
+    state = doc.get("processState") or doc.get("state") or ""
+    log(f"✂ Anulowano rezerwację {tx_id}" + (f" (stan: {state})" if state else ""))
+    return True, state or "anulowano"
+
+
+# ------------------------------------------------------------------ kalendarz ICS
+
+
+def _ics_escape(text):
+    """RFC 5545: przecinek, średnik, backslash i nowa linia mają znaczenie składniowe."""
+    return (str(text or "").replace("\\", "\\\\").replace(";", "\\;")
+            .replace(",", "\\,").replace("\n", "\\n"))
+
+
+def _ics_fold(line):
+    """RFC 5545: linia > 75 oktetów łamana i kontynuowana spacją (liczymy w bajtach)."""
+    raw = line.encode("utf-8")
+    if len(raw) <= 75:
+        return line
+    out, chunk = [], b""
+    for ch in line:
+        enc = ch.encode("utf-8")
+        # Pierwsza linia ma limit 75 B, kolejne 74 B (jeden oktet zjada wiodąca spacja).
+        if len(chunk) + len(enc) > (75 if not out else 74):
+            out.append(chunk.decode("utf-8"))
+            chunk = b""
+        chunk += enc
+    out.append(chunk.decode("utf-8"))
+    return "\r\n ".join(out)
+
+
+def reservations_ics(reservations, calname="Padel", alarm_minutes=60):
+    """Kalendarz iCalendar z rezerwacjami — telefon dodaje go jednym dotknięciem."""
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    lines = [
+        "BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//padel-watch//Decathlon GO//PL",
+        "CALSCALE:GREGORIAN", "METHOD:PUBLISH",
+        f"X-WR-CALNAME:{_ics_escape(calname)}",
+    ]
+    for res in reservations:
+        start = res.get("start_utc")
+        if not start:
+            continue
+        end = start + timedelta(minutes=res.get("minutes") or DEFAULT_SLOT_MINUTES)
+        # Osobne linie: kalendarze na telefonie łamią opis czytelnie, a link zostaje klikalny.
+        desc = "\n".join(filter(None, [
+            res.get("slot_name") or "",
+            f"Uczestnicy: {', '.join(res['participants'])}" if res.get("participants") else "",
+            res.get("book_url") or "",
+        ]))
+        lines += [
+            "BEGIN:VEVENT",
+            f"UID:{_ics_escape(res.get('id') or stamp)}@padel-watch",
+            f"DTSTAMP:{stamp}",
+            f"DTSTART:{start.astimezone(timezone.utc):%Y%m%dT%H%M%SZ}",
+            f"DTEND:{end.astimezone(timezone.utc):%Y%m%dT%H%M%SZ}",
+            f"SUMMARY:{_ics_escape('🎾 ' + (res.get('title') or 'Padel'))}",
+            f"STATUS:{'CANCELLED' if res.get('cancelled') else 'CONFIRMED'}",
+        ]
+        if res.get("address"):
+            lines.append(f"LOCATION:{_ics_escape(res['address'])}")
+        if desc.strip():
+            lines.append(f"DESCRIPTION:{_ics_escape(desc.strip())}")
+        if res.get("book_url"):
+            lines.append(f"URL:{res['book_url']}")
+        if alarm_minutes and not res.get("cancelled"):
+            lines += ["BEGIN:VALARM", "ACTION:DISPLAY",
+                      f"DESCRIPTION:{_ics_escape('Padel za ' + str(alarm_minutes) + ' min')}",
+                      f"TRIGGER:-PT{int(alarm_minutes)}M", "END:VALARM"]
+        lines.append("END:VEVENT")
+    lines.append("END:VCALENDAR")
+    return "\r\n".join(_ics_fold(l) for l in lines) + "\r\n"
 
 
 AUTH_FAILURE_MARKERS = ("token odrzucony", "brak tokenu", "nie udało się odświeżyć tokenu",

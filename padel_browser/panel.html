@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Padel</title>
+<style>
+  :root {
+    --bg:#f6f7f9; --card:#fff; --fg:#1b1d20; --muted:#6a7180; --line:#e3e6ea;
+    --accent:#0b7ddb; --danger:#c62828; --ok:#177245; --warn:#8a6100;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#15181c; --card:#1e2228; --fg:#e8eaed; --muted:#9aa2af; --line:#2c313a;
+            --accent:#4da3ff; --danger:#ef6a6a; --ok:#5fbf85; --warn:#e0b352; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; font:15px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif;
+         background:var(--bg); color:var(--fg); }
+  header { display:flex; gap:6px; padding:10px 12px; border-bottom:1px solid var(--line);
+           background:var(--card); position:sticky; top:0; z-index:5; }
+  .tab { flex:1; padding:9px 12px; border:0; border-radius:9px; font:inherit; font-weight:600;
+         background:transparent; color:var(--muted); cursor:pointer; }
+  .tab[aria-selected="true"] { background:var(--accent); color:#fff; }
+  main { padding:12px; max-width:760px; margin:0 auto; }
+  #browser { padding:0; max-width:none; }
+  .bar { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:12px; }
+  .bar .grow { flex:1; }
+  button, .btn { font:inherit; border-radius:9px; border:1px solid var(--line);
+                 background:var(--card); color:var(--fg); padding:8px 12px; cursor:pointer;
+                 text-decoration:none; display:inline-block; }
+  button:hover, .btn:hover { border-color:var(--accent); }
+  .btn.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  .btn.danger { color:var(--danger); border-color:transparent; }
+  .btn.danger:hover { border-color:var(--danger); }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px;
+          padding:12px 14px; margin-bottom:10px; }
+  .card.dim { opacity:.6; }
+  .when { font-size:19px; font-weight:700; }
+  .sub { color:var(--muted); font-size:13px; margin-top:2px; }
+  .actions { display:flex; gap:8px; margin-top:10px; flex-wrap:wrap; }
+  .badge { font-size:12px; font-weight:600; padding:2px 8px; border-radius:999px;
+           border:1px solid currentColor; white-space:nowrap; flex:0 0 auto; }
+  .badge.ok { color:var(--ok); } .badge.off { color:var(--muted); }
+  .badge.warn { color:var(--warn); } .badge.bad { color:var(--danger); }
+  .row { display:flex; justify-content:space-between; align-items:flex-start; gap:10px; }
+  .row > div { min-width:0; }   /* tekst ma się zawijać, a nie rozpychać plakietkę */
+  .msg { padding:12px 14px; border-radius:12px; border:1px solid var(--line);
+         background:var(--card); }
+  .msg.error { border-color:var(--danger); color:var(--danger); }
+  .empty { color:var(--muted); text-align:center; padding:28px 10px; }
+  details { margin-top:18px; color:var(--muted); font-size:13px; }
+  pre { overflow:auto; background:var(--card); border:1px solid var(--line);
+        border-radius:9px; padding:10px; max-height:340px; font-size:12px; }
+  iframe { display:block; width:100%; height:calc(100vh - 57px); border:0; }
+  .hide { display:none !important; }
+</style>
+</head>
+<body>
+<header>
+  <button class="tab" id="tab-res" aria-selected="true" onclick="showTab('res')">Rezerwacje</button>
+  <button class="tab" id="tab-browser" aria-selected="false" onclick="showTab('browser')">Przeglądarka</button>
+</header>
+
+<main id="res">
+  <div class="bar">
+    <button class="btn primary" onclick="load(true)">Odśwież</button>
+    <a class="btn" id="all-ics" href="cal/all.ics">Wszystkie do kalendarza</a>
+    <span class="grow"></span>
+    <label class="sub"><input type="checkbox" id="show-past" onchange="render()"> minione</label>
+  </div>
+  <div id="status" class="msg">Wczytuję rezerwacje…</div>
+  <div id="list"></div>
+  <details>
+    <summary>Diagnostyka (surowa odpowiedź Decathlon GO)</summary>
+    <p>Przydatne, gdy rezerwacja wyświetla się niekompletnie — pokazuje, co dokładnie zwrócił serwer.</p>
+    <button onclick="loadRaw()">Pobierz surowe dane</button>
+    <pre id="raw" class="hide"></pre>
+  </details>
+</main>
+
+<main id="browser" class="hide"></main>
+
+<script>
+// Panel działa pod prefiksem Ingressu (/api/hassio_ingress/<token>/), dlatego
+// WSZYSTKIE adresy są względne — przeglądarka sama doklei właściwy prefiks.
+var reservations = [];
+
+function showTab(name) {
+  ["res", "browser"].forEach(function (id) {
+    document.getElementById(id).classList.toggle("hide", id !== name);
+    document.getElementById("tab-" + id).setAttribute("aria-selected", String(id === name));
+  });
+  if (name === "browser") mountBrowser();
+}
+
+// noVNC buduje adres websocketu OD KORZENIA, więc 'path' musi zawierać prefiks
+// Ingressu — składamy go z bieżącej ścieżki. Ramkę wstawiamy dopiero przy wejściu
+// w zakładkę: obraz z Chromium to stały strumień, nie ma go po co ciągnąć w tle.
+function mountBrowser() {
+  var host = document.getElementById("browser");
+  if (host.dataset.ready) return;
+  var dir = location.pathname.replace(/[^/]*$/, "");
+  var path = (dir + "websockify").replace(/^\/+/, "");
+  var frame = document.createElement("iframe");
+  frame.src = "vnc.html?autoconnect=true&reconnect=true&resize=scale&path=" + encodeURIComponent(path);
+  host.appendChild(frame);
+  host.dataset.ready = "1";
+}
+
+function esc(text) {
+  return String(text == null ? "" : text).replace(/[&<>"]/g, function (c) {
+    return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c];
+  });
+}
+
+function badge(res) {
+  if (res.cancelled) return '<span class="badge bad">anulowana</span>';
+  if (res.past) return '<span class="badge off">minęła</span>';
+  if (res.state === "pending-payment") return '<span class="badge warn">czeka na płatność</span>';
+  return '<span class="badge ok">potwierdzona</span>';
+}
+
+function card(res) {
+  var sub = [res.title, res.address].filter(Boolean).map(esc).join(" · ");
+  var who = res.participants && res.participants.length
+    ? '<div class="sub">Uczestnicy: ' + esc(res.participants.join(", ")) + "</div>" : "";
+  var actions = "";
+  if (!res.cancelled && !res.past) {
+    actions = '<div class="actions">'
+      + '<a class="btn" href="cal/' + encodeURIComponent(res.id) + '.ics">Dodaj do kalendarza</a>'
+      + '<button class="btn danger" onclick="cancelRes(\'' + esc(res.id) + '\')">Anuluj rezerwację</button>'
+      + "</div>";
+  }
+  return '<div class="card' + (res.cancelled || res.past ? " dim" : "") + '">'
+    + '<div class="row"><div>'
+    + '<div class="when">' + esc(res.date_label || res.when) + "</div>"
+    + '<div class="sub"><b>' + esc(res.hours) + "</b>" + (sub ? " · " + sub : "") + "</div>"
+    + who
+    + "</div>" + badge(res) + "</div>" + actions + "</div>";
+}
+
+function render() {
+  var past = document.getElementById("show-past").checked;
+  var shown = reservations.filter(function (r) { return past || !r.past; });
+  document.getElementById("list").innerHTML = shown.length
+    ? shown.map(card).join("")
+    : '<div class="empty">' + (past ? "Brak rezerwacji." : "Brak nadchodzących rezerwacji.") + "</div>";
+}
+
+function status(text, isError) {
+  var el = document.getElementById("status");
+  el.textContent = text;
+  el.className = "msg" + (isError ? " error" : "");
+  el.classList.toggle("hide", !text);
+}
+
+function load(force) {
+  status("Wczytuję rezerwacje…", false);
+  fetch("api/reservations" + (force ? "?refresh=1" : ""), { headers: { Accept: "application/json" } })
+    .then(function (r) { return r.json(); })
+    .then(function (doc) {
+      if (!doc.ok) {
+        // Przy błędzie sam komunikat — bez „brak rezerwacji" (nie wiemy tego)
+        // i bez linku do kalendarza, który i tak nie miałby czego pobrać.
+        reservations = [];
+        document.getElementById("list").innerHTML = "";
+        document.getElementById("all-ics").classList.add("hide");
+        return status(doc.error, true);
+      }
+      reservations = doc.items;
+      var upcoming = reservations.filter(function (r) { return !r.past && !r.cancelled; }).length;
+      status("Nadchodzące rezerwacje: " + upcoming + " (stan na " + doc.generated + ")", false);
+      document.getElementById("all-ics").classList.toggle("hide", upcoming === 0);
+      render();
+    })
+    .catch(function (e) { status("Nie udało się pobrać danych: " + e, true); });
+}
+
+function cancelRes(id) {
+  var res = reservations.filter(function (r) { return r.id === id; })[0];
+  if (!res) return;
+  var what = res.when + " (" + res.hours + ")\n" + (res.title || "");
+  if (!confirm("Anulować rezerwację?\n\n" + what + "\n\nTej operacji nie da się cofnąć.")) return;
+  status("Anuluję…", false);
+  fetch("api/cancel", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id: id })
+  })
+    .then(function (r) { return r.json(); })
+    .then(function (doc) {
+      if (!doc.ok) return status("Nie anulowano: " + doc.message, true);
+      load(true);
+    })
+    .catch(function (e) { status("Nie udało się anulować: " + e, true); });
+}
+
+function loadRaw() {
+  var pre = document.getElementById("raw");
+  pre.classList.remove("hide");
+  pre.textContent = "Pobieram…";
+  fetch("api/raw")
+    .then(function (r) { return r.json(); })
+    .then(function (doc) { pre.textContent = JSON.stringify(doc, null, 2); })
+    .catch(function (e) { pre.textContent = String(e); });
+}
+
+load(false);
+</script>
+</body>
+</html>

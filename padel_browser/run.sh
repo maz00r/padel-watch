@@ -1,8 +1,9 @@
 #!/usr/bin/env sh
 # Scalony dodatek: przeglądarka (logowanie + podtrzymanie sesji) + monitor terminów.
-#   1) Xvfb -> Chromium -> VNC -> noVNC (panel przez Ingress) — logujesz się raz.
-#   2) read_token.py (w tle) czyta świeży go-sdk-jwt i zapisuje go do /data/token.json.
-#   3) check_padel.py (pierwszoplanowo) monitoruje terminy i bierze token z tego pliku.
+#   1) Xvfb -> Chromium -> VNC -> websockify — logujesz się raz, sesja żyje dalej.
+#   2) panel.py (Ingress) — zakładki „Rezerwacje" i „Przeglądarka".
+#   3) read_token.py (w tle) czyta świeży go-sdk-jwt i zapisuje go do /data/token.json.
+#   4) check_padel.py (pierwszoplanowo) monitoruje terminy i bierze token z tego pliku.
 set -e
 
 OPT=/data/options.json
@@ -79,15 +80,24 @@ sleep 4
 x11vnc -display :1 -forever -shared -nopw -quiet -localhost -rfbport 5900 &
 sleep 1
 
-# 4) noVNC: websockify serwuje panel i tuneluje websocket na tym samym porcie (Ingress).
-websockify --web=/usr/share/novnc 8099 localhost:5900 &
+# 4) websockify tylko jako most websocket->VNC, na porcie LOKALNYM. Na zewnątrz (Ingress)
+#    wychodzi panel.py, który serwuje stronę, API rezerwacji i pliki noVNC, a ruch
+#    websocketu przepuszcza tutaj — Ingress udostępnia bowiem dokładnie jeden port.
+websockify 127.0.0.1:6080 localhost:5900 &
 sleep 1
 
-# 5) Czytnik tokenu w tle (z autorestartem — gdyby kiedyś padł, plik tokenu nie zamrze).
+# 5) Panel przez Ingress: zakładka „Rezerwacje" (lista, anulowanie, kalendarz .ics)
+#    i „Przeglądarka" (noVNC). Autorestart — panel to jedyne okno na dodatek.
+( while true; do
+    python3 /app/panel.py || echo "[panel] proces zakończony — restart za 5s"
+    sleep 5
+  done ) &
+
+# 6) Czytnik tokenu w tle (z autorestartem — gdyby kiedyś padł, plik tokenu nie zamrze).
 ( while true; do
     python3 /app/read_token.py || echo "[read_token] proces zakończony — restart za 5s"
     sleep 5
   done ) &
 
-# 6) Monitor terminów (proces pierwszoplanowy — jego wyjście kończy kontener)
+# 7) Monitor terminów (proces pierwszoplanowy — jego wyjście kończy kontener)
 exec python3 /app/check_padel.py

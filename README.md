@@ -4,7 +4,8 @@ Repozytorium dodatku **Home Assistant**, który monitoruje wolne terminy padla n
 [Decathlon GO](https://go.decathlon.pl), wysyła **push na telefon** (przez
 [ntfy.sh](https://ntfy.sh)) i (opcjonalnie) **rejestruje automatycznie**. W środku
 działa prawdziwa przeglądarka w panelu — **logujesz się raz**, a dodatek sam
-podtrzymuje sesję i token.
+podtrzymuje sesję i token. W panelu obejrzysz też **swoje rezerwacje**: anulujesz je
+jednym kliknięciem albo dodasz do kalendarza w telefonie.
 
 ## Instalacja
 
@@ -32,6 +33,8 @@ Historia zmian: [padel_browser/CHANGELOG.md](padel_browser/CHANGELOG.md).
   darmowy termin Decathlon GO, używając tokenu z zalogowanej przeglądarki w panelu.
 - Token krąży wewnątrz kontenera przez plik `/data/token.json`: przeglądarka
   (`read_token.py`) zapisuje świeży JWT, monitor (`check_padel.py`) go czyta.
+- Panel (`panel.py`) pokazuje rezerwacje z konta (`users.getMe` + `transactions.list`),
+  anuluje je (`transactions.cancel`) i generuje pliki `.ics` dla kalendarza w telefonie.
 
 ## Rozwój
 

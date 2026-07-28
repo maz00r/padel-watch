@@ -103,6 +103,35 @@ dnie, a co `check_interval` (np. 300 s) w pozostałych porach. Puste = zawsze `c
 Minimum 2 s (niższa wartość jest podbijana, z wpisem w logu; poniżej 5 s logowane jest
 ostrzeżenie — używaj tylko w wąskich oknach, bo grozi blokadą po IP). Zmiana interwału jest logowana (`⏱ aktualny interwał: ...`).
 
+## Panel: moje rezerwacje
+
+Ikona **Padel** w menu bocznym otwiera panel z dwiema zakładkami:
+
+- **Rezerwacje** — wszystkie Twoje rezerwacje z konta Decathlon GO (nie tylko te
+  zrobione przez dodatek): data, godziny, kort, adres, uczestnicy i stan.
+- **Przeglądarka** — Chromium z sesją, w którym się logujesz (jak dotąd).
+
+Każda nadchodząca rezerwacja ma dwa przyciski:
+
+| Przycisk | Co robi |
+|----------|---------|
+| **Dodaj do kalendarza** | pobiera plik `.ics` — telefon proponuje dodanie do kalendarza (z przypomnieniem 60 min przed, adresem kortu i linkiem) |
+| **Anuluj rezerwację** | anuluje ją w Decathlon GO po potwierdzeniu w oknie dialogowym |
+
+Przycisk **Wszystkie do kalendarza** pobiera jeden plik ze wszystkimi nadchodzącymi
+terminami. Plik `.ics` jest **zdjęciem stanu z chwili pobrania** — po anulowaniu lub
+nowej rezerwacji pobierz go ponownie (kalendarz się sam nie zaktualizuje).
+
+> **Anulowanie jest nieodwracalne** i wykonuje się wyłącznie po Twoim kliknięciu —
+> dodatek nigdy nie anuluje niczego sam.
+>
+> Po anulowaniu auto-rejestracja **nie zajmie tego terminu ponownie**: jest on na liście
+> „już zapisane" w `state.json`. Jeśli chcesz, żeby mogła — użyj `clear_state: registered`
+> (opis niżej).
+
+Gdy panel pokazuje `brak tokenu — zaloguj się w panelu Padel`, przejdź na zakładkę
+**Przeglądarka** i zaloguj się — lista pojawi się od razu po odświeżeniu.
+
 ## Powiadomienia
 
 - Przy każdym starcie dodatku: „✅ Monitor padla uruchomiony" (z linkiem do rezerwacji).

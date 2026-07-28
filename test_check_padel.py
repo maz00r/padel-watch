@@ -1169,5 +1169,282 @@ class TokenFromFileTest(unittest.TestCase):
             os.unlink(path)
 
 
+def transaction(date="2026-08-04T18:00:00.000+00:00", duration=60, state="accepted", **over):
+    """Transakcja w kształcie, jaki zwraca transactions.list z rozszerzeniami."""
+    doc = {
+        "id": "tx-1",
+        "processState": state,
+        "listingDate": {"date": date, "duration": duration, "name": "Rezerwacja godzinna",
+                        "cancelled": False},
+        "listing": {"id": "court-1", "title": "Kort do Padla — Targówek",
+                    "location": {"address": "Geodezyjna 76, Warszawa"}},
+        "participants": [{"name": "Jan Kowalski"}],
+    }
+    doc.update(over)
+    return doc
+
+
+class NormalizeReservationTest(unittest.TestCase):
+    def test_flat_shape(self):
+        res = cp.normalize_reservation(transaction())
+        self.assertEqual(res["id"], "tx-1")
+        self.assertEqual(res["minutes"], 60)
+        self.assertEqual(res["title"], "Kort do Padla — Targówek")
+        self.assertEqual(res["address"], "Geodezyjna 76, Warszawa")
+        self.assertEqual(res["participants"], ["Jan Kowalski"])
+        self.assertFalse(res["cancelled"])
+
+    def test_jsonapi_shape_with_attributes(self):
+        """Starsze endpointy pakują pola w 'attributes', a id w {'uuid': …}."""
+        raw = {
+            "id": {"uuid": "tx-9"},
+            "attributes": {"processState": "accepted"},
+            "listingDate": {"attributes": {"date": "2026-08-04T18:00:00+00:00", "duration": 90}},
+            "listing": {"attributes": {"title": "Kort"}},
+        }
+        # relacje leżą obok 'attributes' — _flat scala je do jednego widoku
+        raw["attributes"]["listingDate"] = raw.pop("listingDate")
+        raw["attributes"]["listing"] = raw.pop("listing")
+        res = cp.normalize_reservation(raw)
+        self.assertEqual(res["id"], "tx-9")
+        self.assertEqual(res["minutes"], 90)
+        self.assertEqual(res["title"], "Kort")
+
+    def test_missing_duration_falls_back_to_hour(self):
+        res = cp.normalize_reservation(transaction(duration=None))
+        self.assertEqual(res["minutes"], 60)
+
+    def test_cancelled_state_detected(self):
+        self.assertTrue(cp.normalize_reservation(transaction(state="cancelled"))["cancelled"])
+        self.assertTrue(cp.normalize_reservation(transaction(state="payment-expired"))["cancelled"])
+
+    def test_cancelled_date_marks_reservation(self):
+        raw = transaction()
+        raw["listingDate"]["cancelled"] = True
+        self.assertTrue(cp.normalize_reservation(raw)["cancelled"])
+
+    def test_unknown_state_stays_active(self):
+        self.assertFalse(cp.normalize_reservation(transaction(state="jakiś-nowy-stan"))["cancelled"])
+
+    def test_broken_date_does_not_raise(self):
+        res = cp.normalize_reservation(transaction(date="nie-data"))
+        self.assertIsNone(res["start_utc"])
+
+    def test_past_flag(self):
+        now = datetime(2026, 8, 5, tzinfo=timezone.utc)
+        self.assertTrue(cp.normalize_reservation(transaction(), now)["past"])
+        self.assertFalse(cp.normalize_reservation(transaction(), now - timedelta(days=5))["past"])
+
+
+class ReservationsViewTest(unittest.TestCase):
+    def view(self, items, now):
+        with mock.patch.object(cp, "fetch_my_reservations", return_value=(items, None)):
+            return cp.reservations_view({}, TZ, now)
+
+    def test_formats_local_hours(self):
+        items, error = self.view([transaction()], datetime(2026, 8, 1, tzinfo=timezone.utc))
+        self.assertIsNone(error)
+        # 18:00 UTC = 20:00 w Warszawie (czas letni), termin godzinny
+        self.assertEqual(items[0]["hours"], "20:00–21:00")
+        self.assertEqual(items[0]["day"], "04.08.2026")
+        self.assertIn("court-1", items[0]["book_url"])
+
+    def test_skips_transaction_without_date(self):
+        raw = transaction()
+        raw["listingDate"] = {}
+        items, _ = self.view([raw], datetime(2026, 8, 1, tzinfo=timezone.utc))
+        self.assertEqual(items, [])
+
+    def test_upcoming_ascending_past_descending(self):
+        now = datetime(2026, 8, 10, tzinfo=timezone.utc)
+        raws = [
+            transaction(id="past-old", date="2026-08-01T10:00:00+00:00"),
+            transaction(id="next-late", date="2026-08-20T10:00:00+00:00"),
+            transaction(id="past-recent", date="2026-08-09T10:00:00+00:00"),
+            transaction(id="next-soon", date="2026-08-12T10:00:00+00:00"),
+        ]
+        items, _ = self.view(raws, now)
+        self.assertEqual([i["id"] for i in items],
+                         ["next-soon", "next-late", "past-recent", "past-old"])
+
+    def test_error_is_passed_through(self):
+        with mock.patch.object(cp, "fetch_my_reservations", return_value=(None, "brak tokenu")):
+            items, error = cp.reservations_view({}, TZ)
+        self.assertIsNone(items)
+        self.assertEqual(error, "brak tokenu")
+
+
+class FetchMyReservationsTest(unittest.TestCase):
+    def setUp(self):
+        self.cfg = {"token": jwt_with_exp(int(datetime.now(timezone.utc).timestamp()) + 3600)}
+
+    def test_paginates_and_deduplicates(self):
+        """Numeracja stron w GO bywa 0- i 1-based — powtórzona strona nie może się dublować."""
+        pages = [
+            {"items": [transaction(id="a"), transaction(id="b")], "totalCount": 3},
+            {"items": [transaction(id="b"), transaction(id="c")], "totalCount": 3},
+        ]
+        calls = []
+
+        def fake_rpc(method, token, payload, extend=None):
+            calls.append(method)
+            if method == "users.getMe":
+                return {"id": "user-1"}
+            return pages[min(len(calls) - 2, len(pages) - 1)]
+
+        with mock.patch.object(cp, "decathlon_rpc", side_effect=fake_rpc):
+            items, error = cp.fetch_my_reservations(self.cfg)
+        self.assertIsNone(error)
+        self.assertEqual([cp._ident(i["id"]) for i in items], ["a", "b", "c"])
+
+    def test_stops_on_empty_page(self):
+        def fake_rpc(method, token, payload, extend=None):
+            if method == "users.getMe":
+                return {"id": "user-1"}
+            return {"items": [], "totalCount": 99}
+
+        with mock.patch.object(cp, "decathlon_rpc", side_effect=fake_rpc):
+            items, error = cp.fetch_my_reservations(self.cfg)
+        self.assertEqual((items, error), ([], None))
+
+    def test_missing_user_id_is_reported(self):
+        with mock.patch.object(cp, "decathlon_rpc", return_value={}):
+            items, error = cp.fetch_my_reservations(self.cfg)
+        self.assertIsNone(items)
+        self.assertIn("users.getMe", error)
+
+    def test_http_401_asks_for_login(self):
+        error_401 = urllib.error.HTTPError("u", 401, "Unauthorized", {}, io.BytesIO(b""))
+        with mock.patch.object(cp, "decathlon_rpc", side_effect=error_401):
+            items, error = cp.fetch_my_reservations(self.cfg)
+        self.assertIsNone(items)
+        self.assertIn("zaloguj się", error)
+
+    def test_token_problem_short_circuits(self):
+        items, error = cp.fetch_my_reservations({"token": "", "browser_mode": True})
+        self.assertIsNone(items)
+        self.assertIn("brak tokenu", error)
+
+
+class CancelReservationTest(unittest.TestCase):
+    def setUp(self):
+        self.cfg = {"token": jwt_with_exp(int(datetime.now(timezone.utc).timestamp()) + 3600)}
+
+    def test_cancels_with_id(self):
+        seen = {}
+
+        def fake_rpc(method, token, payload, extend=None):
+            seen.update(method=method, payload=payload)
+            return {"processState": "cancelled"}
+
+        with mock.patch.object(cp, "decathlon_rpc", side_effect=fake_rpc):
+            ok, message = cp.cancel_reservation("tx-1", self.cfg)
+        self.assertTrue(ok)
+        self.assertEqual(seen["method"], "transactions.cancel")
+        self.assertEqual(seen["payload"], {"id": "tx-1"})
+        self.assertEqual(message, "cancelled")
+
+    def test_empty_id_never_calls_api(self):
+        with mock.patch.object(cp, "decathlon_rpc", side_effect=AssertionError("nie wolno")):
+            ok, message = cp.cancel_reservation("  ", self.cfg)
+        self.assertFalse(ok)
+        self.assertIn("identyfikatora", message)
+
+    def test_http_error_is_reported(self):
+        error_500 = urllib.error.HTTPError("u", 500, "Boom", {}, io.BytesIO(b"szczegoly"))
+        with mock.patch.object(cp, "decathlon_rpc", side_effect=error_500):
+            ok, message = cp.cancel_reservation("tx-1", self.cfg)
+        self.assertFalse(ok)
+        self.assertIn("500", message)
+
+
+class ReservationsIcsTest(unittest.TestCase):
+    def reservation(self, **over):
+        res = cp.normalize_reservation(transaction())
+        res["book_url"] = "https://go.decathlon.pl/l/court-1"
+        res.update(over)
+        return res
+
+    def test_event_has_start_end_and_place(self):
+        ics = cp.reservations_ics([self.reservation()])
+        self.assertIn("BEGIN:VEVENT", ics)
+        self.assertIn("DTSTART:20260804T180000Z", ics)
+        self.assertIn("DTEND:20260804T190000Z", ics)   # duration 60 min
+        self.assertIn("UID:tx-1@padel-watch", ics)
+        self.assertIn("STATUS:CONFIRMED", ics)
+        self.assertIn("BEGIN:VALARM", ics)
+        self.assertTrue(ics.endswith("END:VCALENDAR\r\n"))
+
+    def test_crlf_line_endings(self):
+        ics = cp.reservations_ics([self.reservation()])
+        self.assertNotIn("\n", ics.replace("\r\n", ""))
+
+    def test_cancelled_has_no_alarm(self):
+        ics = cp.reservations_ics([self.reservation(cancelled=True)])
+        self.assertIn("STATUS:CANCELLED", ics)
+        self.assertNotIn("BEGIN:VALARM", ics)
+
+    def test_special_characters_escaped(self):
+        ics = cp.reservations_ics([self.reservation(address="Geodezyjna 76, Warszawa")])
+        self.assertIn("LOCATION:Geodezyjna 76\\, Warszawa", ics)
+
+    def test_reservation_without_date_is_skipped(self):
+        ics = cp.reservations_ics([self.reservation(start_utc=None)])
+        self.assertNotIn("BEGIN:VEVENT", ics)
+
+    def test_long_line_is_folded(self):
+        ics = cp.reservations_ics([self.reservation(title="Ł" * 200)])
+        for line in ics.split("\r\n"):
+            self.assertLessEqual(len(line.encode("utf-8")), 75)
+        self.assertIn("\r\n ", ics)  # kontynuacja zaczyna się spacją
+
+    def test_short_line_untouched(self):
+        self.assertEqual(cp._ics_fold("SUMMARY:Padel"), "SUMMARY:Padel")
+
+
+class PanelTest(unittest.TestCase):
+    """Panel HTTP — sprawdzamy to, co da się sprawdzić bez sieci i przeglądarki."""
+
+    def setUp(self):
+        import panel
+        self.panel = panel
+
+    def test_static_path_stays_inside_novnc(self):
+        with tempfile.TemporaryDirectory() as root:
+            page = os.path.join(root, "vnc.html")
+            with open(page, "w", encoding="utf-8") as f:
+                f.write("x")
+            with mock.patch.object(self.panel, "NOVNC_DIR", root):
+                # realpath: na macOS /var to dowiązanie do /private/var
+                self.assertEqual(self.panel.safe_static_path("/vnc.html"), os.path.realpath(page))
+                self.assertIsNone(self.panel.safe_static_path("/../../etc/passwd"))
+                self.assertIsNone(self.panel.safe_static_path("/%2e%2e/%2e%2e/etc/passwd"))
+                self.assertIsNone(self.panel.safe_static_path("/nie-ma-mnie.js"))
+
+    def test_public_reservation_is_json_serializable(self):
+        res = cp.normalize_reservation(transaction())
+        res.update(when="wt 04.08 20:00", day="04.08.2026", hours="20:00–21:00", book_url="u")
+        payload = self.panel.public_reservation(res)
+        self.assertEqual(payload["start"], "2026-08-04T18:00:00+00:00")
+        json.dumps(payload)  # nie może wywalić się na datetime
+
+    def test_cache_serves_repeated_reads(self):
+        calls = []
+
+        def fake_view(cfg, tz, now=None):
+            calls.append(1)
+            return [], None
+
+        with mock.patch.object(cp, "reservations_view", side_effect=fake_view), \
+                mock.patch.object(cp, "credentials_cfg", return_value={}):
+            self.panel._cache.update(at=0, items=None, error=None)
+            self.panel.reservations()
+            self.panel.reservations()
+            self.assertEqual(len(calls), 1)
+            self.panel.reservations(force=True)   # po anulowaniu bufor musi ustąpić
+            self.assertEqual(len(calls), 2)
+        self.panel._cache.update(at=0, items=None, error=None)
+
+
 if __name__ == "__main__":
     unittest.main()
