@@ -118,6 +118,10 @@ Każda nadchodząca rezerwacja ma dwa przyciski:
 | **Dodaj do kalendarza** | pobiera plik `.ics` — telefon proponuje dodanie do kalendarza (z przypomnieniem 60 min przed, adresem kortu i linkiem) |
 | **Anuluj rezerwację** | anuluje ją w Decathlon GO po potwierdzeniu w oknie dialogowym |
 
+Domyślnie widać tylko to, co jeszcze przed Tobą. Dwa przełączniki u góry dokładają
+**minione** i **anulowane** terminy (anulowane są wyszarzone, bez przycisków). Panel
+pamięta Twój wybór.
+
 Przycisk **Wszystkie do kalendarza** pobiera jeden plik ze wszystkimi nadchodzącymi
 terminami. Plik `.ics` jest **zdjęciem stanu z chwili pobrania** — po anulowaniu lub
 nowej rezerwacji pobierz go ponownie (kalendarz się sam nie zaktualizuje).

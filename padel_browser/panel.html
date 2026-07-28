@@ -67,6 +67,7 @@
     <a class="btn" id="all-ics" href="cal/all.ics">Wszystkie do kalendarza</a>
     <span class="grow"></span>
     <label class="sub"><input type="checkbox" id="show-past" onchange="render()"> minione</label>
+    <label class="sub"><input type="checkbox" id="show-cancelled" onchange="render()"> anulowane</label>
   </div>
   <div id="status" class="msg">Wczytuję rezerwacje…</div>
   <div id="list"></div>
@@ -139,12 +140,46 @@ function card(res) {
     + "</div>" + badge(res) + "</div>" + actions + "</div>";
 }
 
+// Domyślnie widać tylko to, co jeszcze przed Tobą: bez minionych i bez anulowanych.
+// Wybór zapamiętujemy, żeby nie klikać go przy każdym wejściu w panel.
+function filterState(name) {
+  return document.getElementById("show-" + name).checked;
+}
+
+function restoreFilters() {
+  ["past", "cancelled"].forEach(function (name) {
+    try {
+      document.getElementById("show-" + name).checked =
+        localStorage.getItem("padel-show-" + name) === "1";
+    } catch (e) { /* prywatny tryb przeglądarki — trudno, zostaje domyślne */ }
+  });
+}
+
+// Polski ma trzy formy liczby mnogiej: 1 / 2-4 / reszta (z wyjątkiem nastek 12-14).
+function hiddenCount(n) {
+  var last = n % 10, teens = n % 100;
+  if (n === 1) return "1 rezerwacja jest ukryta";
+  if (last >= 2 && last <= 4 && (teens < 12 || teens > 14)) return n + " rezerwacje są ukryte";
+  return n + " rezerwacji jest ukrytych";
+}
+
 function render() {
-  var past = document.getElementById("show-past").checked;
-  var shown = reservations.filter(function (r) { return past || !r.past; });
+  var past = filterState("past");
+  var cancelled = filterState("cancelled");
+  try {
+    localStorage.setItem("padel-show-past", past ? "1" : "0");
+    localStorage.setItem("padel-show-cancelled", cancelled ? "1" : "0");
+  } catch (e) { /* jw. */ }
+  var shown = reservations.filter(function (r) {
+    return (past || !r.past) && (cancelled || !r.cancelled);
+  });
+  var hidden = reservations.length - shown.length;
+  var empty = hidden
+    ? "Nic do pokazania — " + hiddenCount(hidden) + " filtrami powyżej."
+    : "Brak nadchodzących rezerwacji.";
   document.getElementById("list").innerHTML = shown.length
     ? shown.map(card).join("")
-    : '<div class="empty">' + (past ? "Brak rezerwacji." : "Brak nadchodzących rezerwacji.") + "</div>";
+    : '<div class="empty">' + empty + "</div>";
 }
 
 function status(text, isError) {
@@ -205,6 +240,7 @@ function loadRaw() {
     .catch(function (e) { pre.textContent = String(e); });
 }
 
+restoreFilters();   // zanim cokolwiek narysujemy — inaczej mignąłby domyślny widok
 load(false);
 </script>
 </body>
