@@ -79,12 +79,23 @@ def log(*args):
 
 # --------------------------------------------------------------------------- IO
 
-def load_config():
+_config_warned = False
+
+
+def load_config(quiet=False):
+    """Konfiguracja z pliku; w dodatku HA pliku nie ma i wszystko idzie z ENV.
+
+    O braku pliku mówimy RAZ na proces — inaczej ta linia powtarzałaby się przy
+    każdej iteracji monitora i przy każdym zapytaniu panelu, zaśmiecając Dziennik.
+    """
+    global _config_warned
     try:
         with open(CONFIG_PATH, encoding="utf-8") as f:
             return json.load(f)
     except FileNotFoundError:
-        log(f"(brak {CONFIG_PATH} — używam wartości z ENV)")
+        if not quiet and not _config_warned:
+            log(f"(brak {CONFIG_PATH} — używam wartości z ENV)")
+            _config_warned = True
         return {}
 
 
@@ -639,6 +650,23 @@ def check_decathlon_credentials(cfg, topic=None, book_url=None):
     return True
 
 
+# Ile czekać na token odnowiony przez przeglądarkę po HTTP 401. Czytnik budzi się ~10 s
+# po wygaśnięciu i potrzebuje jeszcze chwili na nawigację i zapis, więc ~24 s pokrywa
+# cały cykl budzik -> nawigacja -> zapis pliku.
+TOKEN_WAIT_ATTEMPTS = 8
+TOKEN_WAIT_DELAY = 3
+
+
+def wait_for_fresher_token(token, attempts=TOKEN_WAIT_ATTEMPTS, delay=TOKEN_WAIT_DELAY):
+    """Czeka, aż przeglądarka zapisze token INNY niż podany. Zwraca '' gdy się nie doczekał."""
+    for _ in range(attempts):
+        got = token_from_file()
+        if got and got != token:
+            return got
+        time.sleep(delay)
+    return ""
+
+
 def decathlon_rpc(method, token, payload, extend=None):
     """Wywołuje endpoint RPC Decathlon GO: POST /api/v2/{method} z tokenem sesji."""
     req = urllib.request.Request(
@@ -717,13 +745,7 @@ def register_slot(slot, listing_price, cfg, speculative=False):
                     # sekund) — dlatego czekamy chwilę na świeży token w pliku, zamiast
                     # oddawać gorący termin walkowerem. Czekanie jest ograniczone, żeby
                     # przy faktycznie martwej sesji nie wisieć w nieskończoność.
-                    fresh = None
-                    for _ in range(8):  # do ~24 s: pokrywa cykl budzik->nawigacja->zapis
-                        got = token_from_file()
-                        if got and got != token:
-                            fresh = got
-                            break
-                        time.sleep(3)
+                    fresh = wait_for_fresher_token(token)
                     if fresh:
                         token = fresh
                         cfg["token"] = fresh
@@ -816,7 +838,7 @@ def credentials_cfg():
     Ten sam wybór źródeł tokenu co w run_once: wygrywa token o najdalszym exp,
     a w scalonym dodatku odnawia go zalogowana przeglądarka (browser_mode).
     """
-    cfg = load_config()
+    cfg = load_config(quiet=True)  # panel woła to przy każdym zapytaniu — bez gadania do logu
     state_doc = load_state_doc()
     return {
         "token": newer_decathlon_token(
@@ -832,10 +854,32 @@ def credentials_cfg():
     }
 
 
-def decathlon_my_user_id(token):
-    """ID zalogowanego konta (users.getMe) — filtr listy transakcji."""
-    doc = _flat(decathlon_rpc("users.getMe", token, {}) or {})
-    return _ident(doc.get("id") or _flat(doc.get("user")).get("id"))
+def panel_rpc(method, cfg, token, payload, extend=None):
+    """RPC z jedną próbą ratunku po HTTP 401. Zwraca (odpowiedź, aktualny token).
+
+    Strona odnawia JWT dopiero PO wygaśnięciu, więc trafienie w ten kilkunastosekundowy
+    dołek jest normalnym stanem, nie awarią sesji (patrz BROWSER_RENEW_GRACE). Bez tego
+    kliknięcie w panelu akurat w dołku kończyło się czerwonym „sesja odrzucona", mimo
+    że sesja żyła — dokładnie jak przy rejestracji, która ma tę osłonę od 0.3.2.
+    """
+    try:
+        return decathlon_rpc(method, token, payload, extend), token
+    except urllib.error.HTTPError as first:
+        if first.code != 401 or not cfg.get("browser_mode"):
+            raise
+        fresh = wait_for_fresher_token(token)
+        if not fresh:
+            raise
+        log(f"~ Panel: HTTP 401 w dołku odnowy — ponawiam {method} ze świeższym tokenem")
+        cfg["token"] = fresh
+        return decathlon_rpc(method, fresh, payload, extend), fresh
+
+
+def decathlon_my_user_id(cfg, token):
+    """(ID zalogowanego konta, aktualny token) — filtr listy transakcji."""
+    doc, token = panel_rpc("users.getMe", cfg, token, {})
+    flat = _flat(doc or {})
+    return _ident(flat.get("id") or _flat(flat.get("user")).get("id")), token
 
 
 def fetch_my_reservations(cfg):
@@ -844,7 +888,7 @@ def fetch_my_reservations(cfg):
     if token_error:
         return None, token_error
     try:
-        user_id = decathlon_my_user_id(token)
+        user_id, token = decathlon_my_user_id(cfg, token)
     except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, ValueError) as e:
         return None, _rpc_error(e, "odczyt konta")
     if not user_id:
@@ -854,7 +898,8 @@ def fetch_my_reservations(cfg):
     while page < RESERVATIONS_MAX_PAGES:
         payload = {"customerId": user_id, "limit": RESERVATIONS_PAGE_SIZE, "page": page}
         try:
-            doc = decathlon_rpc("transactions.list", token, payload, RESERVATIONS_EXTEND) or {}
+            doc, token = panel_rpc("transactions.list", cfg, token, payload, RESERVATIONS_EXTEND)
+            doc = doc or {}
         except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, ValueError) as e:
             return None, _rpc_error(e, "lista rezerwacji")
         batch = doc.get("items") or []
@@ -938,7 +983,8 @@ def cancel_reservation(tx_id, cfg):
     if token_error:
         return False, token_error
     try:
-        doc = _flat(decathlon_rpc("transactions.cancel", token, {"id": tx_id}) or {})
+        doc, _ = panel_rpc("transactions.cancel", cfg, token, {"id": tx_id})
+        doc = _flat(doc or {})
     except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, ValueError) as e:
         return False, _rpc_error(e, "anulowanie")
     state = doc.get("processState") or doc.get("state") or ""
