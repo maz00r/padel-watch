@@ -1,6 +1,19 @@
-# 🎾 Padel (Decathlon) — dodatek Home Assistant
+# 🎾 Padel (Decathlon) — dodatki Home Assistant
 
-Repozytorium dodatku **Home Assistant**, który monitoruje wolne terminy padla na
+Repozytorium zawiera **dwa niezależne dodatki** — możesz zainstalować oba albo tylko jeden:
+
+| Dodatek | Co robi |
+|---------|---------|
+| 🎾 **[Padel (Decathlon)](padel_browser/README.md)** | monitoruje wolne terminy padla, rejestruje automatycznie, pokazuje i anuluje Twoje rezerwacje |
+| 🎬 **[Kino (Cinema City)](cinema_watch/README.md)** | pilnuje repertuaru wybranego filmu i daje znać, gdy pojawią się nowe seanse |
+
+Oba wysyłają push na telefon przez [ntfy.sh](https://ntfy.sh).
+
+---
+
+## 🎾 Padel (Decathlon)
+
+Dodatek **Home Assistant**, który monitoruje wolne terminy padla na
 [Decathlon GO](https://go.decathlon.pl), wysyła **push na telefon** (przez
 [ntfy.sh](https://ntfy.sh)) i (opcjonalnie) **rejestruje automatycznie**. W środku
 działa prawdziwa przeglądarka w panelu — **logujesz się raz**, a dodatek sam
@@ -36,8 +49,26 @@ Historia zmian: [padel_browser/CHANGELOG.md](padel_browser/CHANGELOG.md).
 - Panel (`panel.py`) pokazuje rezerwacje z konta (`users.getMe` + `transactions.list`),
   anuluje je (`transactions.cancel`) i generuje pliki `.ics` dla kalendarza w telefonie.
 
+---
+
+## 🎬 Kino (Cinema City)
+
+Pilnuje repertuaru wybranego filmu i wysyła push, gdy pojawią się **nowe terminy** —
+nowy dzień w repertuarze albo seans dołożony w dniu, który już znasz. Lekki dodatek:
+czysty Python, bez przeglądarki i bez logowania (repertuar jest publiczny).
+
+Wklejasz link do filmu ze strony Cinema City (z wybranym miastem lub kinem), resztę
+dodatek wyciąga sam. Pełna instrukcja: [cinema_watch/README.md](cinema_watch/README.md).
+
 ## Rozwój
 
-Silnik to jeden plik bez zależności: [padel_browser/check_padel.py](padel_browser/check_padel.py)
-(czysty Python, stdlib). Testy: `python3 -m unittest -v test_check_padel` (uruchamiane
-też w CI przy każdym PR).
+Każdy dodatek to jeden plik silnika bez zależności (czysty Python, stdlib):
+[padel_browser/check_padel.py](padel_browser/check_padel.py) i
+[cinema_watch/check_cinema.py](cinema_watch/check_cinema.py).
+
+Testy (uruchamiane też w CI przy każdym PR):
+
+```
+python3 -m unittest -v test_check_padel
+python3 -m unittest -v test_check_cinema
+```
