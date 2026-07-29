@@ -1,0 +1,27 @@
+name: Kino (Cinema City) — monitor nowych seansów
+version: "0.1.0"
+slug: cinema_watch
+description: Pilnuje repertuaru wybranego filmu w Cinema City i wysyła push przez ntfy, gdy pojawią się nowe terminy.
+url: https://github.com/maz00r/padel-watch
+arch:
+  - amd64
+  - aarch64
+init: false
+startup: application
+boot: auto
+options:
+  ntfy_topic: "your-ntfy-topic-here"
+  film_url: "https://www.cinema-city.pl/filmy/odyseja/7460s2r#/buy-tickets-by-film?in-cinema=warszawa&for-movie=7460s2r"
+  check_interval: 3600
+  cinemas: ""
+  days_ahead: 365
+  timezone: "Europe/Warsaw"
+  clear_state: ""
+schema:
+  ntfy_topic: str
+  film_url: str
+  check_interval: int(300,86400)
+  cinemas: str?
+  days_ahead: int(1,365)
+  timezone: str
+  clear_state: list(|all)

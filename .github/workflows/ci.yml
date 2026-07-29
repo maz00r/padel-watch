@@ -13,7 +13,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Testy jednostkowe
+      - name: Testy jednostkowe (padel)
         run: python3 -m unittest -v test_check_padel
-      - name: Składnia silnika
-        run: python3 -m py_compile padel_browser/check_padel.py padel_browser/read_token.py padel_browser/panel.py
+      - name: Testy jednostkowe (kino)
+        run: python3 -m unittest -v test_check_cinema
+      - name: Składnia silników
+        run: python3 -m py_compile padel_browser/check_padel.py padel_browser/read_token.py padel_browser/panel.py cinema_watch/check_cinema.py
