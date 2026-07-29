@@ -168,6 +168,86 @@ class CollectEventsTest(unittest.TestCase):
         self.assertEqual([e["id"] for e in events], ["1"])
 
 
+class AttributeFilterTest(unittest.TestCase):
+    """Filtr typu seansu (np. tylko IMAX)."""
+
+    def cfg(self, attributes):
+        with mock.patch.dict(os.environ, {"FILM_URL": FILM_URL, "ATTRIBUTES": attributes}):
+            return cc.load_config()
+
+    def api(self, events, seen_urls=None):
+        def get(url):
+            if seen_urls is not None:
+                seen_urls.append(url)
+            if "/dates/" in url:
+                return {"body": {"dates": ["2026-08-04"]}}
+            return {"body": {"cinemas": CINEMAS, "events": events}}
+        return get
+
+    def test_keeps_only_events_with_attribute(self):
+        events = [dict(event("1", "2026-08-04T10:30:00"), attributeIds=["2d", "imax"]),
+                  dict(event("2", "2026-08-04T11:30:00"), attributeIds=["2d"])]
+        with mock.patch.object(cc, "http_get_json", side_effect=self.api(events)):
+            got, _ = cc.collect_events(self.cfg("imax"))
+        self.assertEqual([e["id"] for e in got], ["1"])
+
+    def test_all_requested_attributes_must_be_present(self):
+        events = [dict(event("1", "2026-08-04T10:30:00"), attributeIds=["imax"]),
+                  dict(event("2", "2026-08-04T11:30:00"), attributeIds=["imax", "4dx"])]
+        with mock.patch.object(cc, "http_get_json", side_effect=self.api(events)):
+            got, _ = cc.collect_events(self.cfg("imax, 4dx"))
+        self.assertEqual([e["id"] for e in got], ["2"])
+
+    def test_filter_is_case_insensitive(self):
+        events = [dict(event("1", "2026-08-04T10:30:00"), attributeIds=["IMAX"])]
+        with mock.patch.object(cc, "http_get_json", side_effect=self.api(events)):
+            got, _ = cc.collect_events(self.cfg("Imax"))
+        self.assertEqual(len(got), 1)
+
+    def test_client_filter_holds_when_server_ignores_attr(self):
+        """Serwer zwraca też seanse bez IMAX — nasz filtr i tak je odsiewa."""
+        events = [dict(event("1", "2026-08-04T10:30:00"), attributeIds=["2d", "imax"]),
+                  dict(event("2", "2026-08-04T11:30:00"), attributeIds=["2d"])]
+        with mock.patch.object(cc, "http_get_json", side_effect=self.api(events)):
+            got, _ = cc.collect_events(self.cfg("imax"))
+        self.assertEqual([e["id"] for e in got], ["1"])
+
+    def test_single_attribute_is_pushed_to_server(self):
+        urls = []
+        with mock.patch.object(cc, "http_get_json", side_effect=self.api([], urls)):
+            cc.collect_events(self.cfg("imax"))
+        self.assertTrue(all(u.endswith("?attr=imax") for u in urls), urls)
+
+    def test_several_attributes_are_not_pushed_to_server(self):
+        # Przy kilku atrybutach nie wiemy, czy serwer łączy je przez „i" czy „lub" —
+        # filtrujemy wyłącznie u siebie, żeby nie zgubić seansu.
+        urls = []
+        with mock.patch.object(cc, "http_get_json", side_effect=self.api([], urls)):
+            cc.collect_events(self.cfg("imax, 4dx"))
+        self.assertTrue(all(u.endswith("?attr=") for u in urls), urls)
+
+    def test_no_attribute_filter_keeps_everything(self):
+        events = [dict(event("1", "2026-08-04T10:30:00"), attributeIds=["2d"]),
+                  dict(event("2", "2026-08-04T11:30:00"), attributeIds=["imax"])]
+        with mock.patch.object(cc, "http_get_json", side_effect=self.api(events)):
+            got, _ = cc.collect_events(self.cfg(""))
+        self.assertEqual(len(got), 2)
+
+
+class DescribeFiltersTest(unittest.TestCase):
+    def cfg(self, cinemas="", attributes=""):
+        with mock.patch.dict(os.environ, {"FILM_URL": FILM_URL, "CINEMAS": cinemas,
+                                          "ATTRIBUTES": attributes}):
+            return cc.load_config()
+
+    def test_both_filters(self):
+        self.assertEqual(cc.describe_filters(self.cfg("Sadyba", "imax")),
+                         "kina: sadyba; typ seansu: imax")
+
+    def test_no_filters_says_so_plainly(self):
+        self.assertIn("bez zawężeń", cc.describe_filters(self.cfg()))
+
+
 class RunOnceTest(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.TemporaryDirectory()
