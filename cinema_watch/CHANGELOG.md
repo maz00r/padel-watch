@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.2.0 — filtr typu seansu (IMAX, 4DX…)
+- **Nowa opcja `attributes`**: zawężenie do konkretnego typu seansu, np. `imax`.
+  Kilka wartości oznacza, że seans musi mieć **wszystkie** naraz.
+- **Domyślne ustawienie to teraz `cinemas: Sadyba` + `attributes: imax`** (33 seanse
+  zamiast 473 w całej Warszawie). Wyczyszczenie obu opcji przywraca śledzenie wszystkiego.
+- Zawężenie **przy jednym atrybucie trafia też do zapytania** (`?attr=imax`), co zmniejsza
+  pobierane dane z ~57 KB do ~4,5 KB na dzień. Przy kilku atrybutach filtrujemy wyłącznie
+  u siebie — nie wiadomo, czy serwer łączy je przez „i" czy „lub", a nie chcemy zgubić seansu.
+  Niezależnie od tego **każdy seans sprawdzamy jeszcze lokalnie**, więc zmiana po stronie
+  Cinema City nie rozszerzy po cichu powiadomień.
+- Dziennik pokazuje aktywne zawężenie przy starcie, a ostrzeżenie o pustym repertuarze
+  wymienia je jako możliwą przyczynę.
+
 ## 0.1.0 — pierwszy dodatek monitorujący repertuar Cinema City
 - Pilnuje wybranego filmu (link wklejony ze strony) i wysyła push przez ntfy, gdy
   pojawią się **nowe terminy**: nowy dzień w repertuarze (zbiorczo) albo dołożony

@@ -9,12 +9,13 @@ export NTFY_TOPIC="$(opt ntfy_topic)"
 export FILM_URL="$(opt film_url)"
 export CHECK_INTERVAL="$(opt check_interval)"
 export CINEMAS="$(opt cinemas)"
+export ATTRIBUTES="$(opt attributes)"
 export DAYS_AHEAD="$(opt days_ahead)"
 export TIMEZONE="$(opt timezone)"
 export CLEAR_STATE="$(opt clear_state)"
 
 # Opcja pominięta w UI -> Python zwraca "None"; traktuj jak pustą.
-for v in CINEMAS CLEAR_STATE; do
+for v in CINEMAS ATTRIBUTES CLEAR_STATE; do
   eval "val=\$$v"
   [ "$val" = "None" ] && export "$v="
 done

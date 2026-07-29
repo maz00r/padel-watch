@@ -133,6 +133,7 @@ def load_config():
     except ValueError:
         days_ahead = 365
     wanted = [c.strip().lower() for c in (os.environ.get("CINEMAS") or "").split(",") if c.strip()]
+    attrs = [a.strip().lower() for a in (os.environ.get("ATTRIBUTES") or "").split(",") if a.strip()]
     return {
         "film_id": film_id,
         "place": place,
@@ -140,9 +141,25 @@ def load_config():
         "is_group": not place.isdigit(),   # 'warszawa' = grupa kin, '1074' = jedno kino
         "days_ahead": max(1, min(days_ahead, 365)),
         "cinemas": wanted,
+        "attributes": attrs,
+        # API potrafi filtrować po stronie serwera (?attr=imax daje 4 KB zamiast 57 KB).
+        # Korzystamy z tego tylko dla POJEDYNCZEGO atrybutu — przy kilku nie wiadomo,
+        # czy serwer łączy je przez „i" czy „lub", a nie chcemy po cichu zgubić seansu.
+        # Niezależnie od tego każdy seans sprawdzamy jeszcze u siebie.
+        "attr_param": attrs[0] if len(attrs) == 1 else "",
         "topic": os.environ.get("NTFY_TOPIC") or "",
         "film_page": FILM_PAGE.format(slug=slug or "film", film_id=film_id),
     }
+
+
+def describe_filters(cfg):
+    """Krótki opis zawężeń — do logu, żeby liczby w Dzienniku nie zaskakiwały."""
+    parts = []
+    if cfg["cinemas"]:
+        parts.append("kina: " + ", ".join(cfg["cinemas"]))
+    if cfg["attributes"]:
+        parts.append("typ seansu: " + ", ".join(cfg["attributes"]))
+    return "; ".join(parts) or "bez zawężeń (wszystkie kina i typy seansów)"
 
 
 # ---------------------------------------------------------------------- stan
@@ -201,20 +218,23 @@ def http_get_json(url):
 def fetch_dates(cfg):
     """Dni, w których film gra (dla grupy) albo dni z repertuarem kina."""
     until = (datetime.now(_log_tz()) + timedelta(days=cfg["days_ahead"])).strftime("%Y-%m-%d")
+    attr = cfg.get("attr_param") or ""
     if cfg["is_group"]:
-        url = f"{API_BASE}/dates/in-group/{cfg['place']}/with-film/{cfg['film_id']}/until/{until}?attr="
+        url = (f"{API_BASE}/dates/in-group/{cfg['place']}"
+               f"/with-film/{cfg['film_id']}/until/{until}?attr={attr}")
     else:
-        url = f"{API_BASE}/dates/in-cinema/{cfg['place']}/until/{until}?attr="
+        url = f"{API_BASE}/dates/in-cinema/{cfg['place']}/until/{until}?attr={attr}"
     return (http_get_json(url).get("body") or {}).get("dates") or []
 
 
 def fetch_events(cfg, date):
     """(seanse filmu w danym dniu, nazwy kin). Dla pojedynczego kina odsiewamy inne filmy."""
+    attr = cfg.get("attr_param") or ""
     if cfg["is_group"]:
         url = (f"{API_BASE}/cinema-events/in-group/{cfg['place']}"
-               f"/with-film/{cfg['film_id']}/at-date/{date}?attr=")
+               f"/with-film/{cfg['film_id']}/at-date/{date}?attr={attr}")
     else:
-        url = f"{API_BASE}/film-events/in-cinema/{cfg['place']}/at-date/{date}?attr="
+        url = f"{API_BASE}/film-events/in-cinema/{cfg['place']}/at-date/{date}?attr={attr}"
     body = http_get_json(url).get("body") or {}
     names = {c.get("id"): c.get("displayName") or c.get("id")
              for c in (body.get("cinemas") or [])}
@@ -233,6 +253,7 @@ def normalize_event(raw, cinema_names):
         "time": when[11:16],
         "when": when,
         "cinema": short,
+        "attributes": [str(a).lower() for a in (raw.get("attributeIds") or [])],
         "link": raw.get("bookingLink") or "",
     }
 
@@ -246,6 +267,10 @@ def collect_events(cfg):
         for raw in raw_events:
             event = normalize_event(raw, names)
             if cfg["cinemas"] and not any(w in event["cinema"].lower() for w in cfg["cinemas"]):
+                continue
+            # Typ seansu sprawdzamy ZAWSZE u siebie, nawet gdy serwer już filtrował —
+            # inaczej zmiana po ich stronie po cichu rozszerzyłaby powiadomienia.
+            if cfg["attributes"] and not all(a in event["attributes"] for a in cfg["attributes"]):
                 continue
             events.append(event)
     # Dni raportujemy z faktycznie znalezionych seansów, nie z listy z API: przy filtrze
@@ -323,9 +348,10 @@ def run_once(announce_startup=False):
     if not events:
         # Puste API to NIE błąd HTTP — tak samo wygląda literówka w linku i film zdjęty
         # z ekranów. Bez tego ostrzeżenia cisza byłaby nie do odróżnienia od „nic nowego".
-        log(f"⚠ Brak jakichkolwiek seansów dla filmu '{cfg['film_id']}' w '{cfg['place']}'. "
-            f"Sprawdź film_url (zły identyfikator daje pustą odpowiedź, nie błąd) "
-            f"albo film zszedł z afisza.")
+        log(f"⚠ Brak jakichkolwiek seansów dla filmu '{cfg['film_id']}' w '{cfg['place']}' "
+            f"({describe_filters(cfg)}). Sprawdź film_url (zły identyfikator daje pustą "
+            f"odpowiedź, nie błąd), zawężenia w opcjach 'cinemas'/'attributes' "
+            f"albo czy film nie zszedł z afisza.")
 
     state = load_state()
     seen_ids = set((state or {}).get("event_ids") or [])
@@ -335,6 +361,7 @@ def run_once(announce_startup=False):
 
     if state is None:
         latest = max((e["when"] for e in events), default="")
+        log(f"Zawężenie: {describe_filters(cfg)}.")
         log(f"Pierwszy bieg — zapisuję punkt odniesienia: {screenings(len(events))} "
             f"w {day_count(len(current_dates))}"
             + (f", ostatni {fmt_day(latest[:10])} {latest[11:16]}." if latest else "."))

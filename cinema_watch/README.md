@@ -43,10 +43,27 @@ Miejscem może być **miasto** (wszystkie kina w mieście) albo **id pojedynczeg
 | `ntfy_topic` | temat ntfy (ten sam, co subskrybujesz w apce) | `moj-temat-kino` |
 | `film_url` | link do filmu z wybranym miastem/kinem (patrz wyżej) | `https://www.cinema-city.pl/filmy/odyseja/7460s2r#/...` |
 | `check_interval` | co ile sekund sprawdzać (300–86400) | `3600` |
-| `cinemas` | tylko wybrane kina; nazwy po przecinku, fragment wystarczy. Puste = wszystkie | `Arkadia, Mokotów` |
+| `cinemas` | tylko wybrane kina; nazwy po przecinku, fragment wystarczy. Puste = wszystkie | `Sadyba` |
+| `attributes` | tylko wybrany typ seansu (patrz niżej). Kilka wartości = seans musi mieć **wszystkie**. Puste = dowolny | `imax` |
 | `days_ahead` | jak daleko w przyszłość patrzeć (dni) | `365` |
 | `timezone` | strefa czasowa dat w logach i powiadomieniach | `Europe/Warsaw` |
 | `clear_state` | `all` = zapomnij zapamiętane seanse i zacznij od nowa | `` |
+
+### Typy seansu (`attributes`)
+
+Dla filmu w Warszawie spotykane wartości: `imax`, `4dx`, `2d`, `laser-barco`,
+`subbed` (napisy), `original-lang-en`. Pełną listę dla konkretnego filmu widać
+w Dzienniku po włączeniu diagnostyki — albo po prostu na stronie kina przy seansie.
+
+**Domyślne ustawienie dodatku to `cinemas: Sadyba` + `attributes: imax`** — czyli
+seanse IMAX w Sadybie. Żeby śledzić wszystko, wyczyść obie opcje.
+
+Zawężenie widać w Dzienniku przy starcie:
+
+```
+Zawężenie: kina: sadyba; typ seansu: imax.
+Pierwszy bieg — zapisuję punkt odniesienia: 33 seanse w 9 dniach, ostatni czwartek 06.08 21:45.
+```
 
 Repertuar kin zmienia się zwykle **raz dziennie**, więc `check_interval: 3600`
 (co godzinę) jest z zapasem. Częściej nie ma sensu — to tylko ruch na serwerze kina.
