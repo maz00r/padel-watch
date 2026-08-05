@@ -380,7 +380,8 @@ class TestAutoRegister(unittest.TestCase):
             seen["payload"] = json.loads(req.data.decode("utf-8"))
             return FakeResponse(json.dumps({"output": {"processState": "accepted"}}).encode("utf-8"))
 
-        with mock.patch.object(cp.urllib.request, "urlopen", fake_urlopen):
+        # rejestracja idzie po podtrzymanym połączeniu (open_url), nie przez urlopen
+        with mock.patch.object(cp, "open_url", fake_urlopen):
             doc = cp.decathlon_rpc("transactions.create", "jwt", {"listingDateId": "D"})
 
         self.assertEqual(doc, {"processState": "accepted"})
@@ -1167,6 +1168,258 @@ class TokenFromFileTest(unittest.TestCase):
                 self.assertEqual(cp.token_from_file(), "")
         finally:
             os.unlink(path)
+
+
+class FakeHTTPResponse:
+    def __init__(self, status=200, body=b"{}", headers=None):
+        self.status = status
+        self._body = body
+        self.headers = {} if headers is None else headers
+
+    def read(self):
+        return self._body
+
+
+class FakeConnection:
+    """Udaje http.client.HTTPSConnection: liczy wysłane zapytania i potrafi zerwać gniazdo."""
+
+    created = 0
+    script = []   # kolejka WSPÓLNA dla wszystkich połączeń — ponowienie ma iść dalej,
+                  # a nie odtwarzać od nowa tego samego błędu
+
+    def __init__(self, host, timeout=None):
+        FakeConnection.created += 1
+        self.host = host
+        self.sent = []
+        self.closed = False
+
+    def request(self, method, path, body=None, headers=None):
+        self.sent.append((method, path, body, headers))
+        if FakeConnection.script and isinstance(FakeConnection.script[0], Exception):
+            raise FakeConnection.script.pop(0)
+
+    def getresponse(self):
+        item = FakeConnection.script.pop(0) if FakeConnection.script else FakeHTTPResponse()
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    def close(self):
+        self.closed = True
+
+
+class OpenUrlTest(unittest.TestCase):
+    """Warstwa transportu: podtrzymane połączenie zamiast nowego przy każdym zapytaniu."""
+
+    def setUp(self):
+        cp.drop_connection()
+        FakeConnection.created = 0
+        FakeConnection.script = []
+        patcher = mock.patch.object(cp.http.client, "HTTPSConnection", FakeConnection)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.addCleanup(cp.drop_connection)
+
+    def req(self, url="https://go.decathlon.pl/api/listing/X?include=dates", data=None, method=None):
+        return urllib.request.Request(url, data=data, method=method,
+                                      headers={"User-Agent": "test"})
+
+    def test_reuses_one_connection_for_repeated_calls(self):
+        FakeConnection.script = [FakeHTTPResponse(body=b'{"a":1}')] * 3
+        for _ in range(3):
+            with cp.open_url(self.req()) as resp:
+                self.assertEqual(resp.read(), b'{"a":1}')
+        self.assertEqual(FakeConnection.created, 1)   # sedno zmiany: JEDNO połączenie
+
+    def test_path_and_method_are_passed_through(self):
+        FakeConnection.script = [FakeHTTPResponse()]
+        cp.open_url(self.req("https://h/api/v2/x", data=b"{}", method="POST"))
+        method, path, body, _ = cp._conn_pool()["h"].sent[0]
+        self.assertEqual((method, path, body), ("POST", "/api/v2/x", b"{}"))
+
+    def test_query_string_survives(self):
+        FakeConnection.script = [FakeHTTPResponse()]
+        cp.open_url(self.req())
+        self.assertEqual(cp._conn_pool()["go.decathlon.pl"].sent[0][1],
+                         "/api/listing/X?include=dates")
+
+    def test_dropped_socket_is_retried_on_a_fresh_connection(self):
+        """Serwer zamyka bezczynne gniazdo — to normalne, nie może kosztować biegu."""
+        FakeConnection.script = [ConnectionResetError("zerwane"), FakeHTTPResponse(body=b"ok")]
+        with cp.open_url(self.req()) as resp:
+            self.assertEqual(resp.read(), b"ok")
+        self.assertEqual(FakeConnection.created, 2)
+
+    def test_second_failure_is_a_network_error(self):
+        FakeConnection.script = [ConnectionResetError("raz"), ConnectionResetError("dwa")]
+        with self.assertRaises(urllib.error.URLError):
+            cp.open_url(self.req())
+
+    def test_http_error_keeps_urlopen_contract(self):
+        FakeConnection.script = [FakeHTTPResponse(status=409, body=b'{"message":"No available seats"}')]
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            cp.open_url(self.req())
+        self.assertEqual(ctx.exception.code, 409)
+        self.assertIn(b"No available seats", ctx.exception.read())
+
+    def test_connection_close_header_drops_the_socket(self):
+        FakeConnection.script = [FakeHTTPResponse(headers={"Connection": "close"}),
+                                 FakeHTTPResponse()]
+        cp.open_url(self.req())
+        self.assertEqual(cp._conn_pool(), {})
+        cp.open_url(self.req())
+        self.assertEqual(FakeConnection.created, 2)
+
+    def test_redirect_is_followed(self):
+        FakeConnection.script = [FakeHTTPResponse(status=301, headers={"Location": "/nowy"}),
+                                 FakeHTTPResponse(body=b"tam")]
+        with cp.open_url(self.req()) as resp:
+            self.assertEqual(resp.read(), b"tam")
+        self.assertEqual(cp._conn_pool()["go.decathlon.pl"].sent[-1][1], "/nowy")
+
+    def test_redirect_loop_gives_up(self):
+        FakeConnection.script = [FakeHTTPResponse(status=301, headers={"Location": "/x"})] * 9
+        with self.assertRaises(urllib.error.URLError):
+            cp.open_url(self.req())
+
+
+class ParseBurstTest(unittest.TestCase):
+    def test_full_time(self):
+        got = cp.parse_burst_env("mon-sun:11:00:45")
+        self.assertEqual(got["at"], (11, 0, 45))
+        self.assertEqual(len(got["days"]), 7)
+
+    def test_seconds_optional(self):
+        self.assertEqual(cp.parse_burst_env("mon-fri:11:00")["at"], (11, 0, 0))
+
+    def test_day_list(self):
+        self.assertEqual(cp.parse_burst_env("mon,wed:11:00:45")["days"], ["mon", "wed"])
+
+    def test_empty_means_disabled(self):
+        self.assertIsNone(cp.parse_burst_env(""))
+        self.assertIsNone(cp.parse_burst_env("   "))
+
+    def test_garbage_raises(self):
+        for spec in ("mon-sun", "mon-sun:", "mon-sun:25:00:00", "mon-sun:aa:bb", "mon-sun:11:00:99"):
+            with self.assertRaises(ValueError, msg=spec):
+                cp.parse_burst_env(spec)
+
+
+class BurstBoundsTest(unittest.TestCase):
+    def burst(self, days="mon-sun", at="11:00:45", seconds=15, interval=0.5):
+        cfg = cp.parse_burst_env(f"{days}:{at}")
+        cfg.update(seconds=seconds, interval=interval)
+        return cfg
+
+    def at(self, *args):
+        return datetime(*args, tzinfo=TZ)
+
+    def test_before_burst_returns_todays_window(self):
+        start, end = cp.burst_bounds(self.burst(), TZ, self.at(2026, 8, 5, 10, 0))
+        self.assertEqual((start.hour, start.minute, start.second), (11, 0, 45))
+        self.assertEqual((end - start).total_seconds(), 15)
+
+    def test_inside_burst_returns_the_running_window(self):
+        bounds = cp.burst_bounds(self.burst(), TZ, self.at(2026, 8, 5, 11, 0, 50))
+        self.assertTrue(bounds[0] <= self.at(2026, 8, 5, 11, 0, 50) < bounds[1])
+
+    def test_after_burst_jumps_to_next_day(self):
+        start, _ = cp.burst_bounds(self.burst(), TZ, self.at(2026, 8, 5, 12, 0))
+        self.assertEqual(start.day, 6)
+
+    def test_skips_days_outside_the_list(self):
+        # 2026-08-05 to środa; przy 'sat' najbliższy zryw wypada w sobotę 08.08
+        start, _ = cp.burst_bounds(self.burst(days="sat"), TZ, self.at(2026, 8, 5, 12, 0))
+        self.assertEqual((start.day, start.weekday()), (8, 5))
+
+    def test_disabled_burst(self):
+        self.assertIsNone(cp.burst_bounds(None, TZ, self.at(2026, 8, 5, 11, 0)))
+
+
+class PlanSleepTest(unittest.TestCase):
+    def burst(self, seconds=15, interval=0.5):
+        cfg = cp.parse_burst_env("mon-sun:11:00:45")
+        cfg.update(seconds=seconds, interval=interval)
+        return cfg
+
+    def at(self, *args):
+        return datetime(*args, tzinfo=TZ)
+
+    def test_work_time_is_subtracted_from_the_wait(self):
+        """Ustawione 2s musi znaczyć 2s, a nie 2s + czas zapytań."""
+        got = cp.plan_sleep(2, [], None, TZ, elapsed=0.4, now=self.at(2026, 8, 5, 9, 0))
+        self.assertAlmostEqual(got, 1.6, places=3)
+
+    def test_never_returns_a_busy_loop(self):
+        got = cp.plan_sleep(2, [], None, TZ, elapsed=99, now=self.at(2026, 8, 5, 9, 0))
+        self.assertEqual(got, cp.MIN_SLEEP_SECONDS)
+
+    def test_inside_burst_uses_the_burst_tempo(self):
+        got = cp.plan_sleep(60, [], self.burst(), TZ, elapsed=0.1,
+                            now=self.at(2026, 8, 5, 11, 0, 50))
+        self.assertAlmostEqual(got, 0.4, places=3)
+
+    def test_sleeps_exactly_up_to_the_burst_start(self):
+        """Bez tego zwykły takt przespałby moment publikacji."""
+        got = cp.plan_sleep(60, [], self.burst(), TZ, elapsed=0,
+                            now=self.at(2026, 8, 5, 11, 0, 20))
+        self.assertAlmostEqual(got, 25, places=3)
+
+    def test_lands_on_the_burst_start_even_after_slow_work(self):
+        """Czasu pracy NIE odejmujemy od dosypiania do zrywu — inaczej budzimy się obok celu."""
+        got = cp.plan_sleep(60, [], self.burst(), TZ, elapsed=0.4,
+                            now=self.at(2026, 8, 5, 11, 0, 40))
+        self.assertAlmostEqual(got, 5.0, places=3)   # 11:00:40 + 5 s = 11:00:45 co do sekundy
+
+    def test_far_from_burst_uses_the_normal_interval(self):
+        got = cp.plan_sleep(30, [], self.burst(), TZ, elapsed=0,
+                            now=self.at(2026, 8, 5, 3, 0))
+        self.assertAlmostEqual(got, 30, places=3)
+
+    def test_interval_windows_still_apply(self):
+        windows = cp.parse_intervals_env("mon-sun:08:00-12:00=7")
+        got = cp.plan_sleep(60, windows, None, TZ, elapsed=0, now=self.at(2026, 8, 5, 9, 0))
+        self.assertAlmostEqual(got, 7, places=3)
+
+
+class SkipLightPingTest(unittest.TestCase):
+    """W zrywie pomijamy lekki ping — pełne dane niosą te same atrybuty kortu."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        patcher = mock.patch.object(cp, "STATE_PATH", os.path.join(self.dir.name, "s.json"))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.env = mock.patch.dict(os.environ, {
+            "LISTINGS": "https://go.decathlon.pl/l/" + "a" * 8 + "-1111-2222-3333-444444444444",
+            "NTFY_TOPIC": "", "FILTERS": "mon-sun:00:00-24:00", "AUTO_REGISTER": "false",
+            "CONFIG_PATH": os.path.join(self.dir.name, "brak.json"),
+        })
+        self.env.start()
+        self.addCleanup(self.env.stop)
+
+    def heavy(self):
+        return {"data": {"attributes": {"title": "Kort", "price": None,
+                                        "datesStats": {"availableListingDates": 0}}},
+                "included": []}
+
+    def run_with(self, skip_light):
+        with mock.patch.object(cp, "resolve_current_id", side_effect=lambda x: x), \
+                mock.patch.object(cp, "fetch_listing_light", return_value=self.heavy()) as light, \
+                mock.patch.object(cp, "fetch_listing", return_value=self.heavy()) as heavy:
+            cp.run_once(skip_light=skip_light)
+        return light, heavy
+
+    def test_burst_goes_straight_for_the_full_payload(self):
+        light, heavy = self.run_with(True)
+        light.assert_not_called()
+        heavy.assert_called_once()
+
+    def test_normal_run_still_starts_with_the_light_ping(self):
+        light, heavy = self.run_with(False)
+        light.assert_called_once()
+        heavy.assert_not_called()      # 0 dostępnych -> pełne dane niepotrzebne
 
 
 def transaction(date="2026-08-04T18:00:00.000+00:00", duration=60, state="accepted", **over):

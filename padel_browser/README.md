@@ -35,6 +35,9 @@ przechodzisz normalne logowanie, łącznie z kodem z maila.
 | `check_interval` | bazowa częstotliwość sprawdzania w sekundach (10–3600) | `60` |
 | `filters` | godziny powiadomień; okna `;`, każde `DNI:HH:MM-HH:MM` | `mon-fri:15:00-02:00; sat-sun:00:00-24:00` |
 | `intervals` | inna częstotliwość w zadanych godzinach: `DNI:HH:MM-HH:MM=SEKUNDY` | `mon-fri:15:00-02:00=30` |
+| `burst` | **zryw**: krótkie, gęste sprawdzanie wycelowane w sekundę publikacji grafiku, `DNI:GG:MM:SS`. Puste = wyłączony | `mon-sun:11:00:45` |
+| `burst_seconds` | ile sekund trwa zryw (1–120) | `15` |
+| `burst_interval` | odstęp w zrywie, w sekundach (dozwolone poniżej 1 s) | `0.5` |
 | `listing_url` | link do kortu (Decathlon GO); app sam podąża za zmianą adresu | `https://go.decathlon.pl/l/1c0ec93e-...` |
 | `timezone` | strefa czasowa filtrów i logów | `Europe/Warsaw` |
 | `auto_register` | próba automatycznego zapisu na nowy termin | `false` |
@@ -135,6 +138,33 @@ nowej rezerwacji pobierz go ponownie (kalendarz się sam nie zaktualizuje).
 
 Gdy panel pokazuje `brak tokenu — zaloguj się w panelu Padel`, przejdź na zakładkę
 **Przeglądarka** i zaloguj się — lista pojawi się od razu po odświeżeniu.
+
+### Zryw (`burst`) — polowanie na publikację grafiku
+
+Decathlon wypuszcza grafik o **stałej porze**, 7 dni naprzód. Na kortach Targówka
+zmierzone (dwa dni z rzędu, co do sekundy): **około 11:00:53**.
+
+Zamiast młócić szybkim taktem przez kwadrans, dodatek robi **krótki zryw** wycelowany
+w tę sekundę: budzi się dokładnie o `burst`, przez `burst_seconds` sprawdza co
+`burst_interval`, po czym wraca do zwykłego taktu. W zrywie dodatkowo:
+
+- **pomija lekki ping** — oszczędza on transfer, ale kosztuje całą rundę do serwera,
+  a pełne dane i tak są potrzebne po identyfikatory terminów,
+- korzysta z **podtrzymanego połączenia** — bez uzgadniania TCP i TLS przy każdym zapytaniu.
+
+Zmierzony efekt: cykl sprawdzenia **427 ms → 78 ms**, a opóźnienie wykrycia spada
+z ~1,2 s do ~0,25 s średnio.
+
+> **Zryw zwykle pozwala wyłączyć agresywne `intervals`.** Okno `mon-sun:10:55-11:10=2`
+> to ~478 zapytań; sam zryw z domyślnymi ustawieniami to ~50 w tym samym czasie —
+> i wykrywa szybciej. Mniej ruchu na serwerze Decathlonu i mniejsze ryzyko blokady po IP.
+
+Podłoga taktu w zrywie to 0,2 s (poza zrywem obowiązuje minimum 2 s z `intervals`) —
+świadomie niższa, bo zryw trwa kilkanaście sekund, a nie godzinami.
+
+Jak ustalić własną porę publikacji: zostaw `intervals` na kilka sekund w szerokim oknie
+i sprawdź w Dzienniku, o której pierwszy raz pojawia się nowy dzień. Potem ustaw `burst`
+kilka sekund wcześniej i `intervals` możesz wyczyścić.
 
 ## Powiadomienia
 
