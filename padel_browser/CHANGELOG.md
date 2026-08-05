@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.5.0 — zryw: polowanie na sekundę publikacji grafiku
+- **Nowy `burst`**: krótkie, gęste sprawdzanie wycelowane w moment publikacji grafiku
+  (u nas zmierzone ~11:00:53, powtarzalnie co do sekundy przez dwa dni). Domyślnie
+  `mon-sun:11:00:45`, 15 s co 0,5 s. Pętla dosypia **dokładnie** do startu zrywu,
+  żeby go nie przespać.
+- **Podtrzymane połączenie HTTPS** dla pobierania terminów i zapytania rejestrującego.
+  Każde nowe połączenie to uzgodnienie TCP i TLS — zmierzone ~110 ms dla lekkiego pingu
+  i ~200 ms dla pełnych danych, czyli więcej niż sam transfer (21 KB po kompresji).
+- **W zrywie pomijany jest lekki ping** — kosztował całą rundę do serwera, a pełne dane
+  niosą te same atrybuty kortu, więc nic przez to nie tracimy.
+- **Naprawiony takt pętli**: uśpienie było doklejane PO pracy, więc ustawione 2 s dawało
+  realnie ~2,4 s (widoczne w logu użytkownika). Teraz czas pracy jest odejmowany.
+- Zmierzony efekt łącznie: cykl sprawdzenia **427 ms → 78 ms**, opóźnienie wykrycia
+  z ~1,2 s do ~0,25 s. Przy tym zryw pozwala wyłączyć agresywne `intervals`:
+  ~50 zapytań zamiast ~478 w oknie 10:50–11:10.
+
 ## 0.4.2 — ukrywanie anulowanych rezerwacji
 - **Anulowane rezerwacje są domyślnie ukryte** — po anulowaniu termin znika z listy
   zamiast zostawać jako wyszarzona karta. Przełącznik **anulowane** (obok **minione**)

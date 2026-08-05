@@ -14,10 +14,13 @@ Tylko biblioteka standardowa — brak zależności (działa w GitHub Actions bez
 
 import gzip
 import base64
+import http.client
+import io
 import json
 import os
 import re
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -236,11 +239,108 @@ def hm_to_minutes(hm):
     return int(h) * 60 + int(m)
 
 
+# ---------------------------------------------------------- transport HTTP
+
+# Każde nowe połączenie to uzgodnienie TCP i TLS — zmierzone ~110 ms dla lekkiego
+# pingu i ~200 ms dla pełnych danych. W wyścigu o termin to więcej niż sam transfer
+# (pełne dane to raptem 21 KB po kompresji), dlatego połączenia podtrzymujemy.
+_conn_local = threading.local()   # panel woła RPC z wielu wątków -> pula na wątek
+MAX_REDIRECTS = 3
+
+
+class _KeepAliveResponse:
+    """Odpowiedź udająca tę z urlopen: .read() / .headers / .status i menedżer kontekstu."""
+
+    def __init__(self, status, headers, body, url):
+        self.status = status
+        self.headers = headers
+        self.url = url
+        self._body = body
+
+    def read(self):
+        return self._body
+
+    def geturl(self):
+        return self.url
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def _conn_pool():
+    pool = getattr(_conn_local, "pool", None)
+    if pool is None:
+        pool = _conn_local.pool = {}
+    return pool
+
+
+def drop_connection(host=None):
+    """Zamyka podtrzymywane połączenie (lub wszystkie) — po błędzie albo na żądanie."""
+    pool = _conn_pool()
+    for key in ([host] if host else list(pool)):
+        conn = pool.pop(key, None)
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001 - zamykanie nie może wywrócić biegu
+                pass
+
+
+def open_url(req, timeout=30):
+    """urlopen po PODTRZYMYWANYM połączeniu HTTPS.
+
+    Kontrakt zgodny z urlopen: zwraca obiekt z .read()/.headers/.status, a przy
+    HTTP >= 400 podnosi urllib.error.HTTPError — dzięki temu obsługa błędów
+    w wywołaniach zostaje bez zmian.
+
+    Bezczynne gniazdo bywa zamykane przez serwer, więc zerwane połączenie
+    ponawiamy raz na świeżym; dopiero druga wpadka to błąd sieci.
+    """
+    url = req.full_url
+    for _ in range(MAX_REDIRECTS + 1):
+        parts = urllib.parse.urlsplit(url)
+        host = parts.netloc
+        path = parts.path or "/"
+        if parts.query:
+            path += "?" + parts.query
+        headers = dict(req.headers)
+        status = hdrs = body = None
+        for attempt in range(2):
+            pool = _conn_pool()
+            conn = pool.get(host)
+            if conn is None:
+                if parts.scheme != "https":
+                    raise urllib.error.URLError(f"obsługuję tylko https, nie {parts.scheme!r}")
+                conn = pool[host] = http.client.HTTPSConnection(host, timeout=timeout)
+            try:
+                conn.request(req.get_method(), path, body=req.data, headers=headers)
+                resp = conn.getresponse()
+                body, status, hdrs = resp.read(), resp.status, resp.headers
+                break
+            except (http.client.HTTPException, OSError) as e:
+                drop_connection(host)
+                if attempt == 0:
+                    continue   # serwer zamknął bezczynne gniazdo — próbujemy od nowa
+                raise urllib.error.URLError(e)
+        if hdrs.get("Connection", "").lower() == "close":
+            drop_connection(host)
+        if status in (301, 302, 303, 307, 308) and hdrs.get("Location"):
+            url = urllib.parse.urljoin(url, hdrs["Location"])
+            continue
+        if status >= 400:
+            raise urllib.error.HTTPError(url, status, str(status), hdrs, io.BytesIO(body))
+        return _KeepAliveResponse(status, hdrs, body, url)
+    raise urllib.error.URLError(f"za dużo przekierowań dla {req.full_url}")
+
+
 def http_get_json(url):
     req = urllib.request.Request(
         url, headers={"User-Agent": UA, "Accept-Encoding": "gzip", "Accept": "application/json"}
     )
-    with urllib.request.urlopen(req, timeout=60) as resp:
+    with open_url(req, timeout=60) as resp:
         raw = resp.read()
         if resp.headers.get("Content-Encoding") == "gzip":
             raw = gzip.decompress(raw)
@@ -397,6 +497,79 @@ def current_interval(default_s, windows, tz, now_utc=None):
         if passes_filter({"start_utc": now_local}, [w], tz):
             return w["seconds"]
     return default_s
+
+
+# --------------------------------------------------------------------- zryw
+
+# Grafik wychodzi o stałej porze (u nas zmierzone ~11:00:53, powtarzalnie co do
+# sekundy). Zamiast młócić szybkim taktem przez kwadrans, robimy krótki zryw
+# wycelowany w tę sekundę: gęściej, ale przez kilkanaście sekund — co daje MNIEJ
+# zapytań łącznie niż stały szybki takt, a wykrycie schodzi do ułamka sekundy.
+BURST_MIN_INTERVAL = 0.2    # podłoga taktu w zrywie (poza nim obowiązuje MIN_INTERVAL_SECONDS)
+BURST_MAX_SECONDS = 120     # zryw ma być krótki — dłuższy to już zwykłe okno INTERVALS
+MIN_SLEEP_SECONDS = 0.05    # zabezpieczenie przed pętlą bez oddechu
+
+
+def parse_burst_env(spec):
+    """'mon-sun:11:00:45' -> {'days': [...], 'at': (godz, min, sek)}. Puste -> None."""
+    spec = (spec or "").strip()
+    if not spec:
+        return None
+    days_part, _, time_part = spec.partition(":")
+    if not time_part.strip():
+        raise ValueError("oczekuję DNI:GG:MM:SS, np. 'mon-sun:11:00:45'")
+    bits = [b.strip() for b in time_part.split(":")]
+    if len(bits) == 2:
+        bits.append("0")          # 'mon-sun:11:00' = równo o pełnej minucie
+    if len(bits) != 3:
+        raise ValueError(f"zła godzina '{time_part}' — oczekuję GG:MM albo GG:MM:SS")
+    try:
+        hour, minute, second = (int(b) for b in bits)
+    except ValueError:
+        raise ValueError(f"zła godzina '{time_part}' — same liczby, np. 11:00:45") from None
+    if not (0 <= hour < 24 and 0 <= minute < 60 and 0 <= second < 60):
+        raise ValueError(f"godzina '{time_part}' poza zakresem")
+    return {"days": parse_days(days_part), "at": (hour, minute, second)}
+
+
+def burst_bounds(burst, tz, now=None):
+    """(początek, koniec) najbliższego zrywu — trwającego albo przyszłego. None, gdy brak."""
+    if not burst:
+        return None
+    now = now or datetime.now(tz)
+    hour, minute, second = burst["at"]
+    base = now.replace(hour=hour, minute=minute, second=second, microsecond=0)
+    length = timedelta(seconds=burst["seconds"])
+    for delta in range(8):        # dziś, a jeśli dzisiejszy minął — kolejny pasujący dzień
+        start = base + timedelta(days=delta)
+        if now >= start + length:
+            continue
+        if DAY_NAMES[start.weekday()] in burst["days"]:
+            return start, start + length
+    return None
+
+
+def plan_sleep(default_s, windows, burst, tz, elapsed=0.0, now=None):
+    """Ile spać przed kolejnym sprawdzeniem.
+
+    Trzy zasady:
+      1. w trwającym zrywie obowiązuje jego własny, gęsty takt,
+      2. tuż przed zrywem śpimy DOKŁADNIE do jego początku, żeby go nie przespać,
+      3. od reszty odejmujemy czas pracy — inaczej ustawione 2 s dają realnie ~2,4 s,
+         bo do każdego cyklu doklejał się czas zapytań.
+    """
+    now = now or datetime.now(tz)
+    elapsed = max(0.0, elapsed)
+    bounds = burst_bounds(burst, tz, now)
+    if bounds and bounds[0] <= now < bounds[1]:
+        return max(MIN_SLEEP_SECONDS, burst["interval"] - elapsed)
+    target = current_interval(default_s, windows, tz, now.astimezone(timezone.utc)) - elapsed
+    if bounds and now < bounds[0]:
+        # Do startu zrywu liczymy od TERAZ — czas pracy już upłynął, więc drugi raz
+        # go nie odejmujemy; inaczej budzilibyśmy się ułamek sekundy za wcześnie
+        # i pierwsze sprawdzenie zrywu wypadałoby obok celu.
+        target = min(target, (bounds[0] - now).total_seconds())
+    return max(MIN_SLEEP_SECONDS, target)
 
 
 def fmt_price(price, listing_default):
@@ -681,7 +854,8 @@ def decathlon_rpc(method, token, payload, extend=None):
         },
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=30) as resp:
+    # Podtrzymane połączenie: to jest TO zapytanie, które wygrywa albo przegrywa termin.
+    with open_url(req, timeout=30) as resp:
         raw = resp.read()
         if resp.headers.get("Content-Encoding") == "gzip":
             raw = gzip.decompress(raw)
@@ -1272,7 +1446,7 @@ def notify_startup(topic, count, tz, book_url=None):
 
 # -------------------------------------------------------------------------- main
 
-def run_once(announce_startup=False):
+def run_once(announce_startup=False, skip_light=False):
     """Zwraca 0 przy powodzeniu, 2 przy błędzie sieci (stan nietknięty)."""
     cfg = load_config()
     state_doc = load_state_doc()
@@ -1332,26 +1506,34 @@ def run_once(announce_startup=False):
         canon_url = LISTING_PAGE_URL.format(id=lid)
         if book_url is None:
             book_url = canon_url
-        # Krok 1: lekki ping (~1 KB) — sprawdź licznik dostępności bez ciężkiego payloadu.
+        # Krok 1: lekki ping (~1 KB) — licznik dostępności bez ciężkiego payloadu.
+        # W ZRYWIE go pomijamy: oszczędza transfer, ale kosztuje całą rundę do serwera
+        # (~110 ms), a pełne dane i tak są potrzebne po identyfikatory terminów —
+        # i niosą te same atrybuty kortu, więc nic przez to nie tracimy.
+        doc = None
         try:
-            light = fetch_listing_light(lid)
+            if skip_light:
+                doc = fetch_listing(lid)
+                attrs = (doc.get("data", {}).get("attributes", {}) or {})
+            else:
+                attrs = (fetch_listing_light(lid).get("data", {}).get("attributes", {}) or {})
         except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as e:
             log(f"! Błąd pobierania kortu {lid}: {e} — nie zmieniam stanu, kończę.")
             return 2  # błąd sieci: nie nadpisuj stanu
-        attrs = (light.get("data", {}).get("attributes", {}) or {})
         listing_price = attrs.get("price")
         title = attrs.get("title", lid)
         avail = (attrs.get("datesStats") or {}).get("availableListingDates") or 0
-        if avail <= 0:
+        if avail <= 0 and doc is None:
             # Brak jakichkolwiek wolnych terminów -> nie ma czego filtrować ani pobierać.
             log(f"= {title}: 0 dostępnych (lekki ping ~1 KB), pomijam pełne pobranie")
             continue
-        # Krok 2: coś jest wolne -> dopiero teraz ciężki payload (~257 KB) i filtr czasowy.
-        try:
-            doc = fetch_listing(lid)
-        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as e:
-            log(f"! Błąd pobierania terminów kortu {lid}: {e} — nie zmieniam stanu, kończę.")
-            return 2  # błąd sieci: nie nadpisuj stanu
+        # Krok 2: coś jest wolne -> dopiero teraz ciężki payload (~21 KB gzip) i filtr.
+        if doc is None:
+            try:
+                doc = fetch_listing(lid)
+            except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as e:
+                log(f"! Błąd pobierania terminów kortu {lid}: {e} — nie zmieniam stanu, kończę.")
+                return 2  # błąd sieci: nie nadpisuj stanu
         slots = [s for s in free_slots(doc, lid, now_utc) if passes_filter(s, filters, tz)]
         log(f"= {title}: {avail} dostępnych, {len(slots)} pasujących do filtra")
         for s in slots:
@@ -1488,20 +1670,52 @@ def main():
         except Exception as e:  # noqa: BLE001 - błędny env nie może wywrócić procesu
             log(f"! Błędny INTERVALS '{intervals_env}': {e} — używam stałego {interval}s")
 
+    # Zryw: krótkie, gęste sprawdzanie wycelowane w sekundę publikacji grafiku.
+    burst = None
+    burst_env = os.environ.get("BURST", "")
+    if burst_env.strip():
+        try:
+            burst = parse_burst_env(burst_env)
+            burst["seconds"] = max(1, min(int(os.environ.get("BURST_SECONDS") or 15),
+                                          BURST_MAX_SECONDS))
+            burst["interval"] = max(BURST_MIN_INTERVAL,
+                                    float(os.environ.get("BURST_INTERVAL") or 0.5))
+            hour, minute, second = burst["at"]
+            log(f"⚡ Zryw: {','.join(burst['days'])} o {hour:02d}:{minute:02d}:{second:02d}, "
+                f"przez {burst['seconds']}s co {burst['interval']}s "
+                f"(bez lekkiego pingu, po podtrzymanym połączeniu)")
+        except Exception as e:  # noqa: BLE001 - błędna opcja nie może wywrócić monitora
+            log(f"! Błędny BURST '{burst_env}': {e} — zryw wyłączony")
+            burst = None
+
     log(f"Tryb pętli: sprawdzam co {interval}s. Ctrl+C aby zakończyć.")
     first = True  # powiadomienie startowe na pierwszej UDANEJ iteracji procesu
     last_sleep = None
+    in_burst = False
     while True:
+        started = time.monotonic()
+        now_local = datetime.now(tz)
+        bounds = burst_bounds(burst, tz, now_local)
+        active = bool(bounds and bounds[0] <= now_local < bounds[1])
+        if active != in_burst:
+            log(f"⚡ Zryw START — co {burst['interval']}s przez {burst['seconds']}s" if active
+                else "⚡ Zryw koniec — wracam do zwykłego taktu")
+            in_burst = active
+            last_sleep = None
         try:
-            rc = run_once(announce_startup=first)
+            rc = run_once(announce_startup=first, skip_light=active)
             if rc != 2:  # 2 = błąd sieci; ponów próbę startowego powiadomienia później
                 first = False
         except Exception as e:  # noqa: BLE001 - pętla ma przetrwać każdy błąd
             log(f"! Nieoczekiwany błąd w iteracji: {e!r} — kontynuuję.")
-        sleep_s = current_interval(interval, windows, tz)
-        if sleep_s != last_sleep and windows:
-            log(f"⏱ aktualny interwał: {sleep_s}s")
-            last_sleep = sleep_s
+        # Czas pracy odejmujemy od uśpienia: bez tego ustawione 2s dawały realnie ~2,4s.
+        elapsed = time.monotonic() - started
+        sleep_s = plan_sleep(interval, windows, burst, tz, elapsed)
+        if not active and windows:
+            shown = current_interval(interval, windows, tz)
+            if shown != last_sleep:
+                log(f"⏱ aktualny interwał: {shown}s")
+                last_sleep = shown
         time.sleep(sleep_s)
 
 
