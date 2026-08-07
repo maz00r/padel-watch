@@ -7,6 +7,7 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import unittest
 import urllib.error
 from datetime import datetime, timedelta, timezone
@@ -1281,6 +1282,126 @@ class OpenUrlTest(unittest.TestCase):
         FakeConnection.script = [FakeHTTPResponse(status=301, headers={"Location": "/x"})] * 9
         with self.assertRaises(urllib.error.URLError):
             cp.open_url(self.req())
+
+
+class SalvoTest(unittest.TestCase):
+    """Salwa: równoległe strzały, limit nadal obowiązuje, nadmiar wraca do puli."""
+
+    def slots(self, *hours):
+        return [{"id": f"s{h}", "date_id": f"d{h}", "name": "Rezerwacja godzinna",
+                 "start_utc": datetime(2026, 8, 14, h, 0, tzinfo=timezone.utc),
+                 "count": 0, "limit": 1, "price": None} for h in hours]
+
+    def cfg(self, **over):
+        base = {"enabled": True, "max_per_run": 1, "order": "latest", "salvo": 4,
+                "name": "Jan", "browser_mode": True,
+                "token": jwt_with_exp(int(datetime.now(timezone.utc).timestamp()) + 3600)}
+        base.update(over)
+        return base
+
+    def run_with(self, outcomes, cfg=None, slots=None):
+        """outcomes: {godzina: (ok, komunikat, id_transakcji)}"""
+        self.cancelled = []
+        self.threads = set()
+
+        def fake_register(slot, price, local_cfg, speculative=False):
+            self.threads.add(threading.current_thread().name)
+            hour = slot["start_utc"].hour
+            ok, msg, tx = outcomes[hour]
+            if ok:
+                local_cfg["transaction_id"] = tx
+            return ok, msg
+
+        def fake_cancel(tx, _cfg):
+            self.cancelled.append(tx)
+            return True, "cancelled"
+
+        buf = io.StringIO()
+        with mock.patch.object(cp, "register_slot", side_effect=fake_register), \
+                mock.patch.object(cp, "cancel_reservation", side_effect=fake_cancel), \
+                mock.patch("sys.stdout", buf):
+            res, reg = cp.auto_register_new_slots(
+                slots or self.slots(15, 17, 18, 19), {}, cfg or self.cfg(), set())
+        return res, reg, buf.getvalue()
+
+    def test_attempts_really_run_in_parallel(self):
+        """Sedno zmiany: cztery strzały muszą lecieć NARAZ.
+
+        Bariera jest dowodem rozstrzygającym — przy wykonaniu po kolei pierwszy strzał
+        czekałby w nieskończoność na pozostałe i test padłby na timeout.
+        """
+        barrier = threading.Barrier(4, timeout=5)
+
+        def fake_register(slot, price, local_cfg, speculative=False):
+            barrier.wait()          # przejdzie tylko, gdy wszystkie cztery są w locie
+            return False, "409"
+
+        with mock.patch.object(cp, "register_slot", side_effect=fake_register), \
+                mock.patch("sys.stdout", io.StringIO()):
+            cp.auto_register_new_slots(self.slots(15, 17, 18, 19), {}, self.cfg(), set())
+
+    def test_first_preference_wins_and_rest_is_cancelled(self):
+        # wszystkie cztery przechodzą: zostaje 19:00 (order=latest), reszta wraca
+        res, reg, out = self.run_with({h: (True, "accepted", f"tx{h}") for h in (15, 17, 18, 19)})
+        self.assertEqual(sorted(self.cancelled), ["tx15", "tx17", "tx18"])
+        self.assertEqual(res["s19"], (True, "accepted"))
+        self.assertIn("s19", reg)
+        self.assertIn("↩ Salwa", out)
+
+    def test_limit_two_keeps_two(self):
+        cfg = self.cfg(max_per_run=2)
+        res, reg, _ = self.run_with({h: (True, "accepted", f"tx{h}") for h in (15, 17, 18, 19)}, cfg)
+        self.assertEqual(sorted(self.cancelled), ["tx15", "tx17"])
+        self.assertEqual([r for r in ("s19", "s18") if r in reg], ["s19", "s18"])
+
+    def test_cancelled_extras_are_not_retried_later(self):
+        _, reg, _ = self.run_with({h: (True, "accepted", f"tx{h}") for h in (15, 17, 18, 19)})
+        # także te oddane trafiają do „zarejestrowanych", żeby nie wpaść w pętlę
+        # rezerwuj–anuluj–zobacz-wolne–rezerwuj
+        self.assertEqual(reg, {"s15", "s17", "s18", "s19"})
+
+    def test_all_failed_falls_through_to_the_rest(self):
+        slots = self.slots(15, 16, 17, 18, 19)          # 5 terminów, salwa bierze 4
+        res, reg, out = self.run_with(
+            {19: (False, "409", ""), 18: (False, "409", ""), 17: (False, "409", ""),
+             16: (False, "409", ""), 15: (True, "accepted", "tx15")},
+            slots=slots)
+        self.assertEqual(res["s15"], (True, "accepted"))   # ostatni poszedł sekwencyjnie
+        self.assertIn("s15", reg)
+
+    def test_auth_failure_aborts_and_remembers(self):
+        cfg = self.cfg()
+        res, reg, out = self.run_with(
+            {19: (False, "token odrzucony (HTTP 401) — zaloguj się w panelu Padel", ""),
+             18: (False, "409", ""), 17: (False, "409", ""), 15: (False, "409", "")}, cfg)
+        self.assertIn("Auto-rejestracja przerwana", out)
+        self.assertTrue(cfg["pending_ids"])
+
+    def test_speculative_never_cancels_or_registers(self):
+        cfg = self.cfg(speculative=True)
+        res, reg, out = self.run_with({h: (True, "walidacja OK", f"tx{h}") for h in (15, 17, 18, 19)}, cfg)
+        self.assertEqual(self.cancelled, [])
+        self.assertEqual(reg, set())
+
+    def test_disabled_salvo_keeps_sequential_path(self):
+        cfg = self.cfg(salvo=0)
+        self.run_with({19: (True, "accepted", "tx19"), 18: (False, "409", ""),
+                       17: (False, "409", ""), 15: (False, "409", "")}, cfg)
+        self.assertEqual(len(self.threads), 1)   # bez salwy wszystko w wątku głównym
+
+
+class WarmSalvoTest(unittest.TestCase):
+    def test_warms_distinct_connections(self):
+        """Bariera musi rozdzielić rozgrzewkę na osobne wątki — inaczej grzejemy jedno."""
+        seen = set()
+
+        def fake_open(req, timeout=30):
+            seen.add(threading.current_thread().name)
+            return io.BytesIO(b"{}")
+
+        with mock.patch.object(cp, "open_url", side_effect=fake_open):
+            cp.warm_salvo_connections(4, "https://go.decathlon.pl/api/listing/X")
+        self.assertEqual(len(seen), 4, f"rozgrzano tylko {len(seen)} połączeń")
 
 
 class LogPrecisionTest(unittest.TestCase):
