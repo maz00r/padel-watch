@@ -1284,8 +1284,8 @@ class OpenUrlTest(unittest.TestCase):
             cp.open_url(self.req())
 
 
-class SalvoTest(unittest.TestCase):
-    """Salwa: równoległe strzały, limit nadal obowiązuje, nadmiar wraca do puli."""
+class SalvoHelpers:
+    """Wspólne atrapy salwy. Bez TestCase, żeby testy bazowe nie biegły dwa razy."""
 
     def slots(self, *hours):
         return [{"id": f"s{h}", "date_id": f"d{h}", "name": "Rezerwacja godzinna",
@@ -1323,6 +1323,9 @@ class SalvoTest(unittest.TestCase):
             res, reg = cp.auto_register_new_slots(
                 slots or self.slots(15, 17, 18, 19), {}, cfg or self.cfg(), set())
         return res, reg, buf.getvalue()
+
+class SalvoTest(SalvoHelpers, unittest.TestCase):
+    """Salwa: równoległe strzały, limit nadal obowiązuje, nadmiar wraca do puli."""
 
     def test_attempts_really_run_in_parallel(self):
         """Sedno zmiany: cztery strzały muszą lecieć NARAZ.
@@ -1388,6 +1391,88 @@ class SalvoTest(unittest.TestCase):
         self.run_with({19: (True, "accepted", "tx19"), 18: (False, "409", ""),
                        17: (False, "409", ""), 15: (False, "409", "")}, cfg)
         self.assertEqual(len(self.threads), 1)   # bez salwy wszystko w wątku głównym
+
+
+class SalvoRobustnessTest(SalvoHelpers, unittest.TestCase):
+    """Awarie w trakcie salwy nie mogą zostawić zajętego kortu bez śladu."""
+
+    def test_worker_exception_does_not_kill_the_salvo(self):
+        """Jeden zepsuty JSON nie może wywrócić całej salwy.
+
+        pool.map podnosi wyjątek dopiero przy odczycie wyników — bez osłony
+        rezerwacje zrobione przez pozostałe wątki zostałyby nieobsłużone:
+        ani zapisane, ani anulowane, ani zgłoszone w powiadomieniu.
+        """
+        def fake_register(slot, price, local_cfg, speculative=False):
+            if slot["start_utc"].hour == 18:
+                raise ValueError("zepsuty JSON")
+            local_cfg["transaction_id"] = f"tx{slot['start_utc'].hour}"
+            return True, "accepted"
+
+        self.cancelled = []
+        buf = io.StringIO()
+        with mock.patch.object(cp, "register_slot", side_effect=fake_register), \
+                mock.patch.object(cp, "cancel_reservation",
+                                  side_effect=lambda tx, c: (self.cancelled.append(tx),
+                                                             (True, "cancelled"))[1]), \
+                mock.patch("sys.stdout", buf):
+            res, reg = cp.auto_register_new_slots(
+                self.slots(15, 17, 18, 19), {}, self.cfg(), set())
+        self.assertEqual(res["s19"], (True, "accepted"))     # najlepszy zatrzymany
+        self.assertEqual(sorted(self.cancelled), ["tx15", "tx17"])   # nadmiar oddany
+        self.assertFalse(res["s18"][0])
+        self.assertIn("nieoczekiwany błąd", res["s18"][1])
+
+    def test_failed_cancellation_is_reported_not_hidden(self):
+        """Gdy anulowanie padnie, użytkownik MUSI się dowiedzieć — kort zostaje zajęty."""
+        def fake_cancel(tx, _cfg):
+            return False, "anulowanie: Decathlon HTTP 500"
+
+        buf = io.StringIO()
+        with mock.patch.object(cp, "register_slot",
+                               side_effect=lambda s, p, c, speculative=False:
+                               (c.__setitem__("transaction_id", f"tx{s['start_utc'].hour}"),
+                                (True, "accepted"))[1]), \
+                mock.patch.object(cp, "cancel_reservation", side_effect=fake_cancel), \
+                mock.patch("sys.stdout", buf):
+            res, _ = cp.auto_register_new_slots(
+                self.slots(15, 17, 18, 19), {}, self.cfg(), set())
+        self.assertIn("NIE anulowano", res["s15"][1])
+        self.assertIn("anuluj ręcznie", buf.getvalue())
+        # ↩ to znacznik UDANEGO oddania terminu — przy nieudanym anulowaniu
+        # nie może się pojawić ani razu, bo sugerowałby, że kort jest wolny
+        self.assertNotIn("↩", buf.getvalue())
+
+    def test_missing_transaction_id_is_loud(self):
+        """Rezerwacja bez ID transakcji: nie ma czego anulować, więc trzeba krzyknąć."""
+        buf = io.StringIO()
+        with mock.patch.object(cp, "register_slot",
+                               side_effect=lambda s, p, c, speculative=False: (True, "accepted")), \
+                mock.patch.object(cp, "cancel_reservation",
+                                  side_effect=AssertionError("nie ma czego anulować")), \
+                mock.patch("sys.stdout", buf):
+            res, reg = cp.auto_register_new_slots(
+                self.slots(15, 17, 18, 19), {}, self.cfg(), set())
+        self.assertIn("brak ID transakcji", res["s15"][1])
+        self.assertIn("anuluj ręcznie w panelu Padel", buf.getvalue())
+        self.assertIn("s15", reg)   # i tak nie próbujemy go ponownie
+
+    def test_token_refreshed_in_a_worker_is_adopted(self):
+        """Token odnowiony w wątku musi trafić do cfg — inaczej próby po salwie
+        czekałyby drugi raz na to samo odnowienie (do ~24 s w gorącym oknie)."""
+        now = int(datetime.now(timezone.utc).timestamp())
+        swiezy = jwt_with_exp(now + 9000)
+        cfg = self.cfg(token=jwt_with_exp(now + 3600))
+
+        def fake_register(slot, price, local_cfg, speculative=False):
+            if slot["start_utc"].hour == 19:
+                local_cfg["token"] = swiezy      # ten wątek odnowił token po 401
+            return False, "409"
+
+        with mock.patch.object(cp, "register_slot", side_effect=fake_register), \
+                mock.patch("sys.stdout", io.StringIO()):
+            cp.auto_register_new_slots(self.slots(15, 17, 18, 19), {}, cfg, set())
+        self.assertEqual(cfg["token"], swiezy)
 
 
 class WarmSalvoTest(unittest.TestCase):
