@@ -218,12 +218,14 @@ bez przerw, więc obraz repertuaru jest świeży cały czas.
 
 Zmierzone na żywym API:
 
-| Wątki | Zapytań/s | Przerwa między wynikami |
+| Wątki | Zapytań/s | Świeży wynik co |
 |---|---|---|
-| 1 | 11,8 | 79 ms |
-| 2 | 22,8 | 40 ms |
-| **3** | **34,8** | **20 ms** |
-| 4 | 42,0 | 17 ms |
+| 1 | 8,3 | 117 ms |
+| 2 | 17,0 | 56 ms |
+| **3** | **24,0** | **35 ms** |
+
+(pomiar na pełnych danych — tych, które sprint faktycznie pobiera; lekki ping jest
+szybszy, ale nie zawiera identyfikatorów terminów, więc jest tu bezużyteczny)
 
 Zwycięski wątek oddaje **gotowe dane** prosto do rejestracji — bez tego trzeba by
 pobrać je jeszcze raz i stracić całą rundę do serwera (~92 ms) dokładnie w chwili,
@@ -233,8 +235,8 @@ Punkt odniesienia („co jest nowe") bierze się z **zapisanego stanu**, a nie z
 pobrania sprintu. Inaczej publikacja, która trafiłaby w pierwsze ~90 ms sprintu,
 wpadłaby do punktu odniesienia i sprint nigdy by się nie odpalił.
 
-> **Sprint ma być wąski.** Trzy wątki to ~35 zapytań na sekundę — domyślne 4 sekundy
-> dają ~140 zapytań, czyli tyle co zryw przez 30 s. Nie ustawiaj `sprint_seconds`
+> **Sprint ma być wąski.** Trzy wątki to ~24 zapytania na sekundę — domyślne 4 sekundy
+> dają ~95 zapytań, czyli tyle co zryw przez 30 s. Nie ustawiaj `sprint_seconds`
 > na kilkadziesiąt sekund, bo to już dobijanie się do serwera.
 
 Domyślnie `mon-sun:11:00:51` przez 4 s — okno 11:00:51–11:00:55 obejmuje zmierzoną

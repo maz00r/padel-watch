@@ -1552,6 +1552,55 @@ class SprintTest(unittest.TestCase):
         self.assertIsNotNone(hit)   # pojedyncza wpadka nie kończy sprintu
 
 
+class SprintPoolTest(unittest.TestCase):
+    """Maruder z poprzedniej rundy nie może zwęzić następnej."""
+
+    def setUp(self):
+        self.env = mock.patch.dict(os.environ, {"FILTERS": "mon-sun:00:00-24:00"})
+        self.env.start()
+        self.addCleanup(self.env.stop)
+
+    def test_slow_straggler_does_not_narrow_the_next_sprint(self):
+        """Zwycięzca wraca od razu, więc maruderzy wciąż pobierają, gdy rusza kolejna
+        runda. Gdyby pula miała dokładnie tyle miejsc, ile wątków, druga runda
+        pobierałaby węższym frontem, niż prosił użytkownik — i to po cichu."""
+        lock = threading.Lock()
+        runda = [0]
+        aktywne = {1: set(), 2: set()}
+        szczyt = {1: 0, 2: 0}
+
+        def fetch(lid):
+            # Wątek liczy się do rundy, w której WYSTARTOWAŁ — inaczej maruder
+            # z rundy 1 zawyżałby wynik rundy 2 i test mierzyłby bzdurę.
+            moja = runda[0]
+            nazwa = threading.current_thread().name
+            with lock:
+                aktywne[moja].add(nazwa)
+                szczyt[moja] = max(szczyt[moja], len(aktywne[moja]))
+            wolny = moja == 1 and nazwa.endswith("_0")
+            time.sleep(0.35 if wolny else 0.05)
+            with lock:
+                aktywne[moja].discard(nazwa)
+            return {"__ids": {"a", "nowy"}}
+
+        slot = lambda i: {"id": i, "date_id": "d",
+                          "start_utc": datetime(2026, 8, 14, 19, 0, tzinfo=timezone.utc)}
+        with mock.patch.object(cp, "resolve_current_id", side_effect=lambda x: "kort"), \
+                mock.patch.object(cp, "fetch_listing", side_effect=fetch), \
+                mock.patch.object(cp, "free_slots",
+                                  side_effect=lambda d, l, n: [slot(i) for i in d["__ids"]]), \
+                mock.patch.object(cp, "passes_filter", return_value=True), \
+                mock.patch("sys.stdout", io.StringIO()):
+            for nr in (1, 2):
+                runda[0] = nr
+                cp.run_sprint(time.monotonic() + 2.0, cp.SPRINT_MAX_THREADS,
+                              "https://go.decathlon.pl/l/1c0ec93e-ca77-44b9-a3a6-c72a99d050dd",
+                              {"a"}, TZ)
+        self.assertEqual(szczyt[2], cp.SPRINT_MAX_THREADS,
+                         f"druga runda pobierała {szczyt[2]} wątkami zamiast "
+                         f"{cp.SPRINT_MAX_THREADS} — maruder zabrał miejsce w puli")
+
+
 class PrefetchedTest(unittest.TestCase):
     """Dane ze sprintu muszą trafić prosto do rejestracji — bez drugiej rundy do serwera."""
 
@@ -1603,7 +1652,7 @@ class WarmSalvoTest(unittest.TestCase):
             return io.BytesIO(b"{}")
 
         with mock.patch.object(cp, "open_url", side_effect=fake_open):
-            cp.warm_salvo_connections(4, "https://go.decathlon.pl/api/listing/X")
+            cp.warm_connections(cp.salvo_pool(4), 4, "https://go.decathlon.pl/api/listing/X")
         self.assertEqual(len(seen), 4, f"rozgrzano tylko {len(seen)} połączeń")
 
 
