@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.5.1 — Dziennik z milisekundami w zrywie (diagnostyka wyścigu)
+- **Znaczniki czasu z milisekundami na czas zrywu** (poza nim bez zmian). Sekundowa
+  rozdzielczość przestała wystarczać: nie dało się odczytać, czy termin przegrywamy
+  o 100 ms czy o 900 ms — a to zupełnie inne wnioski.
+- **Czas pobrania danych** dopisywany do podsumowania kortu w zrywie (`pobranie 104 ms`) —
+  oddziela opóźnienie sieci od opóźnienia wykrycia.
+- **Czas każdej próby rejestracji** w jej linii (`[118 ms]`) — widać, ile kosztuje
+  nieudany strzał i po jakim czasie od wykrycia poszedł zwycięski.
+- Linia `⚡ Zryw koniec` podaje teraz **faktyczne granice okna**; leci przy następnym
+  sprawdzeniu, więc bez tego sugerowałaby, że zryw skończył się kilka sekund później.
+- Zmiany dotyczą wyłącznie logowania — działanie monitora i auto-rejestracji bez zmian.
+
 ## 0.5.0 — zryw: polowanie na sekundę publikacji grafiku
 - **Nowy `burst`**: krótkie, gęste sprawdzanie wycelowane w moment publikacji grafiku
   (u nas zmierzone ~11:00:53, powtarzalnie co do sekundy przez dwa dni). Domyślnie
