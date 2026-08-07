@@ -1328,11 +1328,18 @@ def fire_salvo(targets, listing_price_by_id, cfg, speculative, size):
     def strzal(slot):
         local = dict(cfg)
         started = time.monotonic()
-        ok, msg = register_slot(slot, listing_price_by_id.get(slot["id"]), local,
-                                speculative=speculative)
+        try:
+            ok, msg = register_slot(slot, listing_price_by_id.get(slot["id"]), local,
+                                    speculative=speculative)
+        except Exception as e:  # noqa: BLE001
+            # KRYTYCZNE: wyjątek z jednego wątku NIE MOŻE wywrócić salwy. Inaczej
+            # pool.map podnosi go przy odczycie wyników, a rezerwacje zrobione przez
+            # pozostałe wątki zostają nieobsłużone — nieanulowane i niezapisane.
+            ok, msg = False, f"nieoczekiwany błąd: {e!r}"
         return {"slot": slot, "ok": ok, "msg": msg,
                 "ms": int((time.monotonic() - started) * 1000),
-                "tx": local.get("transaction_id") or ""}
+                "tx": local.get("transaction_id") or "",
+                "token": local.get("token") or ""}
 
     pool = salvo_pool(size)
     return list(pool.map(strzal, fired))
@@ -1392,7 +1399,13 @@ def auto_register_new_slots(slots, listing_price_by_id, cfg, already_registered)
         opis = ", ".join(fmt_when(s["start_utc"].astimezone(_log_tz()), short=True) for s in fired)
         log(f"⇉ Salwa: {len(fired)} prób równolegle ({opis})")
         wins, auth_error = [], None
-        for res in fire_salvo(fired, listing_price_by_id, cfg, speculative, salvo):
+        wyniki = fire_salvo(fired, listing_price_by_id, cfg, speculative, salvo)
+        # Któryś wątek mógł odnowić token po HTTP 401 (pracował na kopii cfg).
+        # Przejmujemy najświeższy, żeby próby sekwencyjne po salwie nie czekały
+        # jeszcze raz na to samo odnowienie.
+        for res in wyniki:
+            cfg["token"] = newer_decathlon_token(cfg.get("token") or "", res.get("token") or "")
+        for res in wyniki:
             slot, msg, ms = res["slot"], res["msg"], res["ms"]
             when = fmt_when(slot["start_utc"].astimezone(_log_tz()), short=True)
             results[slot["id"]] = (res["ok"], msg)
@@ -1417,14 +1430,25 @@ def auto_register_new_slots(slots, listing_price_by_id, cfg, already_registered)
                     registered.add(slot["id"])
                     log(f"✓ Auto-rejestracja: {when} — {msg} [{ms} ms]")
                 continue
-            if speculative or not res["tx"]:
+            if speculative:
                 results[slot["id"]] = (False, "ponad limit auto_register_max")
                 continue
-            ok_cancel, msg_cancel = cancel_reservation(res["tx"], cfg)
             registered.add(slot["id"])   # żeby kolejny bieg nie złapał go ponownie
-            results[slot["id"]] = (False, f"ponad limit — anulowano ({msg_cancel})")
-            log(f"↩ Salwa: {when} ponad limit — "
-                f"{'anulowano' if ok_cancel else 'NIE UDAŁO SIĘ anulować'}: {msg_cancel}")
+            if not res["tx"]:
+                # Rezerwacja jest, ale serwer nie oddał jej ID — nie mamy czego anulować.
+                # Musi to być GŁOŚNE: inaczej zostaje zajęty kort bez śladu w powiadomieniu.
+                results[slot["id"]] = (False, "ponad limit, brak ID transakcji — anuluj ręcznie")
+                log(f"! Salwa: {when} ponad limit, ale serwer nie zwrócił ID transakcji "
+                    f"— anuluj ręcznie w panelu Padel")
+                continue
+            ok_cancel, msg_cancel = cancel_reservation(res["tx"], cfg)
+            if ok_cancel:
+                results[slot["id"]] = (False, f"ponad limit — anulowano ({msg_cancel})")
+                log(f"↩ Salwa: {when} ponad limit — anulowano ({msg_cancel})")
+            else:
+                results[slot["id"]] = (False, f"ponad limit — NIE anulowano: {msg_cancel}")
+                log(f"! Salwa: {when} ponad limit, a anulowanie NIE POWIODŁO SIĘ "
+                    f"({msg_cancel}) — anuluj ręcznie w panelu Padel")
 
         if auth_error:
             cfg["auth_error"] = auth_error

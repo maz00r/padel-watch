@@ -184,6 +184,10 @@ Terminy wracają do puli po ułamku sekundy, ale to znaczy, że przy włączonej
 w historii konta mogą pojawiać się anulowania. Jeśli Ci to przeszkadza, ustaw
 `auto_register_salvo: 0` i wróć do zapisu po kolei.
 
+Gdy anulowanie nadmiaru się **nie powiedzie** (albo serwer nie zwróci ID transakcji),
+dodatek mówi o tym wprost w Dzienniku i w powiadomieniu — `anuluj ręcznie w panelu Padel`.
+Nigdy nie raportuje oddania terminu, którego nie oddał.
+
 Salwa strzela w pierwsze `auto_register_salvo` terminów według `auto_register_order`;
 reszta (np. bezpieczne 15:00, o które nikt nie walczy) jest próbowana po kolei zaraz
 potem — więc zabezpieczenie „przynajmniej cokolwiek" zostaje.

@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.6.1 — salwa odporna na awarie (przegląd 0.6.0)
+- **KRYTYCZNE: wyjątek w jednym wątku salwy wywracał całą salwę.** `pool.map` podnosi
+  błąd dopiero przy odczycie wyników, więc jedna zepsuta odpowiedź serwera (np. błędny
+  JSON) sprawiała, że rezerwacje zrobione przez pozostałe wątki **nie były ani zapisane,
+  ani anulowane, ani zgłoszone** — zostawały zajęte korty bez śladu w logu i stanie.
+  Każdy strzał ma teraz własną osłonę i zwraca porażkę zamiast wybuchać.
+- **Nieudane anulowanie nadmiaru jest teraz głośne.** Wcześniej powiadomienie i tak
+  mówiło „anulowano", niezależnie od wyniku — użytkownik nie wiedziałby, że został mu
+  zajęty kort. Teraz komunikat i log mówią wprost: anuluj ręcznie w panelu.
+- **Rezerwacja bez ID transakcji** (serwer go nie zwrócił) też jest raportowana zamiast
+  po cichu pomijana — inaczej nadmiarowy kort zostawał zajęty bez ostrzeżenia.
+- **Token odnowiony w wątku salwy trafia z powrotem do konfiguracji.** Wątki pracują na
+  kopii, więc odnowienie po HTTP 401 ginęło, a próby sekwencyjne po salwie czekały
+  drugi raz na to samo (do ~24 s w gorącym oknie).
+
 ## 0.6.0 — salwa: równoległe strzały o wieczorne godziny
 - **Nowa opcja `auto_register_salvo`** (domyślnie 4): najbardziej pożądane terminy
   dostają próbę rejestracji **naraz**, każdy własnym rozgrzanym połączeniem.
