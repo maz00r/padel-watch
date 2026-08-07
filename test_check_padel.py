@@ -1476,6 +1476,67 @@ class SalvoRobustnessTest(SalvoHelpers, unittest.TestCase):
         self.assertEqual(cfg["token"], swiezy)
 
 
+class MeasureRttTest(unittest.TestCase):
+    """Pomiar rundy do serwera — diagnostyka, więc nie może niczego wywrócić."""
+
+    def gniazda(self, czasy):
+        """Atrapa socket.socket: każde połączenie 'trwa' tyle, ile podano (None = błąd)."""
+        kolejka = list(czasy)
+        zegar = [0.0]
+
+        class Gniazdo:
+            def settimeout(self, _): pass
+            def close(self): pass
+
+            def connect(self, _adres):
+                ile = kolejka.pop(0)
+                if ile is None:
+                    raise OSError("brak połączenia")
+                zegar[0] += ile / 1000.0
+
+        return Gniazdo, zegar
+
+    def zmierz(self, czasy):
+        Gniazdo, zegar = self.gniazda(czasy)
+        with mock.patch.object(cp.socket, "socket", Gniazdo), \
+                mock.patch.object(cp.time, "monotonic", side_effect=lambda: zegar[0]):
+            return cp.measure_rtt("host", samples=len(czasy))
+
+    def test_returns_median_min_max(self):
+        # zaokrąglamy: sztuczny zegar sumuje ułamki zmiennoprzecinkowe
+        self.assertEqual([round(x) for x in self.zmierz([50, 30, 40, 90, 60])], [50, 30, 90])
+
+    def test_ignores_failed_attempts(self):
+        self.assertEqual([round(x) for x in self.zmierz([None, 40, None, 60, 50])], [50, 40, 60])
+
+    def test_all_failures_give_none(self):
+        self.assertIsNone(self.zmierz([None, None, None]))
+
+    def test_log_survives_unreachable_host(self):
+        buf = io.StringIO()
+        with mock.patch.object(cp, "measure_rtt", return_value=None), \
+                mock.patch("sys.stdout", buf):
+            self.assertIsNone(cp.log_rtt("host"))
+        self.assertIn("Nie zmierzyłem opóźnienia", buf.getvalue())
+
+    def test_high_latency_suggests_the_cable(self):
+        buf = io.StringIO()
+        with mock.patch.object(cp, "measure_rtt", return_value=(120, 110, 140)), \
+                mock.patch("sys.stdout", buf):
+            cp.log_rtt("host")
+        out = buf.getvalue()
+        self.assertIn("240 ms", out)      # dwie rundy w ścieżce rezerwacji
+        self.assertIn("kabel", out)
+
+    def test_good_latency_says_nothing_to_fix(self):
+        buf = io.StringIO()
+        with mock.patch.object(cp, "measure_rtt", return_value=(20, 18, 25)), \
+                mock.patch("sys.stdout", buf):
+            cp.log_rtt("host")
+        self.assertIn("nie ma już czego poprawiać", buf.getvalue())
+        self.assertNotIn("kabel", buf.getvalue())
+
+
 class SprintTest(unittest.TestCase):
     """Sprint: ciągłe pobieranie aż do pojawienia się terminu spoza punktu odniesienia."""
 
