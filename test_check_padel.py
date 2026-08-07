@@ -8,6 +8,7 @@ import os
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import urllib.error
 from datetime import datetime, timedelta, timezone
@@ -1473,6 +1474,123 @@ class SalvoRobustnessTest(SalvoHelpers, unittest.TestCase):
                 mock.patch("sys.stdout", io.StringIO()):
             cp.auto_register_new_slots(self.slots(15, 17, 18, 19), {}, cfg, set())
         self.assertEqual(cfg["token"], swiezy)
+
+
+class SprintTest(unittest.TestCase):
+    """Sprint: ciągłe pobieranie aż do pojawienia się terminu spoza punktu odniesienia."""
+
+    def setUp(self):
+        self.env = mock.patch.dict(os.environ, {"FILTERS": "mon-sun:00:00-24:00"})
+        self.env.start()
+        self.addCleanup(self.env.stop)
+
+    def slot(self, sid):
+        return {"id": sid, "date_id": f"d{sid}",
+                "start_utc": datetime(2026, 8, 14, 19, 0, tzinfo=timezone.utc)}
+
+    def sprint(self, kolejne_odpowiedzi, baseline, threads=2, sekundy=1.5):
+        """kolejne_odpowiedzi: lista zbiorów ID zwracanych przez kolejne pobrania."""
+        kolejka = list(kolejne_odpowiedzi)
+        lock = threading.Lock()
+        self.pobran = 0
+
+        def fake_fetch(lid):
+            with lock:
+                self.pobran += 1
+                ids = kolejka.pop(0) if kolejka else kolejne_odpowiedzi[-1]
+            return {"__ids": ids}
+
+        with mock.patch.object(cp, "resolve_current_id", side_effect=lambda x: "kort"), \
+                mock.patch.object(cp, "fetch_listing", side_effect=fake_fetch), \
+                mock.patch.object(cp, "free_slots",
+                                  side_effect=lambda doc, lid, now: [self.slot(i)
+                                                                     for i in doc["__ids"]]), \
+                mock.patch.object(cp, "passes_filter", return_value=True), \
+                mock.patch("sys.stdout", io.StringIO()):
+            return cp.run_sprint(time.monotonic() + sekundy, threads,
+                                 "https://go.decathlon.pl/l/1c0ec93e-ca77-44b9-a3a6-c72a99d050dd", set(baseline), TZ)
+
+    def test_returns_the_document_when_a_new_slot_appears(self):
+        hit = self.sprint([{"a"}, {"a"}, {"a", "b"}], baseline={"a"})
+        self.assertIsNotNone(hit)
+        lid, doc = hit
+        self.assertEqual(lid, "kort")
+        self.assertIn("b", doc["__ids"])     # dane oddane BEZ ponownego pobierania
+
+    def test_nothing_new_means_no_handoff(self):
+        self.assertIsNone(self.sprint([{"a", "b"}], baseline={"a", "b"}, sekundy=0.8))
+
+    def test_baseline_comes_from_saved_state_not_first_fetch(self):
+        """Publikacja w pierwszych milisekundach sprintu MUSI zostać wykryta.
+
+        Gdyby punkt odniesienia brał się z pierwszego pobrania, nowe terminy
+        wpadłyby do niego i sprint nigdy by się nie odpalił.
+        """
+        hit = self.sprint([{"a", "nowy"}], baseline={"a"})   # nowe JUŻ w pierwszym pobraniu
+        self.assertIsNotNone(hit)
+
+    def test_survives_fetch_errors(self):
+        kolejka = [ValueError("padlo"), {"a"}, {"a", "b"}]
+        lock = threading.Lock()
+
+        def fake_fetch(lid):
+            with lock:
+                item = kolejka.pop(0) if kolejka else {"a", "b"}
+            if isinstance(item, Exception):
+                raise item
+            return {"__ids": item}
+
+        with mock.patch.object(cp, "resolve_current_id", side_effect=lambda x: "kort"), \
+                mock.patch.object(cp, "fetch_listing", side_effect=fake_fetch), \
+                mock.patch.object(cp, "free_slots",
+                                  side_effect=lambda doc, lid, now: [self.slot(i)
+                                                                     for i in doc["__ids"]]), \
+                mock.patch.object(cp, "passes_filter", return_value=True), \
+                mock.patch("sys.stdout", io.StringIO()):
+            hit = cp.run_sprint(time.monotonic() + 1.5, 1,
+                                "https://go.decathlon.pl/l/1c0ec93e-ca77-44b9-a3a6-c72a99d050dd", {"a"}, TZ)
+        self.assertIsNotNone(hit)   # pojedyncza wpadka nie kończy sprintu
+
+
+class PrefetchedTest(unittest.TestCase):
+    """Dane ze sprintu muszą trafić prosto do rejestracji — bez drugiej rundy do serwera."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        patcher = mock.patch.object(cp, "STATE_PATH", os.path.join(self.dir.name, "s.json"))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.env = mock.patch.dict(os.environ, {
+            "LISTINGS": "https://go.decathlon.pl/l/" + "a" * 8 + "-1111-2222-3333-444444444444",
+            "NTFY_TOPIC": "", "FILTERS": "mon-sun:00:00-24:00", "AUTO_REGISTER": "false",
+            "CONFIG_PATH": os.path.join(self.dir.name, "brak.json"),
+        })
+        self.env.start()
+        self.addCleanup(self.env.stop)
+
+    def doc(self):
+        return {"data": {"attributes": {"title": "Kort", "price": None,
+                                        "datesStats": {"availableListingDates": 0}}},
+                "included": []}
+
+    def test_prefetched_document_skips_the_fetch(self):
+        lid = "aaaaaaaa-1111-2222-3333-444444444444"
+        with mock.patch.object(cp, "resolve_current_id", side_effect=lambda x: lid), \
+                mock.patch.object(cp, "fetch_listing") as heavy, \
+                mock.patch.object(cp, "fetch_listing_light") as light, \
+                mock.patch("sys.stdout", io.StringIO()):
+            cp.run_once(skip_light=True, prefetched=(lid, self.doc()))
+        heavy.assert_not_called()
+        light.assert_not_called()
+
+    def test_document_for_another_court_is_ignored(self):
+        lid = "aaaaaaaa-1111-2222-3333-444444444444"
+        with mock.patch.object(cp, "resolve_current_id", side_effect=lambda x: lid), \
+                mock.patch.object(cp, "fetch_listing", return_value=self.doc()) as heavy, \
+                mock.patch("sys.stdout", io.StringIO()):
+            cp.run_once(skip_light=True, prefetched=("inny-kort", self.doc()))
+        heavy.assert_called_once()   # nie podstawiamy danych z innego kortu
 
 
 class WarmSalvoTest(unittest.TestCase):

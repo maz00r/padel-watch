@@ -1345,6 +1345,87 @@ def fire_salvo(targets, listing_price_by_id, cfg, speculative, size):
     return list(pool.map(strzal, fired))
 
 
+# ------------------------------------------------------------------ sprint
+
+# Między odpytaniami stoimy bezczynnie — przy takcie 0,2 s to średnio ~100 ms straty.
+# Zmierzone: 3 wątki pobierające BEZ PRZERW dają świeży obraz co ~20 ms (34 zapytania/s).
+# Dlatego przez kilka sekund wokół sekundy publikacji przechodzimy na tryb ciągły.
+SPRINT_MAX_THREADS = 4
+_sprint_pool = None
+
+
+def sprint_pool():
+    """Pula OSOBNA od salwy — inaczej wątki zajęte pobieraniem blokowałyby strzały."""
+    global _sprint_pool
+    if _sprint_pool is None:
+        _sprint_pool = concurrent.futures.ThreadPoolExecutor(
+            max_workers=SPRINT_MAX_THREADS, thread_name_prefix="sprint")
+    return _sprint_pool
+
+
+def run_sprint(deadline, threads, listing_url, baseline_ids, tz):
+    """Pobiera bez przerw, aż pojawi się termin spoza `baseline_ids`.
+
+    Zwraca (listing_id, dokument) — dane SĄ JUŻ POBRANE, więc rejestracja nie płaci
+    drugi raz za rundę do serwera (~92 ms). None, gdy okno minęło bez zmian.
+
+    Punkt odniesienia bierzemy z zapisanego stanu, a nie z pierwszego pobrania:
+    inaczej publikacja, która trafi w pierwsze ~90 ms sprintu, wpadłaby do punktu
+    odniesienia i sprint nigdy by się nie odpalił.
+    """
+    threads = max(1, min(int(threads), SPRINT_MAX_THREADS))
+    try:
+        lid = resolve_current_id(listing_id_from_url(listing_url))
+    except Exception as e:  # noqa: BLE001 - sprint nie może wywrócić polowania
+        log(f"! Sprint: nie rozwiązałem adresu kortu ({e!r}) — pomijam")
+        return None
+    cfg = load_config(quiet=True)
+    filters = resolve_filters(cfg)
+    znalezione, lock, stop = {}, threading.Lock(), threading.Event()
+
+    def obserwuj(_):
+        while not stop.is_set() and time.monotonic() < deadline:
+            try:
+                doc = fetch_listing(lid)
+                swiezy = {s["id"] for s in free_slots(doc, lid, datetime.now(timezone.utc))
+                          if passes_filter(s, filters, tz)}
+            except Exception:  # noqa: BLE001 - pojedyncza wpadka: próbujemy dalej
+                # Krótka przerwa: bez niej trwała awaria endpointu zamieniłaby sprint
+                # w pętlę dobijającą się do serwera tak szybko, jak pozwoli sieć.
+                stop.wait(0.05)
+                continue
+            if swiezy - baseline_ids:
+                with lock:
+                    if not znalezione:
+                        znalezione["hit"] = (lid, doc)
+                        stop.set()
+                return
+
+    pool = sprint_pool()
+    for i in range(threads):
+        pool.submit(obserwuj, i)
+    # Czekamy na PIERWSZE trafienie, nie na wszystkie wątki: maruder w trakcie
+    # pobierania kosztowałby do ~90 ms, czyli tyle, ile sprint ma zaoszczędzić.
+    stop.wait(timeout=max(0.0, deadline - time.monotonic()))
+    stop.set()   # okno minęło albo mamy trafienie — pozostałe wątki kończą same
+    return znalezione.get("hit")
+
+
+def resolve_filters(cfg):
+    """Okna czasowe z FILTERS (env) albo z config.json.
+
+    Wspólne dla monitora i sprintu — gdyby liczyły filtry osobno, sprint mógłby uznać
+    za „nowy" termin, którego monitor w ogóle nie śledzi (i odwrotnie).
+    """
+    filters_env = os.environ.get("FILTERS")
+    if filters_env:
+        try:
+            return parse_filters_env(filters_env)
+        except Exception as e:  # noqa: BLE001 - błędny env nie może wywrócić procesu
+            log(f"! Błędny FILTERS '{filters_env}': {e} — używam filtrów z config.json")
+    return cfg.get("filters", [])
+
+
 def auto_register_new_slots(slots, listing_price_by_id, cfg, already_registered):
     """Zapisuje na NOWE wolne terminy, od najwcześniejszego, z limitem na przebieg.
 
@@ -1619,7 +1700,7 @@ def notify_startup(topic, count, tz, book_url=None):
 
 # -------------------------------------------------------------------------- main
 
-def run_once(announce_startup=False, skip_light=False):
+def run_once(announce_startup=False, skip_light=False, prefetched=None):
     """Zwraca 0 przy powodzeniu, 2 przy błędzie sieci (stan nietknięty)."""
     cfg = load_config()
     state_doc = load_state_doc()
@@ -1652,15 +1733,7 @@ def run_once(announce_startup=False, skip_light=False):
     }
     tzname = os.environ.get("TIMEZONE") or cfg.get("timezone") or "Europe/Warsaw"
     tz = ZoneInfo(tzname) if ZoneInfo else timezone.utc
-    filters_env = os.environ.get("FILTERS")
-    if filters_env:
-        try:
-            filters = parse_filters_env(filters_env)
-        except Exception as e:  # noqa: BLE001 - błędny env nie może wywrócić procesu
-            log(f"! Błędny FILTERS '{filters_env}': {e} — używam filtrów z config.json")
-            filters = cfg.get("filters", [])
-    else:
-        filters = cfg.get("filters", [])
+    filters = resolve_filters(cfg)
     now_utc = datetime.now(timezone.utc)
 
     listings_env = os.environ.get("LISTINGS")
@@ -1686,16 +1759,23 @@ def run_once(announce_startup=False, skip_light=False):
         # i niosą te same atrybuty kortu, więc nic przez to nie tracimy.
         doc = None
         fetch_started = time.monotonic()
-        try:
-            if skip_light:
-                doc = fetch_listing(lid)
-                attrs = (doc.get("data", {}).get("attributes", {}) or {})
-            else:
-                attrs = (fetch_listing_light(lid).get("data", {}).get("attributes", {}) or {})
-        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as e:
-            log(f"! Błąd pobierania kortu {lid}: {e} — nie zmieniam stanu, kończę.")
-            return 2  # błąd sieci: nie nadpisuj stanu
-        fetch_ms = int((time.monotonic() - fetch_started) * 1000)
+        if prefetched and prefetched[0] == lid:
+            # Dane przyniósł sprint — pobieranie ich ponownie kosztowałoby całą
+            # rundę do serwera (~92 ms) dokładnie w chwili, gdy liczy się najbardziej.
+            doc = prefetched[1]
+            attrs = (doc.get("data", {}).get("attributes", {}) or {})
+            fetch_ms = 0
+        else:
+            try:
+                if skip_light:
+                    doc = fetch_listing(lid)
+                    attrs = (doc.get("data", {}).get("attributes", {}) or {})
+                else:
+                    attrs = (fetch_listing_light(lid).get("data", {}).get("attributes", {}) or {})
+            except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as e:
+                log(f"! Błąd pobierania kortu {lid}: {e} — nie zmieniam stanu, kończę.")
+                return 2  # błąd sieci: nie nadpisuj stanu
+            fetch_ms = int((time.monotonic() - fetch_started) * 1000)
         listing_price = attrs.get("price")
         title = attrs.get("title", lid)
         avail = (attrs.get("datesStats") or {}).get("availableListingDates") or 0
@@ -1880,11 +1960,32 @@ def main():
         log(f"⇉ Salwa włączona: do {salvo_size} prób rejestracji równolegle "
             f"(nadmiar ponad auto_register_max jest anulowany).")
 
+    # Sprint: wąskie okno pobierania bez przerw, wycelowane w samą sekundę publikacji.
+    sprint = None
+    sprint_env = os.environ.get("SPRINT", "")
+    try:
+        sprint_threads = max(1, min(int(os.environ.get("SPRINT_THREADS") or 3),
+                                    SPRINT_MAX_THREADS))
+    except ValueError:
+        sprint_threads = 3
+    if sprint_env.strip() and warm_url:
+        try:
+            sprint = parse_burst_env(sprint_env)   # ten sam format co burst
+            sprint["seconds"] = max(1, min(int(os.environ.get("SPRINT_SECONDS") or 4), 30))
+            hour, minute, second = sprint["at"]
+            log(f"🏁 Sprint: {','.join(sprint['days'])} o {hour:02d}:{minute:02d}:{second:02d}, "
+                f"przez {sprint['seconds']}s, {sprint_threads} wątków bez przerw "
+                f"(świeży obraz co ~20 ms)")
+        except Exception as e:  # noqa: BLE001 - błędna opcja nie może wywrócić monitora
+            log(f"! Błędny SPRINT '{sprint_env}': {e} — sprint wyłączony")
+            sprint = None
+
     log(f"Tryb pętli: sprawdzam co {interval}s. Ctrl+C aby zakończyć.")
     first = True  # powiadomienie startowe na pierwszej UDANEJ iteracji procesu
     last_sleep = None
     in_burst = False
     burst_window = None   # granice trwającego zrywu — do uczciwego opisu w linii „koniec"
+    in_sprint = False
     while True:
         started = time.monotonic()
         now_local = datetime.now(tz)
@@ -1913,8 +2014,28 @@ def main():
             set_log_precision(active)  # milisekundy zostają tylko na czas zrywu
             in_burst = active
             last_sleep = None
+        # SPRINT: przez kilka sekund wokół sekundy publikacji pobieramy BEZ PRZERW
+        # kilkoma wątkami. Zwycięzca oddaje gotowe dane, więc rejestracja rusza od razu.
+        prefetched = None
+        sprint_bounds = burst_bounds(sprint, tz, now_local) if sprint else None
+        if sprint_bounds and sprint_bounds[0] <= now_local < sprint_bounds[1] and warm_url:
+            if not in_sprint:
+                log(f"🏁 Sprint START — {sprint_threads} wątków bez przerw "
+                    f"do {sprint_bounds[1]:%H:%M:%S}")
+                in_sprint = True
+            szukanie = time.monotonic()
+            deadline = szukanie + max(0.0, (sprint_bounds[1] - now_local).total_seconds())
+            prefetched = run_sprint(deadline, sprint_threads, first_listing[0],
+                                    set((load_state_doc() or {}).get("free_ids") or []), tz)
+            if prefetched:
+                log(f"🏁 Sprint: NOWE terminy wykryte po "
+                    f"{int((time.monotonic() - szukanie) * 1000)} ms — rejestruję z gotowych danych")
+        elif in_sprint:
+            log("🏁 Sprint koniec")
+            in_sprint = False
+
         try:
-            rc = run_once(announce_startup=first, skip_light=active)
+            rc = run_once(announce_startup=first, skip_light=active, prefetched=prefetched)
             if rc != 2:  # 2 = błąd sieci; ponów próbę startowego powiadomienia później
                 first = False
         except Exception as e:  # noqa: BLE001 - pętla ma przetrwać każdy błąd
