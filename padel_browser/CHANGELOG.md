@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.7.1 — sprint po przeglądzie: ciepłe połączenia i sprostowane liczby
+- **Połączenia sprintu rozgrzewane na starcie zrywu**, tak jak połączenia salwy.
+  Sprint ma własną pulę, więc jej gniazda były ZIMNE w chwili startu — trzy
+  równoczesne uzgodnienia TLS potrafią zająć sekundy, czyli większość okna sprintu.
+- **Sprostowanie pomiaru z 0.7.0.** Tabelę przepustowości zmierzyłem wtedy na lekkim
+  pingu, a sprint pobiera pełne dane. Rzeczywiste wartości: 1 wątek 8,3 zap/s
+  (świeży wynik co 117 ms), 2 wątki 17,0 (56 ms), **3 wątki 24,0 (35 ms)** — a nie
+  20 ms, jak podawałem. Zysk sprintu to więc ~80 ms, nie ~90 ms.
+- **Zapas miejsc w puli sprintu.** Zwycięzca wraca natychmiast, a maruderzy jeszcze
+  pobierają; bez zapasu jeden wolniejszy strzał zabierałby miejsce kolejnej rundzie
+  i sprint po cichu działałby węższym frontem, niż prosił użytkownik.
+- Milisekundy w Dzienniku włączają się też **na sam sprint**, nawet gdy nie trwa zryw —
+  to najbardziej czasowo-krytyczny moment całego polowania.
+
 ## 0.7.0 — sprint: pobieranie bez przerw w sekundzie publikacji
 - **Nowy `sprint`** (domyślnie `mon-sun:11:00:51`, 4 s, 3 wątki): przez kilka sekund
   wokół sekundy publikacji kilka wątków pobiera repertuar **bez przerw**. Zmierzone:

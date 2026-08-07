@@ -1291,13 +1291,15 @@ def salvo_pool(size):
     return _salvo_pool
 
 
-def warm_salvo_connections(size, url):
-    """Rozgrzewa `size` połączeń w RÓŻNYCH wątkach puli (bariera je rozdziela).
+def warm_connections(pool, size, url):
+    """Rozgrzewa `size` połączeń w RÓŻNYCH wątkach podanej puli (bariera je rozdziela).
 
     Bez bariery szybkie zadania wykonałyby się na jednym wątku i rozgrzałoby się
-    jedno połączenie zamiast wszystkich.
+    jedno połączenie zamiast wszystkich. Dotyczy tak samo salwy, jak i sprintu:
+    kilka równoczesnych uzgodnień TLS na zimno potrafi zająć sekundy, a sprint
+    ma do dyspozycji tylko kilka sekund wokół publikacji.
     """
-    size = max(1, min(int(size), SALVO_MAX))
+    size = max(1, size)
     barrier = threading.Barrier(size, timeout=10)
 
     def rozgrzej(_):
@@ -1313,7 +1315,6 @@ def warm_salvo_connections(size, url):
         except threading.BrokenBarrierError:
             pass
 
-    pool = salvo_pool(size)
     list(pool.map(rozgrzej, range(size)))
 
 
@@ -1355,11 +1356,17 @@ _sprint_pool = None
 
 
 def sprint_pool():
-    """Pula OSOBNA od salwy — inaczej wątki zajęte pobieraniem blokowałyby strzały."""
+    """Pula OSOBNA od salwy — inaczej wątki zajęte pobieraniem blokowałyby strzały.
+
+    Miejsc jest WIĘCEJ niż maksimum wątków sprintu: zwycięzca wraca natychmiast,
+    a maruderzy dokańczają swoje pobranie jeszcze przez chwilę. Bez zapasu jeden
+    wolniejszy strzał zabierałby miejsce kolejnej rundzie i sprint cichcem
+    działałby węższy, niż prosił użytkownik.
+    """
     global _sprint_pool
     if _sprint_pool is None:
         _sprint_pool = concurrent.futures.ThreadPoolExecutor(
-            max_workers=SPRINT_MAX_THREADS, thread_name_prefix="sprint")
+            max_workers=SPRINT_MAX_THREADS * 2, thread_name_prefix="sprint")
     return _sprint_pool
 
 
@@ -1975,7 +1982,7 @@ def main():
             hour, minute, second = sprint["at"]
             log(f"🏁 Sprint: {','.join(sprint['days'])} o {hour:02d}:{minute:02d}:{second:02d}, "
                 f"przez {sprint['seconds']}s, {sprint_threads} wątków bez przerw "
-                f"(świeży obraz co ~20 ms)")
+                f"(świeży obraz co ~{max(1, round(117 / sprint_threads))} ms)")
         except Exception as e:  # noqa: BLE001 - błędna opcja nie może wywrócić monitora
             log(f"! Błędny SPRINT '{sprint_env}': {e} — sprint wyłączony")
             sprint = None
@@ -1999,10 +2006,17 @@ def main():
                 # Połączenia salwy stygną między polowaniami (serwer zamyka bezczynne),
                 # więc rozgrzewamy je TERAZ — inaczej pierwszy strzał zapłaciłby ~160 ms
                 # za uzgodnienie TLS, czyli dokładnie to, co salwa ma wyeliminować.
-                if salvo_size > 1 and warm_url:
+                if warm_url and (salvo_size > 1 or sprint):
                     warmed = time.monotonic()
-                    warm_salvo_connections(salvo_size, warm_url)
-                    log(f"⇉ Salwa gotowa: {salvo_size} ciepłych połączeń "
+                    if salvo_size > 1:
+                        warm_connections(salvo_pool(salvo_size),
+                                         min(salvo_size, SALVO_MAX), warm_url)
+                    # Sprint ma WŁASNĄ pulę, więc jej połączenia trzeba rozgrzać osobno —
+                    # inaczej pierwsze sekundy sprintu zjadłoby uzgadnianie TLS.
+                    if sprint:
+                        warm_connections(sprint_pool(), sprint_threads, warm_url)
+                    log(f"⇉ Połączenia gotowe (salwa {salvo_size if salvo_size > 1 else 0}, "
+                        f"sprint {sprint_threads if sprint else 0}) "
                         f"[{int((time.monotonic() - warmed) * 1000)} ms]")
             else:
                 # Ta linia leci dopiero przy NASTĘPNYM sprawdzeniu, czyli sporo po końcu
@@ -2020,6 +2034,9 @@ def main():
         sprint_bounds = burst_bounds(sprint, tz, now_local) if sprint else None
         if sprint_bounds and sprint_bounds[0] <= now_local < sprint_bounds[1] and warm_url:
             if not in_sprint:
+                # Sprint to najbardziej czasowo-krytyczny moment całego polowania —
+                # milisekundy w znacznikach są tu potrzebne nawet bez zrywu.
+                set_log_precision(True)
                 log(f"🏁 Sprint START — {sprint_threads} wątków bez przerw "
                     f"do {sprint_bounds[1]:%H:%M:%S}")
                 in_sprint = True
@@ -2033,6 +2050,7 @@ def main():
         elif in_sprint:
             log("🏁 Sprint koniec")
             in_sprint = False
+            set_log_precision(active)   # milisekundy zostają tylko, jeśli trwa zryw
 
         try:
             rc = run_once(announce_startup=first, skip_light=active, prefetched=prefetched)
