@@ -20,6 +20,7 @@ import io
 import json
 import os
 import re
+import socket
 import sys
 import threading
 import time
@@ -1346,6 +1347,59 @@ def fire_salvo(targets, listing_price_by_id, cfg, speculative, size):
     return list(pool.map(strzal, fired))
 
 
+# --------------------------------------------------------- pomiar opóźnienia
+
+# Ocena rundy do serwera. Zmierzone z łącza domowego po WiFi: ~80 ms do Irlandii,
+# przy ~10 ms na samą bramę lokalną. Kabel zamiast WiFi potrafi urwać kilkanaście ms,
+# a przy DWÓCH rundach w ścieżce rezerwacji liczy się to podwójnie.
+RTT_DOBRE = 45
+RTT_TYPOWE = 75
+
+
+def measure_rtt(host, port=443, samples=5, timeout=3):
+    """(mediana, min, max) czasu jednej rundy do serwera w ms. None, gdy nie doszło.
+
+    Czysty TCP — bez TLS i bez dotykania API, więc pomiar niczego nie obciąża.
+    """
+    czasy = []
+    for _ in range(samples):
+        sock = socket.socket()
+        sock.settimeout(timeout)
+        started = time.monotonic()
+        try:
+            sock.connect((host, port))
+            czasy.append((time.monotonic() - started) * 1000)
+        except OSError:
+            pass
+        finally:
+            try:
+                sock.close()
+            except OSError:
+                pass
+    if not czasy:
+        return None
+    czasy.sort()
+    return czasy[len(czasy) // 2], czasy[0], czasy[-1]
+
+
+def log_rtt(host):
+    """Wypisuje opóźnienie do serwera i tłumaczy, ile z niego bierze rezerwacja."""
+    wynik = measure_rtt(host)
+    if not wynik:
+        log(f"📡 Nie zmierzyłem opóźnienia do {host} — brak połączenia?")
+        return None
+    mediana, naj, gorszy = wynik
+    log(f"📡 Runda do {host}: {mediana:.0f} ms (min {naj:.0f}, max {gorszy:.0f}). "
+        f"Rezerwacja potrzebuje DWÓCH takich rund (~{2 * mediana:.0f} ms) — "
+        f"tego nie da się skrócić kodem.")
+    if mediana >= RTT_TYPOWE:
+        log(f"   Opóźnienie wysokie. Jeśli serwer stoi na WiFi, kabel potrafi urwać "
+            f"kilkanaście ms — a liczy się to podwójnie.")
+    elif mediana < RTT_DOBRE:
+        log("   Opóźnienie bardzo dobre — z tej strony nie ma już czego poprawiać.")
+    return mediana
+
+
 # ------------------------------------------------------------------ sprint
 
 # Między odpytaniami stoimy bezczynnie — przy takcie 0,2 s to średnio ~100 ms straty.
@@ -1986,6 +2040,8 @@ def main():
         except Exception as e:  # noqa: BLE001 - błędna opcja nie może wywrócić monitora
             log(f"! Błędny SPRINT '{sprint_env}': {e} — sprint wyłączony")
             sprint = None
+
+    log_rtt(urllib.parse.urlsplit(DECATHLON_API_URL).netloc)
 
     log(f"Tryb pętli: sprawdzam co {interval}s. Ctrl+C aby zakończyć.")
     first = True  # powiadomienie startowe na pierwszej UDANEJ iteracji procesu

@@ -242,6 +242,28 @@ wpadłaby do punktu odniesienia i sprint nigdy by się nie odpalił.
 Domyślnie `mon-sun:11:00:51` przez 4 s — okno 11:00:51–11:00:55 obejmuje zmierzoną
 sekundę publikacji (~11:00:53) z zapasem po obu stronach.
 
+### Ile z opóźnienia to sieć
+
+Przy starcie dodatek mierzy rundę do serwera Decathlonu i wypisuje ją w Dzienniku:
+
+```
+📡 Runda do go.decathlon.pl: 58 ms (min 55, max 63). Rezerwacja potrzebuje DWÓCH
+   takich rund (~116 ms) — tego nie da się skrócić kodem.
+```
+
+Ścieżka od publikacji do strzału to mniej więcej: **wykrycie (~20 ms) + dwie rundy
+do serwera**. Jeśli runda wynosi 80 ms, sama sieć zjada ~160 ms z ~200 ms całości —
+i żadne ustawienie tego nie zmieni.
+
+Serwery Decathlon GO stoją w **AWS w Irlandii**. Z łącza domowego w Polsce to
+zwykle 55–85 ms. Jeśli widzisz górne wartości, sprawdź, czy serwer z Home Assistantem
+stoi na kablu — WiFi potrafi dołożyć kilkanaście milisekund, a liczy się to podwójnie.
+
+> **VPN tu nie pomoże.** Nie skraca drogi, tylko dokłada przystanek: ruch idzie
+> dom → serwer VPN → Decathlon. Pomogłoby wyłącznie przeniesienie samego kodu bliżej
+> serwera (np. maszyna w AWS eu-west-1, runda ~2 ms) — to jednak oznacza wyprowadzenie
+> tokenu sesji poza Home Assistant.
+
 ### Czytanie logu po polowaniu
 
 W czasie zrywu Dziennik przechodzi na **znaczniki z milisekundami** (poza zrywem zostają

@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.7.2 — pomiar opóźnienia do serwera przy starcie
+- **Dziennik pokazuje przy starcie rundę do Decathlon GO** (mediana z 5 prób, czysty TCP,
+  bez dotykania API). Ścieżka rezerwacji ma DWIE takie rundy, więc to najtwardsza
+  część budżetu czasowego — i jedyna, której nie da się skrócić kodem.
+- Gdy opóźnienie jest wysokie (≥75 ms), dodatek podpowiada sprawdzenie, czy serwer
+  stoi na kablu zamiast na WiFi: zmierzone u nas ~10 ms idzie na samą bramę lokalną,
+  a przy dwóch rundach liczy się to podwójnie.
+- Powód: pomiary robiłem dotąd z laptopa po WiFi (80 ms do Irlandii). Liczba z
+  faktycznego serwera Home Assistant może być zupełnie inna i dopiero ona mówi,
+  czy jest tu jeszcze co zbierać.
+
 ## 0.7.1 — sprint po przeglądzie: ciepłe połączenia i sprostowane liczby
 - **Połączenia sprintu rozgrzewane na starcie zrywu**, tak jak połączenia salwy.
   Sprint ma własną pulę, więc jej gniazda były ZIMNE w chwili startu — trzy
