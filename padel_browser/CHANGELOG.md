@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.7.0 — sprint: pobieranie bez przerw w sekundzie publikacji
+- **Nowy `sprint`** (domyślnie `mon-sun:11:00:51`, 4 s, 3 wątki): przez kilka sekund
+  wokół sekundy publikacji kilka wątków pobiera repertuar **bez przerw**. Zmierzone:
+  3 wątki dają świeży obraz co **20 ms** zamiast co 200 ms, więc średnie opóźnienie
+  wykrycia spada ze ~100 ms do ~10 ms.
+- **Zwycięski wątek oddaje gotowe dane** prosto do rejestracji (`prefetched`). Bez tego
+  trzeba by pobrać je jeszcze raz i stracić całą rundę do serwera (~92 ms) dokładnie
+  w chwili, gdy liczy się najbardziej.
+- **Punkt odniesienia z zapisanego stanu, nie z pierwszego pobrania** — inaczej
+  publikacja trafiająca w pierwsze ~90 ms sprintu wpadłaby do punktu odniesienia
+  i sprint nigdy by się nie odpalił.
+- Sprint ma **własną pulę wątków**, osobną od salwy: wątki zajęte pobieraniem nie mogą
+  blokować strzałów rejestracji.
+- Zwycięzca wraca **natychmiast**, bez czekania na pozostałe wątki — maruder w trakcie
+  pobierania kosztowałby do ~90 ms, czyli tyle, ile sprint ma zaoszczędzić.
+- Domyślny `burst_interval` obniżony do 0,2 s (zmierzone: dotrzymywane co do 4 ms).
+- Ścieżka od publikacji do strzału: **~290 ms → ~200 ms**. Pozostałe ~190 ms to dwie
+  rundy do serwera w Irlandii (RTT 92 ms) — tego z domowego łącza nie da się skrócić.
+
 ## 0.6.1 — salwa odporna na awarie (przegląd 0.6.0)
 - **KRYTYCZNE: wyjątek w jednym wątku salwy wywracał całą salwę.** `pool.map` podnosi
   błąd dopiero przy odczycie wyników, więc jedna zepsuta odpowiedź serwera (np. błędny

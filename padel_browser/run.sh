@@ -25,6 +25,9 @@ export INTERVALS="$(opt intervals)"
 export BURST="$(opt burst)"
 export BURST_SECONDS="$(opt burst_seconds)"
 export BURST_INTERVAL="$(opt burst_interval)"
+export SPRINT="$(opt sprint)"
+export SPRINT_SECONDS="$(opt sprint_seconds)"
+export SPRINT_THREADS="$(opt sprint_threads)"
 export LISTINGS="$(opt listing_url)"
 export TIMEZONE="$(opt timezone)"
 export AUTO_REGISTER="$(opt auto_register)"
@@ -40,7 +43,7 @@ export TEST_TOKEN="$(opt test_token)"
 export DECATHLON_TOKEN="$(opt decathlon_token)"
 export DECATHLON_COOKIE="$(opt decathlon_cookie)"
 # opcja pominięta w UI -> Python zwraca "None"; traktuj jak pustą
-for v in FILTERS INTERVALS BURST AUTO_REGISTER AUTO_REGISTER_DRY_RUN AUTO_REGISTER_NAME \
+for v in FILTERS INTERVALS BURST SPRINT AUTO_REGISTER AUTO_REGISTER_DRY_RUN AUTO_REGISTER_NAME \
          AUTO_REGISTER_AGE AUTO_REGISTER_PAID AUTO_REGISTER_MAX AUTO_REGISTER_ORDER AUTO_REGISTER_SALVO \
          CLEAR_STATE TEST_TOKEN DECATHLON_TOKEN DECATHLON_COOKIE; do
   eval "val=\$$v"

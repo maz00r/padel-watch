@@ -37,7 +37,10 @@ przechodzisz normalne logowanie, łącznie z kodem z maila.
 | `intervals` | inna częstotliwość w zadanych godzinach: `DNI:HH:MM-HH:MM=SEKUNDY` | `mon-fri:15:00-02:00=30` |
 | `burst` | **zryw**: krótkie, gęste sprawdzanie wycelowane w sekundę publikacji grafiku, `DNI:GG:MM:SS`. Puste = wyłączony | `mon-sun:11:00:45` |
 | `burst_seconds` | ile sekund trwa zryw (1–120) | `15` |
-| `burst_interval` | odstęp w zrywie, w sekundach (dozwolone poniżej 1 s) | `0.5` |
+| `burst_interval` | odstęp w zrywie, w sekundach (dozwolone poniżej 1 s) | `0.2` |
+| `sprint` | **sprint**: wąskie okno pobierania BEZ PRZERW, `DNI:GG:MM:SS`. Puste = wyłączony | `mon-sun:11:00:51` |
+| `sprint_seconds` | ile sekund trwa sprint (1–30) | `4` |
+| `sprint_threads` | ile wątków pobiera równolegle w sprincie (1–4) | `3` |
 | `listing_url` | link do kortu (Decathlon GO); app sam podąża za zmianą adresu | `https://go.decathlon.pl/l/1c0ec93e-...` |
 | `timezone` | strefa czasowa filtrów i logów | `Europe/Warsaw` |
 | `auto_register` | próba automatycznego zapisu na nowy termin | `false` |
@@ -206,6 +209,36 @@ W Dzienniku:
 > **Zryw musi startować kilka sekund przed publikacją** — rozgrzanie połączeń salwy
 > zajmuje ~250 ms i dzieje się na jego początku. Domyślne `11:00:45` przy publikacji
 > ~11:00:53 daje ośmiosekundowy zapas, czyli z dużym nadmiarem.
+
+### Sprint (`sprint`) — ostatnie 90 ms
+
+Nawet w zrywie między odpytaniami **stoimy bezczynnie**: przy takcie 0,2 s to średnio
+~100 ms straty. Sprint na kilka sekund przechodzi w tryb ciągły — kilka wątków pobiera
+bez przerw, więc obraz repertuaru jest świeży cały czas.
+
+Zmierzone na żywym API:
+
+| Wątki | Zapytań/s | Przerwa między wynikami |
+|---|---|---|
+| 1 | 11,8 | 79 ms |
+| 2 | 22,8 | 40 ms |
+| **3** | **34,8** | **20 ms** |
+| 4 | 42,0 | 17 ms |
+
+Zwycięski wątek oddaje **gotowe dane** prosto do rejestracji — bez tego trzeba by
+pobrać je jeszcze raz i stracić całą rundę do serwera (~92 ms) dokładnie w chwili,
+gdy liczy się najbardziej.
+
+Punkt odniesienia („co jest nowe") bierze się z **zapisanego stanu**, a nie z pierwszego
+pobrania sprintu. Inaczej publikacja, która trafiłaby w pierwsze ~90 ms sprintu,
+wpadłaby do punktu odniesienia i sprint nigdy by się nie odpalił.
+
+> **Sprint ma być wąski.** Trzy wątki to ~35 zapytań na sekundę — domyślne 4 sekundy
+> dają ~140 zapytań, czyli tyle co zryw przez 30 s. Nie ustawiaj `sprint_seconds`
+> na kilkadziesiąt sekund, bo to już dobijanie się do serwera.
+
+Domyślnie `mon-sun:11:00:51` przez 4 s — okno 11:00:51–11:00:55 obejmuje zmierzoną
+sekundę publikacji (~11:00:53) z zapasem po obu stronach.
 
 ### Czytanie logu po polowaniu
 
