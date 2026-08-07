@@ -75,8 +75,22 @@ def _log_tz():
     return _LOG_TZ
 
 
+# W zrywie sekundowa rozdzielczość znaczników przestaje wystarczać: nie da się z niej
+# odczytać, czy termin przegraliśmy o 100 ms czy o 900 ms. Poza zrywem milisekundy
+# tylko zaśmiecałyby Dziennik, więc włączamy je punktowo.
+_LOG_MILLIS = False
+
+
+def set_log_precision(millis):
+    """Włącza/wyłącza milisekundy w znacznikach czasu (na czas zrywu)."""
+    global _LOG_MILLIS
+    _LOG_MILLIS = bool(millis)
+
+
 def log(*args):
-    ts = datetime.now(_log_tz()).strftime("%Y-%m-%d %H:%M:%S")
+    now = datetime.now(_log_tz())
+    ts = (now.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3] if _LOG_MILLIS
+          else now.strftime("%Y-%m-%d %H:%M:%S"))
     print(f"[{ts}]", *args, flush=True)
 
 
@@ -1296,15 +1310,19 @@ def auto_register_new_slots(slots, listing_price_by_id, cfg, already_registered)
         if done >= limit:
             skipped.append(when)
             continue
+        # Czas każdej próby: przy wyścigu o termin to najważniejsza liczba w Dzienniku —
+        # mówi, ile kosztuje nieudany strzał i ile zostało do zwycięskiego.
+        attempt_started = time.monotonic()
         ok, msg = register_slot(slot, listing_price_by_id.get(sid), cfg, speculative=speculative)
+        took_ms = int((time.monotonic() - attempt_started) * 1000)
         results[sid] = (ok, msg)
         if ok:
             done += 1
             if speculative:
-                log(f"~ Auto-rejestracja (test, bez rezerwacji): {when} — {msg}")
+                log(f"~ Auto-rejestracja (test, bez rezerwacji): {when} — {msg} [{took_ms} ms]")
             else:
                 registered.add(sid)
-                log(f"✓ Auto-rejestracja: {when} — {msg}")
+                log(f"✓ Auto-rejestracja: {when} — {msg} [{took_ms} ms]")
             continue
         # Twardy błąd autoryzacji -> nie ma sensu próbować kolejnych slotów w tym przebiegu.
         # Zapamiętujemy tylko tyle terminów, ile i tak byśmy zapisali (limit), żeby po
@@ -1316,7 +1334,7 @@ def auto_register_new_slots(slots, listing_price_by_id, cfg, already_registered)
             log(f"! Auto-rejestracja przerwana ({msg}). "
                 f"Zapamiętano do ponowienia: {', '.join(waiting)}.")
             return results, registered
-        log(f"! Auto-rejestracja nieudana dla {when}: {msg}")
+        log(f"! Auto-rejestracja nieudana dla {when}: {msg} [{took_ms} ms]")
 
     if skipped:
         log(f"= Auto-rejestracja: limit {limit}/przebieg wykorzystany; "
@@ -1511,6 +1529,7 @@ def run_once(announce_startup=False, skip_light=False):
         # (~110 ms), a pełne dane i tak są potrzebne po identyfikatory terminów —
         # i niosą te same atrybuty kortu, więc nic przez to nie tracimy.
         doc = None
+        fetch_started = time.monotonic()
         try:
             if skip_light:
                 doc = fetch_listing(lid)
@@ -1520,6 +1539,7 @@ def run_once(announce_startup=False, skip_light=False):
         except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as e:
             log(f"! Błąd pobierania kortu {lid}: {e} — nie zmieniam stanu, kończę.")
             return 2  # błąd sieci: nie nadpisuj stanu
+        fetch_ms = int((time.monotonic() - fetch_started) * 1000)
         listing_price = attrs.get("price")
         title = attrs.get("title", lid)
         avail = (attrs.get("datesStats") or {}).get("availableListingDates") or 0
@@ -1535,7 +1555,10 @@ def run_once(announce_startup=False, skip_light=False):
                 log(f"! Błąd pobierania terminów kortu {lid}: {e} — nie zmieniam stanu, kończę.")
                 return 2  # błąd sieci: nie nadpisuj stanu
         slots = [s for s in free_slots(doc, lid, now_utc) if passes_filter(s, filters, tz)]
-        log(f"= {title}: {avail} dostępnych, {len(slots)} pasujących do filtra")
+        # W zrywie dokładamy czas pobrania — pozwala oddzielić opóźnienie sieci
+        # od opóźnienia wykrycia przy analizie logu po polowaniu.
+        log(f"= {title}: {avail} dostępnych, {len(slots)} pasujących do filtra"
+            + (f" (pobranie {fetch_ms} ms)" if skip_light else ""))
         for s in slots:
             current[s["id"]] = s
             book_url_by_id[s["id"]] = canon_url
@@ -1692,14 +1715,25 @@ def main():
     first = True  # powiadomienie startowe na pierwszej UDANEJ iteracji procesu
     last_sleep = None
     in_burst = False
+    burst_window = None   # granice trwającego zrywu — do uczciwego opisu w linii „koniec"
     while True:
         started = time.monotonic()
         now_local = datetime.now(tz)
         bounds = burst_bounds(burst, tz, now_local)
         active = bool(bounds and bounds[0] <= now_local < bounds[1])
         if active != in_burst:
-            log(f"⚡ Zryw START — co {burst['interval']}s przez {burst['seconds']}s" if active
-                else "⚡ Zryw koniec — wracam do zwykłego taktu")
+            set_log_precision(True)   # obie linie przejścia z milisekundami — wyznaczają okno
+            if active:
+                burst_window = bounds
+                log(f"⚡ Zryw START — co {burst['interval']}s przez {burst['seconds']}s")
+            else:
+                # Ta linia leci dopiero przy NASTĘPNYM sprawdzeniu, czyli sporo po końcu
+                # okna — dlatego podajemy faktyczne granice, a nie sugerujemy „teraz".
+                okno = (f" (okno {burst_window[0]:%H:%M:%S}–{burst_window[1]:%H:%M:%S})"
+                        if burst_window else "")
+                log(f"⚡ Zryw koniec{okno} — wracam do zwykłego taktu")
+                burst_window = None
+            set_log_precision(active)  # milisekundy zostają tylko na czas zrywu
             in_burst = active
             last_sleep = None
         try:

@@ -162,6 +162,34 @@ z ~1,2 s do ~0,25 s średnio.
 Podłoga taktu w zrywie to 0,2 s (poza zrywem obowiązuje minimum 2 s z `intervals`) —
 świadomie niższa, bo zryw trwa kilkanaście sekund, a nie godzinami.
 
+### Czytanie logu po polowaniu
+
+W czasie zrywu Dziennik przechodzi na **znaczniki z milisekundami** (poza zrywem zostają
+sekundy, żeby nie zaśmiecać). Dochodzą też dwie liczby, dzięki którym da się rozłożyć
+przegraną na czynniki:
+
+```
+[11:00:45.000] ⚡ Zryw START — co 0.2s przez 30s
+[11:00:52.800] = Kort: 2 dostępnych, 1 pasujących do filtra (pobranie 98 ms)
+[11:00:53.010] = Kort: 11 dostępnych, 5 pasujących do filtra (pobranie 104 ms)
+[11:00:53.130] ! Auto-rejestracja nieudana dla pt 14.08 20:00: … 409 … [118 ms]
+[11:00:53.250] ✓ Auto-rejestracja: pt 14.08 15:00 — accepted [115 ms]
+[11:01:15.010] ⚡ Zryw koniec (okno 11:00:45–11:01:15) — wracam do zwykłego taktu
+```
+
+Jak to czytać:
+
+- **Moment publikacji** leży między ostatnim sprawdzeniem „bez zmian" a pierwszym z nowymi
+  terminami — wyżej: między 11:00:52.800 a 11:00:53.010.
+- **`(pobranie N ms)`** to czas samej rundy do serwera. Jeśli rośnie, problemem jest sieć,
+  a nie ustawienia.
+- **`[N ms]`** przy każdej próbie rejestracji mówi, ile kosztuje nieudany strzał i po jakim
+  czasie od wykrycia poszedł ten zwycięski.
+
+Jeśli od pierwszego wykrycia do udanej rezerwacji mija np. 240 ms, a termin i tak przepadł,
+to znaczy, że konkurent jest szybszy w tej samej klasie czasowej — i dalsze skracanie
+interwału niczego nie zmieni.
+
 Jak ustalić własną porę publikacji: zostaw `intervals` na kilka sekund w szerokim oknie
 i sprawdź w Dzienniku, o której pierwszy raz pojawia się nowy dzień. Potem ustaw `burst`
 kilka sekund wcześniej i `intervals` możesz wyczyścić.

@@ -1283,6 +1283,99 @@ class OpenUrlTest(unittest.TestCase):
             cp.open_url(self.req())
 
 
+class LogPrecisionTest(unittest.TestCase):
+    """Milisekundy w Dzienniku tylko na czas zrywu — poza nim byłyby szumem."""
+
+    def setUp(self):
+        self.addCleanup(cp.set_log_precision, False)
+
+    def zapisz(self):
+        buf = io.StringIO()
+        with mock.patch("sys.stdout", buf):
+            cp.log("test")
+        return buf.getvalue()
+
+    def test_default_is_seconds(self):
+        cp.set_log_precision(False)
+        self.assertRegex(self.zapisz(), r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] test")
+
+    def test_burst_adds_milliseconds(self):
+        cp.set_log_precision(True)
+        self.assertRegex(self.zapisz(), r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}\] test")
+
+    def test_toggles_back(self):
+        cp.set_log_precision(True)
+        cp.set_log_precision(False)
+        self.assertNotIn(".", self.zapisz().split("]")[0].split(" ")[-1])
+
+
+class AttemptTimingTest(unittest.TestCase):
+    """Czas każdej próby rejestracji w logu — mówi, ile kosztuje nieudany strzał."""
+
+    def slots(self, *hours):
+        return [{"id": f"s{h}", "date_id": f"d{h}", "name": "Rezerwacja godzinna",
+                 "start_utc": datetime(2026, 8, 14, h, 0, tzinfo=timezone.utc),
+                 "count": 0, "limit": 1, "price": None} for h in hours]
+
+    def run_register(self, outcomes):
+        cfg = {"enabled": True, "max_per_run": 1, "order": "latest", "name": "Jan",
+               "token": jwt_with_exp(int(datetime.now(timezone.utc).timestamp()) + 3600)}
+        calls = iter(outcomes)
+
+        def fake_register(slot, price, cfg_, speculative=False):
+            return next(calls)
+
+        buf = io.StringIO()
+        with mock.patch.object(cp, "register_slot", side_effect=fake_register), \
+                mock.patch("sys.stdout", buf):
+            cp.auto_register_new_slots(self.slots(15, 19), {}, cfg, set())
+        return buf.getvalue()
+
+    def test_failure_line_reports_duration(self):
+        out = self.run_register([(False, "Decathlon HTTP 409: brak miejsc"), (True, "accepted")])
+        self.assertRegex(out, r"! Auto-rejestracja nieudana .*409.* \[\d+ ms\]")
+
+    def test_success_line_reports_duration(self):
+        out = self.run_register([(True, "accepted")])
+        self.assertRegex(out, r"✓ Auto-rejestracja: .* accepted \[\d+ ms\]")
+
+
+class FetchTimingTest(unittest.TestCase):
+    """Czas pobrania dopisujemy tylko w zrywie — oddziela sieć od reszty opóźnienia."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        patcher = mock.patch.object(cp, "STATE_PATH", os.path.join(self.dir.name, "s.json"))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.env = mock.patch.dict(os.environ, {
+            "LISTINGS": "https://go.decathlon.pl/l/" + "a" * 8 + "-1111-2222-3333-444444444444",
+            "NTFY_TOPIC": "", "FILTERS": "mon-sun:00:00-24:00", "AUTO_REGISTER": "false",
+            "CONFIG_PATH": os.path.join(self.dir.name, "brak.json"),
+        })
+        self.env.start()
+        self.addCleanup(self.env.stop)
+
+    def output(self, skip_light):
+        doc = {"data": {"attributes": {"title": "Kort", "price": None,
+                                       "datesStats": {"availableListingDates": 1}}},
+               "included": []}
+        buf = io.StringIO()
+        with mock.patch.object(cp, "resolve_current_id", side_effect=lambda x: x), \
+                mock.patch.object(cp, "fetch_listing_light", return_value=doc), \
+                mock.patch.object(cp, "fetch_listing", return_value=doc), \
+                mock.patch("sys.stdout", buf):
+            cp.run_once(skip_light=skip_light)
+        return buf.getvalue()
+
+    def test_burst_run_shows_fetch_time(self):
+        self.assertRegex(self.output(True), r"pasujących do filtra \(pobranie \d+ ms\)")
+
+    def test_normal_run_keeps_the_line_clean(self):
+        self.assertNotIn("pobranie", self.output(False))
+
+
 class ParseBurstTest(unittest.TestCase):
     def test_full_time(self):
         got = cp.parse_burst_env("mon-sun:11:00:45")
