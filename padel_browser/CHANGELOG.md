@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.6.0 — salwa: równoległe strzały o wieczorne godziny
+- **Nowa opcja `auto_register_salvo`** (domyślnie 4): najbardziej pożądane terminy
+  dostają próbę rejestracji **naraz**, każdy własnym rozgrzanym połączeniem.
+  Zmierzone na żywym API: 4 strzały po kolei to 275 ms, salwą **73 ms** (3,8×).
+  Przy kolejności `latest` czwarty termin dostawał dotąd strzał ~350 ms po pierwszym —
+  i właśnie w tym oknie ginęły godziny 17:00–20:00 (potwierdzone logami z 5 i 7.08).
+- **Limit `auto_register_max` nadal obowiązuje**: gdy salwa wygra więcej terminów,
+  nadmiarowe są natychmiast anulowane, a zostaje ten najwyżej w `auto_register_order`.
+  Oddane terminy trafiają na listę „już zapisane", żeby nie wpaść w pętlę
+  rezerwuj–anuluj–zobacz-wolne–rezerwuj.
+- **Połączenia salwy rozgrzewane na starcie zrywu** (~250 ms, z zapasem mieszczącym się
+  w ośmiu sekundach do publikacji). Bez tego pierwszy strzał płaciłby ~160 ms za
+  uzgodnienie TLS — czyli dokładnie to, co salwa ma wyeliminować.
+- Terminy spoza salwy (np. bezpieczne 15:00) są nadal próbowane po kolei zaraz po niej,
+  więc zabezpieczenie „przynajmniej cokolwiek" zostaje.
+- Domyślne `auto_register_order` zmienione na `latest` (dotyczy tylko nowych instalacji).
+
 ## 0.5.1 — Dziennik z milisekundami w zrywie (diagnostyka wyścigu)
 - **Znaczniki czasu z milisekundami na czas zrywu** (poza nim bez zmian). Sekundowa
   rozdzielczość przestała wystarczać: nie dało się odczytać, czy termin przegrywamy

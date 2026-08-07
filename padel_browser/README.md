@@ -50,13 +50,14 @@ przechodzisz normalne logowanie, łącznie z kodem z maila.
 | `auto_register_age` | wiek uczestnika, jeśli wydarzenie go wymaga | `34` |
 | `auto_register_paid` | pozwól tworzyć transakcje także dla płatnych terminów; płatność nadal trzeba dokończyć ręcznie | `false` |
 | `auto_register_max` | ile terminów maksymalnie zapisać w jednym przebiegu (0–10); `0` = nic | `1` |
-| `auto_register_order` | kolejność prób: `earliest` (od najwcześniejszego) lub `latest` (od najpóźniejszego) | `earliest` |
+| `auto_register_order` | kolejność prób: `earliest` (od najwcześniejszego) lub `latest` (od najpóźniejszego) | `latest` |
+| `auto_register_salvo` | ile prób rejestracji wysyłać **równolegle** (0–6); `0`/`1` = po kolei, jak dawniej | `4` |
 | `test_token` | jednorazowy test poświadczeń przy starcie (nic nie rezerwuje) | `false` |
 | `clear_state` | jednorazowe czyszczenie stanu: `registered` lub `all`; puste = nic nie rób | `` |
 
 > **Bezpieczniki auto-rejestracji.** Domyślnie `auto_register_max: 1`, więc gdy pojawi się
-> naraz wiele wolnych terminów, zapis obejmie tylko **najwcześniejszy** — reszta poczeka na
-> kolejny przebieg. Twardy błąd autoryzacji przerywa przebieg (bez dobijania się do API).
+> naraz wiele wolnych terminów, zostanie **jedna** rezerwacja — ta najwyżej w Twojej
+> kolejności (`auto_register_order`). Reszta poczeka na kolejny przebieg. Twardy błąd autoryzacji przerywa przebieg (bez dobijania się do API).
 > Zacznij od `auto_register_dry_run: true` — wtedy app tylko **waliduje** zapis
 > (`speculative`), niczego nie rezerwując. Dopiero gdy w logach zobaczysz
 > `~ Auto-rejestracja (test, bez rezerwacji): … walidacja OK`, przełącz `dry_run` na `false`.
@@ -161,6 +162,46 @@ z ~1,2 s do ~0,25 s średnio.
 
 Podłoga taktu w zrywie to 0,2 s (poza zrywem obowiązuje minimum 2 s z `intervals`) —
 świadomie niższa, bo zryw trwa kilkanaście sekund, a nie godzinami.
+
+### Salwa (`auto_register_salvo`) — kiedy przegrywasz o ułamek sekundy
+
+Przy zapisie po kolei każda nieudana próba kosztuje ~120 ms, więc czwarty termin
+dostawał strzał dopiero **~350 ms** po pierwszym. Tyle wystarczy, żeby wieczorne
+godziny zdążył zabrać ktoś inny.
+
+Salwa wysyła najbardziej pożądane terminy **naraz**, każdy własnym, wcześniej
+rozgrzanym połączeniem. Zmierzone na żywym API:
+
+| | Czas |
+|---|---|
+| 1 strzał | ~69 ms |
+| 4 strzały po kolei | 275 ms |
+| 4 strzały salwą | **73 ms** |
+
+**Limit nadal obowiązuje.** Jeśli salwa wygra więcej terminów niż `auto_register_max`,
+nadmiarowe są **natychmiast anulowane** — zostaje ten najwyżej w Twojej kolejności.
+Terminy wracają do puli po ułamku sekundy, ale to znaczy, że przy włączonej salwie
+w historii konta mogą pojawiać się anulowania. Jeśli Ci to przeszkadza, ustaw
+`auto_register_salvo: 0` i wróć do zapisu po kolei.
+
+Salwa strzela w pierwsze `auto_register_salvo` terminów według `auto_register_order`;
+reszta (np. bezpieczne 15:00, o które nikt nie walczy) jest próbowana po kolei zaraz
+potem — więc zabezpieczenie „przynajmniej cokolwiek" zostaje.
+
+W Dzienniku:
+
+```
+[11:00:45.000] ⚡ Zryw START — co 0.2s przez 30s
+[11:00:45.252] ⇉ Salwa gotowa: 4 ciepłych połączeń [252 ms]
+[11:00:53.010] = Kort: 11 dostępnych, 5 pasujących do filtra (pobranie 104 ms)
+[11:00:53.015] ⇉ Salwa: 4 prób równolegle (pt 14.08 20:00, 19:00, 18:00, 17:00)
+[11:00:53.140] ! Auto-rejestracja nieudana dla pt 14.08 20:00: … 409 … [125 ms]
+[11:00:53.141] ✓ Auto-rejestracja: pt 14.08 19:00 — accepted [126 ms]
+```
+
+> **Zryw musi startować kilka sekund przed publikacją** — rozgrzanie połączeń salwy
+> zajmuje ~250 ms i dzieje się na jego początku. Domyślne `11:00:45` przy publikacji
+> ~11:00:53 daje ośmiosekundowy zapas, czyli z dużym nadmiarem.
 
 ### Czytanie logu po polowaniu
 

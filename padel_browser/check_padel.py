@@ -14,6 +14,7 @@ Tylko biblioteka standardowa — brak zależności (działa w GitHub Actions bez
 
 import gzip
 import base64
+import concurrent.futures
 import http.client
 import io
 import json
@@ -960,6 +961,9 @@ def register_slot(slot, listing_price, cfg, speculative=False):
         except (urllib.error.URLError, TimeoutError) as e:
             return False, f"Decathlon niedostępny: {e!r}"
     state = doc.get("processState") or doc.get("state") or (doc.get("data") or {}).get("processState")
+    # ID transakcji oddajemy przez cfg (nie przez wynik), żeby nie zmieniać kontraktu
+    # funkcji. Salwa potrzebuje go, by anulować nadmiarowe rezerwacje ponad limit.
+    cfg["transaction_id"] = _ident(_flat(doc).get("id"))
     if speculative:
         return True, f"walidacja OK (speculative{', ' + state if state else ''})"
     if state == "pending-payment":
@@ -1264,6 +1268,76 @@ MIN_INTERVAL_SECONDS = 2         # twarda dolna granica INTERVALS (ochrona przed
 AGGRESSIVE_INTERVAL_SECONDS = 5  # poniżej tego logujemy ostrzeżenie
 
 
+# ------------------------------------------------------------------- salwa
+
+# Zmierzone: 4 strzały po kolei na jednym połączeniu to ~275 ms, te same 4 równolegle
+# na ciepłych połączeniach ~73 ms. Przy kolejności 'latest' strzał w 17:00 szedł
+# dziś jako czwarty, czyli ~350 ms po pierwszym — i w tym oknie ginęły wieczorne
+# godziny. Salwa wysyła najbardziej pożądane terminy naraz.
+SALVO_MAX = 6
+_salvo_pool = None
+
+
+def salvo_pool(size):
+    """Pula TRWAŁYCH wątków — każdy trzyma własne, ciepłe połączenie (threading.local).
+
+    Świeży wątek oznaczałby świeże połączenie i ~160 ms na uzgodnienie TLS, czyli
+    dokładnie to, co salwa ma wyeliminować. Dlatego pula żyje przez cały proces.
+    """
+    global _salvo_pool
+    if _salvo_pool is None:
+        _salvo_pool = concurrent.futures.ThreadPoolExecutor(
+            max_workers=SALVO_MAX, thread_name_prefix="salwa")
+    return _salvo_pool
+
+
+def warm_salvo_connections(size, url):
+    """Rozgrzewa `size` połączeń w RÓŻNYCH wątkach puli (bariera je rozdziela).
+
+    Bez bariery szybkie zadania wykonałyby się na jednym wątku i rozgrzałoby się
+    jedno połączenie zamiast wszystkich.
+    """
+    size = max(1, min(int(size), SALVO_MAX))
+    barrier = threading.Barrier(size, timeout=10)
+
+    def rozgrzej(_):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": UA,
+                                                       "Accept-Encoding": "gzip"})
+            with open_url(req, timeout=15) as resp:
+                resp.read()
+        except Exception:  # noqa: BLE001 - rozgrzewka nie może wywrócić polowania
+            pass
+        try:
+            barrier.wait()   # trzyma wątek zajęty, aż ruszą wszystkie pozostałe
+        except threading.BrokenBarrierError:
+            pass
+
+    pool = salvo_pool(size)
+    list(pool.map(rozgrzej, range(size)))
+
+
+def fire_salvo(targets, listing_price_by_id, cfg, speculative, size):
+    """Wysyła próby rejestracji RÓWNOLEGLE. Zwraca listę wyników w kolejności `targets`.
+
+    Każdy wątek dostaje własną kopię cfg — inaczej odświeżenie tokenu w jednym
+    wątku nadpisywałoby stan pozostałych.
+    """
+    fired = targets[:size]
+
+    def strzal(slot):
+        local = dict(cfg)
+        started = time.monotonic()
+        ok, msg = register_slot(slot, listing_price_by_id.get(slot["id"]), local,
+                                speculative=speculative)
+        return {"slot": slot, "ok": ok, "msg": msg,
+                "ms": int((time.monotonic() - started) * 1000),
+                "tx": local.get("transaction_id") or ""}
+
+    pool = salvo_pool(size)
+    return list(pool.map(strzal, fired))
+
+
 def auto_register_new_slots(slots, listing_price_by_id, cfg, already_registered):
     """Zapisuje na NOWE wolne terminy, od najwcześniejszego, z limitem na przebieg.
 
@@ -1304,7 +1378,64 @@ def auto_register_new_slots(slots, listing_price_by_id, cfg, already_registered)
     cfg["pending_ids"] = []
     done = 0
     skipped = []
-    for slot in todo:
+
+    # SALWA: najbardziej pożądane terminy lecą NARAZ. Po kolei strzał w czwarty termin
+    # szedł ~350 ms po pierwszym — tyle wystarczy, żeby stracić wieczorną godzinę.
+    try:
+        salvo = max(0, min(int(cfg.get("salvo") or 0), SALVO_MAX))
+    except (TypeError, ValueError):
+        salvo = 0
+    queue = list(todo)
+    if salvo > 1 and len(queue) > 1:
+        fired = queue[:salvo]
+        queue = queue[salvo:]
+        opis = ", ".join(fmt_when(s["start_utc"].astimezone(_log_tz()), short=True) for s in fired)
+        log(f"⇉ Salwa: {len(fired)} prób równolegle ({opis})")
+        wins, auth_error = [], None
+        for res in fire_salvo(fired, listing_price_by_id, cfg, speculative, salvo):
+            slot, msg, ms = res["slot"], res["msg"], res["ms"]
+            when = fmt_when(slot["start_utc"].astimezone(_log_tz()), short=True)
+            results[slot["id"]] = (res["ok"], msg)
+            if res["ok"]:
+                wins.append(res)
+            elif any(m in msg for m in AUTH_FAILURE_MARKERS):
+                auth_error = auth_error or msg
+                log(f"! Salwa: {when} — {msg} [{ms} ms]")
+            else:
+                log(f"! Auto-rejestracja nieudana dla {when}: {msg} [{ms} ms]")
+
+        # Zwycięzcy w kolejności preferencji; nadmiar ponad limit oddajemy od razu,
+        # żeby nie blokować terminu innym grającym dłużej niż ułamek sekundy.
+        for res in wins:
+            slot, msg, ms = res["slot"], res["msg"], res["ms"]
+            when = fmt_when(slot["start_utc"].astimezone(_log_tz()), short=True)
+            if done < limit:
+                done += 1
+                if speculative:
+                    log(f"~ Auto-rejestracja (test, bez rezerwacji): {when} — {msg} [{ms} ms]")
+                else:
+                    registered.add(slot["id"])
+                    log(f"✓ Auto-rejestracja: {when} — {msg} [{ms} ms]")
+                continue
+            if speculative or not res["tx"]:
+                results[slot["id"]] = (False, "ponad limit auto_register_max")
+                continue
+            ok_cancel, msg_cancel = cancel_reservation(res["tx"], cfg)
+            registered.add(slot["id"])   # żeby kolejny bieg nie złapał go ponownie
+            results[slot["id"]] = (False, f"ponad limit — anulowano ({msg_cancel})")
+            log(f"↩ Salwa: {when} ponad limit — "
+                f"{'anulowano' if ok_cancel else 'NIE UDAŁO SIĘ anulować'}: {msg_cancel}")
+
+        if auth_error:
+            cfg["auth_error"] = auth_error
+            cfg["pending_ids"] = [s["id"] for s in todo[:limit]]
+            waiting = [fmt_when(s["start_utc"].astimezone(_log_tz()), short=True)
+                       for s in todo[:limit]]
+            log(f"! Auto-rejestracja przerwana ({auth_error}). "
+                f"Zapamiętano do ponowienia: {', '.join(waiting)}.")
+            return results, registered
+
+    for slot in queue:
         sid = slot["id"]
         when = fmt_when(slot["start_utc"].astimezone(_log_tz()), short=True)
         if done >= limit:
@@ -1493,6 +1624,7 @@ def run_once(announce_startup=False, skip_light=False):
         "free_only": not boolish(os.environ.get("AUTO_REGISTER_PAID") or cfg.get("auto_register_paid")),
         "max_per_run": os.environ.get("AUTO_REGISTER_MAX") or cfg.get("auto_register_max") or 1,
         "order": os.environ.get("AUTO_REGISTER_ORDER") or cfg.get("auto_register_order") or "earliest",
+        "salvo": os.environ.get("AUTO_REGISTER_SALVO") or cfg.get("auto_register_salvo") or 0,
     }
     tzname = os.environ.get("TIMEZONE") or cfg.get("timezone") or "Europe/Warsaw"
     tz = ZoneInfo(tzname) if ZoneInfo else timezone.utc
@@ -1711,6 +1843,19 @@ def main():
             log(f"! Błędny BURST '{burst_env}': {e} — zryw wyłączony")
             burst = None
 
+    # Salwa: ile prób rejestracji wysyłać naraz i pod jakim adresem rozgrzewać połączenia.
+    try:
+        salvo_size = max(0, min(int(os.environ.get("AUTO_REGISTER_SALVO") or 0), SALVO_MAX))
+    except ValueError:
+        salvo_size = 0
+    warm_url = ""
+    first_listing = [u for u in re.split(r"[,\s]+", os.environ.get("LISTINGS", "")) if u.strip()]
+    if first_listing:
+        warm_url = LISTING_URL.format(id=listing_id_from_url(first_listing[0]))
+    if salvo_size > 1:
+        log(f"⇉ Salwa włączona: do {salvo_size} prób rejestracji równolegle "
+            f"(nadmiar ponad auto_register_max jest anulowany).")
+
     log(f"Tryb pętli: sprawdzam co {interval}s. Ctrl+C aby zakończyć.")
     first = True  # powiadomienie startowe na pierwszej UDANEJ iteracji procesu
     last_sleep = None
@@ -1726,6 +1871,14 @@ def main():
             if active:
                 burst_window = bounds
                 log(f"⚡ Zryw START — co {burst['interval']}s przez {burst['seconds']}s")
+                # Połączenia salwy stygną między polowaniami (serwer zamyka bezczynne),
+                # więc rozgrzewamy je TERAZ — inaczej pierwszy strzał zapłaciłby ~160 ms
+                # za uzgodnienie TLS, czyli dokładnie to, co salwa ma wyeliminować.
+                if salvo_size > 1 and warm_url:
+                    warmed = time.monotonic()
+                    warm_salvo_connections(salvo_size, warm_url)
+                    log(f"⇉ Salwa gotowa: {salvo_size} ciepłych połączeń "
+                        f"[{int((time.monotonic() - warmed) * 1000)} ms]")
             else:
                 # Ta linia leci dopiero przy NASTĘPNYM sprawdzeniu, czyli sporo po końcu
                 # okna — dlatego podajemy faktyczne granice, a nie sugerujemy „teraz".
