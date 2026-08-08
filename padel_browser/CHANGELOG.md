@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.8.0 — kalendarz usuwa odwołane rezerwacje
+- **Plik `.ics` niesie teraz odwołania.** Dotąd anulowane rezerwacje były z niego
+  wycinane, więc kalendarz nigdy się nie dowiadywał, że termin przepadł — wisiał
+  w nim w nieskończoność. Teraz nadchodzące anulowane trafiają do pliku
+  z `STATUS:CANCELLED`.
+- **`SEQUENCE` rośnie przy odwołaniu** (0 → 1). To nie kosmetyka: kalendarz dopasowuje
+  wydarzenie po `UID` i przyjmuje zmianę wyłącznie wtedy, gdy numer wersji jest wyższy
+  niż zapamiętany. Bez tego plik zostałby po cichu zignorowany.
+- **Anulowana rezerwacja ma w panelu przycisk „Usuń z kalendarza"**, a pojedynczy plik
+  dla niej to `METHOD:CANCEL` — jednoznaczny sygnał iTIP, interpretowany przez
+  aplikacje kalendarza pewniej niż samo `STATUS:CANCELLED`.
+- **Po anulowaniu link pojawia się od razu w komunikacie.** Karta znika z listy
+  (anulowane są domyślnie ukryte), więc bez tego trzeba by go szukać pod przełącznikiem.
+
 ## 0.7.3 — odświeżenie połączeń salwy tuż przed sprintem
 - **Połączenia salwy są rozgrzewane ponownie na starcie sprintu**, a nie tylko na
   starcie zrywu. Między jednym a drugim mija kilkanaście sekund, przez które pula

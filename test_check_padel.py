@@ -2168,6 +2168,30 @@ class ReservationsIcsTest(unittest.TestCase):
         ics = cp.reservations_ics([self.reservation(address="Geodezyjna 76, Warszawa")])
         self.assertIn("LOCATION:Geodezyjna 76\\, Warszawa", ics)
 
+    def test_cancelled_carries_a_higher_sequence(self):
+        """Bez wyższego SEQUENCE kalendarz zignoruje odwołanie i termin w nim zostanie."""
+        czynna = cp.reservations_ics([self.reservation()])
+        odwolana = cp.reservations_ics([self.reservation(cancelled=True)])
+        self.assertIn("SEQUENCE:0", czynna)
+        self.assertIn("SEQUENCE:1", odwolana)
+        self.assertIn("STATUS:CANCELLED", odwolana)
+
+    def test_same_uid_so_the_calendar_matches_the_event(self):
+        """Odwołanie musi mieć TEN SAM UID co pierwotny wpis — po nim kalendarz łączy je w parę."""
+        czynna = cp.reservations_ics([self.reservation()])
+        odwolana = cp.reservations_ics([self.reservation(cancelled=True)], method="CANCEL")
+        uid = "UID:tx-1@padel-watch"
+        self.assertIn(uid, czynna)
+        self.assertIn(uid, odwolana)
+
+    def test_cancel_method_produces_a_cancellation_file(self):
+        odwolana = cp.reservations_ics([self.reservation(cancelled=True)], method="CANCEL")
+        self.assertIn("METHOD:CANCEL", odwolana)
+        self.assertNotIn("METHOD:PUBLISH", odwolana)
+
+    def test_publish_stays_the_default(self):
+        self.assertIn("METHOD:PUBLISH", cp.reservations_ics([self.reservation()]))
+
     def test_reservation_without_date_is_skipped(self):
         ics = cp.reservations_ics([self.reservation(start_utc=None)])
         self.assertNotIn("BEGIN:VEVENT", ics)

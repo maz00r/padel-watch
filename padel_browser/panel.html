@@ -131,6 +131,11 @@ function card(res) {
       + '<a class="btn" href="cal/' + encodeURIComponent(res.id) + '.ics">Dodaj do kalendarza</a>'
       + '<button class="btn danger" onclick="cancelRes(\'' + esc(res.id) + '\')">Anuluj rezerwację</button>'
       + "</div>";
+  } else if (res.cancelled && !res.past) {
+    // Odwołany termin trzeba jeszcze usunąć z kalendarza — sam stamtąd nie zniknie.
+    actions = '<div class="actions">'
+      + '<a class="btn" href="cal/' + encodeURIComponent(res.id) + '.ics">Usuń z kalendarza</a>'
+      + "</div>";
   }
   return '<div class="card' + (res.cancelled || res.past ? " dim" : "") + '">'
     + '<div class="row"><div>'
@@ -189,9 +194,20 @@ function status(text, isError) {
   el.classList.toggle("hide", !text);
 }
 
+// Wariant z linkiem w treści (np. „pobierz odwołanie do kalendarza").
+// Wstawiamy tylko własny, zbudowany tutaj kod — nigdy tekstu z serwera.
+function statusHtml(html) {
+  var el = document.getElementById("status");
+  el.innerHTML = html;
+  el.className = "msg";
+  el.classList.remove("hide");
+}
+
 function load(force) {
   status("Wczytuję rezerwacje…", false);
-  fetch("api/reservations" + (force ? "?refresh=1" : ""), { headers: { Accept: "application/json" } })
+  // Zwracamy obietnicę: po anulowaniu dopisujemy do statusu link do kalendarza,
+  // a musi to nastąpić PO odświeżeniu listy, żeby go nie nadpisało.
+  return fetch("api/reservations" + (force ? "?refresh=1" : ""), { headers: { Accept: "application/json" } })
     .then(function (r) { return r.json(); })
     .then(function (doc) {
       if (!doc.ok) {
@@ -225,7 +241,12 @@ function cancelRes(id) {
     .then(function (r) { return r.json(); })
     .then(function (doc) {
       if (!doc.ok) return status("Nie anulowano: " + doc.message, true);
-      load(true);
+      // Karta zaraz zniknie (anulowane są domyślnie ukryte), więc link do usunięcia
+      // z kalendarza podajemy TERAZ — inaczej trzeba by go szukać pod przełącznikiem.
+      load(true).then(function () {
+        statusHtml('Anulowano. Termin nie zniknie sam z kalendarza — '
+          + '<a href="cal/' + encodeURIComponent(id) + '.ics">pobierz odwołanie</a>.');
+      });
     })
     .catch(function (e) { status("Nie udało się anulować: " + e, true); });
 }
