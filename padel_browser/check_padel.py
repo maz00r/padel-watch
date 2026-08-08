@@ -2096,6 +2096,20 @@ def main():
                 log(f"🏁 Sprint START — {sprint_threads} wątków bez przerw "
                     f"do {sprint_bounds[1]:%H:%M:%S}")
                 in_sprint = True
+                # Salwa strzela dopiero, gdy sprint coś znajdzie — a jej pula leży
+                # bezczynnie od startu zrywu. UWAGA: pomiar pokazał, że połączenie
+                # przeżywa 12 s bezczynności (66–70 ms), więc sama przerwa NIE jest
+                # przyczyną wolnej pierwszej salwy z 8.08 (294 ms wobec 73 ms drugiej;
+                # najpewniej obciążenie serwera w sekundzie publikacji). To jest
+                # tanie ubezpieczenie — gwarantuje ciepłe gniazda tuż przed użyciem,
+                # niezależnie od tego, jak serwer zachowa się pod obciążeniem.
+                # Sprint swojej puli nie potrzebuje: zaraz zacznie pobierać bez przerw.
+                if salvo_size > 1:
+                    odswiezone = time.monotonic()
+                    warm_connections(salvo_pool(salvo_size),
+                                     min(salvo_size, SALVO_MAX), warm_url)
+                    log(f"⇉ Salwa odświeżona przed sprintem "
+                        f"[{int((time.monotonic() - odswiezone) * 1000)} ms]")
             szukanie = time.monotonic()
             deadline = szukanie + max(0.0, (sprint_bounds[1] - now_local).total_seconds())
             prefetched = run_sprint(deadline, sprint_threads, first_listing[0],

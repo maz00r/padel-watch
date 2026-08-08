@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.7.3 — odświeżenie połączeń salwy tuż przed sprintem
+- **Połączenia salwy są rozgrzewane ponownie na starcie sprintu**, a nie tylko na
+  starcie zrywu. Między jednym a drugim mija kilkanaście sekund, przez które pula
+  salwy leży bezczynnie — teraz ma gwarantowanie ciepłe gniazda sekundy przed użyciem.
+- **Uczciwie o powodzie:** w logu z 8.08 pierwsza salwa zajęła 294 ms i 217 ms na
+  próbę, druga (sekundę później) 66–78 ms. Podejrzewałem wystygnięcie połączeń przez
+  9 s przerwy, ale **pomiar to obalił** — gniazdo przeżywa 12 s bezczynności bez
+  straty (66–70 ms). Najpewniejsze wyjaśnienie tamtej różnicy to obciążenie serwera
+  w samej sekundzie publikacji, czyli coś poza naszą kontrolą.
+- Zmiana zostaje jako **tanie ubezpieczenie**: kosztuje ~250 ms na starcie sprintu
+  (2–3 s przed publikacją, więc bez wpływu na wynik) i zdejmuje z równania jedną
+  zmienną, gdyby serwer zachowywał się pod obciążeniem inaczej niż w spokojnym pomiarze.
+
 ## 0.7.2 — pomiar opóźnienia do serwera przy starcie
 - **Dziennik pokazuje przy starcie rundę do Decathlon GO** (mediana z 5 prób, czysty TCP,
   bez dotykania API). Ścieżka rezerwacji ma DWIE takie rundy, więc to najtwardsza
