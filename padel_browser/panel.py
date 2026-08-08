@@ -223,15 +223,24 @@ class Handler(BaseHTTPRequestHandler):
         items, error = reservations()
         if error:
             return self._send(503, f"Nie mogę pobrać rezerwacji: {error}", "text/plain; charset=utf-8")
+        method = "PUBLISH"
         if ident == "all":
-            wanted = [r for r in items if not r["cancelled"] and not r["past"]]
+            # Anulowane NADCHODZĄCE też trafiają do pliku — z STATUS:CANCELLED.
+            # Bez nich kalendarz nigdy by się nie dowiedział, że termin przepadł,
+            # i odwołana rezerwacja wisiałaby w nim w nieskończoność.
+            wanted = [r for r in items if not r["past"]]
             name = "padel-rezerwacje.ics"
         else:
             wanted = [r for r in items if r["id"] == ident]
+            # Pojedyncza anulowana rezerwacja = plik czysto odwołujący. METHOD:CANCEL
+            # to najbardziej jednoznaczny sygnał; STATUS:CANCELLED bywa różnie
+            # interpretowany przez aplikacje kalendarza.
+            if wanted and wanted[0]["cancelled"]:
+                method = "CANCEL"
             name = f"padel-{ident[:8]}.ics"
         if not wanted:
             return self._send(404, "Brak rezerwacji do zapisania", "text/plain; charset=utf-8")
-        body = check_padel.reservations_ics(wanted)
+        body = check_padel.reservations_ics(wanted, method=method)
         self._send(200, body, "text/calendar; charset=utf-8",
                    {"Content-Disposition": f'attachment; filename="{name}"'})
 

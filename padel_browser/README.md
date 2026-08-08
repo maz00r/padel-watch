@@ -130,8 +130,24 @@ Domyślnie widać tylko to, co jeszcze przed Tobą. Dwa przełączniki u góry d
 pamięta Twój wybór.
 
 Przycisk **Wszystkie do kalendarza** pobiera jeden plik ze wszystkimi nadchodzącymi
-terminami. Plik `.ics` jest **zdjęciem stanu z chwili pobrania** — po anulowaniu lub
-nowej rezerwacji pobierz go ponownie (kalendarz się sam nie zaktualizuje).
+terminami — razem z **odwołaniami** tych, które anulowałeś. Po ponownym wczytaniu
+kalendarz doda nowe wydarzenia i usunie odwołane.
+
+### Gdy anulujesz rezerwację
+
+Termin **nie zniknie sam** z kalendarza — trzeba mu o tym powiedzieć. Są dwie drogi:
+
+- zaraz po anulowaniu w panelu pojawia się link **pobierz odwołanie** — jedno kliknięcie
+  i kalendarz usuwa ten jeden wpis,
+- albo pobierz ponownie **Wszystkie do kalendarza** — plik niesie wtedy komplet zmian.
+
+Technicznie: odwołanie ma ten sam `UID` co pierwotny wpis, `STATUS:CANCELLED`
+i podniesiony `SEQUENCE`. Kalendarz łączy je w parę po `UID` i przyjmuje zmianę tylko
+dlatego, że numer wersji jest wyższy. Pojedynczy plik dostaje dodatkowo `METHOD:CANCEL`,
+bo aplikacje kalendarza reagują na niego pewniej niż na sam status.
+
+> Reakcja bywa różna w różnych aplikacjach: część usuwa wpis od razu, część zostawia
+> go przekreślonego jako „odwołany". Obie formy są poprawne.
 
 > **Anulowanie jest nieodwracalne** i wykonuje się wyłącznie po Twoim kliknięciu —
 > dodatek nigdy nie anuluje niczego sam.

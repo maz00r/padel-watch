@@ -1211,12 +1211,21 @@ def _ics_fold(line):
     return "\r\n ".join(out)
 
 
-def reservations_ics(reservations, calname="Padel", alarm_minutes=60):
-    """Kalendarz iCalendar z rezerwacjami — telefon dodaje go jednym dotknięciem."""
+def reservations_ics(reservations, calname="Padel", alarm_minutes=60, method="PUBLISH"):
+    """Kalendarz iCalendar z rezerwacjami — telefon dodaje go jednym dotknięciem.
+
+    Anulowane rezerwacje NIE są pomijane: dostają `STATUS:CANCELLED` i `SEQUENCE:1`.
+    Kalendarz dopasowuje wydarzenie po `UID` i przyjmuje zmianę tylko wtedy, gdy
+    `SEQUENCE` jest wyższy niż zapamiętany — bez tego plik zostałby zignorowany,
+    a odwołany termin wisiałby w kalendarzu w nieskończoność.
+
+    `method="CANCEL"` daje plik czysto odwołujący (iTIP) — to najbardziej
+    jednoznaczny sygnał dla kalendarza, że wydarzenie ma zniknąć.
+    """
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     lines = [
         "BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//padel-watch//Decathlon GO//PL",
-        "CALSCALE:GREGORIAN", "METHOD:PUBLISH",
+        "CALSCALE:GREGORIAN", f"METHOD:{method}",
         f"X-WR-CALNAME:{_ics_escape(calname)}",
     ]
     for res in reservations:
@@ -1238,6 +1247,9 @@ def reservations_ics(reservations, calname="Padel", alarm_minutes=60):
             f"DTEND:{end.astimezone(timezone.utc):%Y%m%dT%H%M%SZ}",
             f"SUMMARY:{_ics_escape('🎾 ' + (res.get('title') or 'Padel'))}",
             f"STATUS:{'CANCELLED' if res.get('cancelled') else 'CONFIRMED'}",
+            # Numer wersji wydarzenia: odwołanie musi być WYŻSZE niż pierwotny wpis,
+            # inaczej kalendarz uzna plik za nieaktualny i nic nie zmieni.
+            f"SEQUENCE:{1 if res.get('cancelled') or method == 'CANCEL' else 0}",
         ]
         if res.get("address"):
             lines.append(f"LOCATION:{_ics_escape(res['address'])}")
