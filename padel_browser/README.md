@@ -54,7 +54,7 @@ przechodzisz normalne logowanie, łącznie z kodem z maila.
 | `auto_register_paid` | pozwól tworzyć transakcje także dla płatnych terminów; płatność nadal trzeba dokończyć ręcznie | `false` |
 | `auto_register_max` | ile terminów maksymalnie zapisać w jednym przebiegu (0–10); `0` = nic | `1` |
 | `auto_register_order` | kolejność prób: `earliest` (od najwcześniejszego) lub `latest` (od najpóźniejszego) | `latest` |
-| `auto_register_salvo` | ile prób rejestracji wysyłać **równolegle** (0–6); `0`/`1` = po kolei, jak dawniej | `4` |
+| `auto_register_salvo` | ile prób rejestracji wysyłać **równolegle** (0–6); `0`/`1` = po kolei, jak dawniej | `6` |
 | `test_token` | jednorazowy test poświadczeń przy starcie (nic nie rezerwuje) | `false` |
 | `clear_state` | jednorazowe czyszczenie stanu: `registered` lub `all`; puste = nic nie rób | `` |
 
@@ -211,11 +211,30 @@ Salwa strzela w pierwsze `auto_register_salvo` terminów według `auto_register_
 reszta (np. bezpieczne 15:00, o które nikt nie walczy) jest próbowana po kolei zaraz
 potem — więc zabezpieczenie „przynajmniej cokolwiek" zostaje.
 
+**Także pojedynczy termin idzie przez pulę salwy.** Publikacja przychodzi partiami
+i taka partia potrafi mieć jeden termin — a wątek główny nie jest rozgrzewany.
+9.08 kosztowało to termin: samotne 19:00 dostało strzał w 319 ms, podczas gdy strzały
+z puli w tej samej sekundzie schodziły w 57–84 ms.
+
+#### Rozgrzewka jest uwierzytelniona
+
+Rozgrzewka wysyła na każdym wątku salwy nie tylko zwykły GET, ale też jeden
+**uwierzytelniony POST** (`users.getMe` — niczego nie zmienia na koncie). Powód jest
+zmierzony: pierwsza rejestracja po publikacji kosztowała ~300 ms (8.08: 294 ms,
+9.08: 319 ms), a każda następna w tej samej sekundzie 57–84 ms — mimo że połączenia
+były świeżo rozgrzane. Jedyne, czym rejestracja różni się od rozgrzewkowego GET-a,
+to `POST` i nagłówek `Authorization`, więc prawdopodobnie brama waliduje token przy
+pierwszym użyciu. Teraz płacimy to poza ścieżką krytyczną.
+
+Czas tej rozgrzewki widać w Dzienniku (`uwierzytelnienie 70–310 ms`) — to celowo
+pomiar powyższej hipotezy, a nie ozdobnik. Jeśli rozgrzewka będzie droga, a pierwszy
+strzał spadnie do ~70 ms, hipoteza się broni.
+
 W Dzienniku:
 
 ```
 [11:00:45.000] ⚡ Zryw START — co 0.2s przez 30s
-[11:00:45.252] ⇉ Salwa gotowa: 4 ciepłych połączeń [252 ms]
+[11:00:45.252] ⇉ Połączenia gotowe (salwa 6, sprint 3) [252 ms], uwierzytelnienie 70–310 ms
 [11:00:53.010] = Kort: 11 dostępnych, 5 pasujących do filtra (pobranie 104 ms)
 [11:00:53.015] ⇉ Salwa: 4 prób równolegle (pt 14.08 20:00, 19:00, 18:00, 17:00)
 [11:00:53.140] ! Auto-rejestracja nieudana dla pt 14.08 20:00: … 409 … [125 ms]
