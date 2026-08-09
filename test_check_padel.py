@@ -1394,6 +1394,35 @@ class SalvoTest(SalvoHelpers, unittest.TestCase):
         self.assertEqual(len(self.threads), 1)   # bez salwy wszystko w wątku głównym
 
 
+class SingleSlotSalvoTest(SalvoHelpers, unittest.TestCase):
+    """REGRESJA 9.08: samotny termin szedł z wątku GŁÓWNEGO, poza rozgrzaną pulą.
+
+    Tego dnia 19:00 przyszedł w osobnej partii, sam. Strzał kosztował 319 ms — wobec
+    57–84 ms strzałów z puli salwy w tej samej sekundzie — i termin przepadł na 409.
+    """
+
+    def test_single_slot_uses_salvo_pool(self):
+        res, _, out = self.run_with({19: (True, "accepted", "tx19")},
+                                    slots=self.slots(19))
+        self.assertTrue(res["s19"][0])
+        self.assertEqual(len(self.threads), 1)
+        self.assertTrue(next(iter(self.threads)).startswith("salwa"),
+                        f"strzał poszedł spoza puli salwy: {self.threads}")
+
+    def test_single_slot_log_is_not_called_a_salvo(self):
+        """„Salwa: 1 prób równolegle" to bełkot — jeden strzał to nie salwa."""
+        _, _, out = self.run_with({19: (True, "accepted", "tx19")}, slots=self.slots(19))
+        self.assertIn("Strzał z rozgrzanego wątku", out)
+        self.assertNotIn("1 prób równolegle", out)
+
+    def test_salvo_disabled_still_runs_sequentially(self):
+        """Przy wyłączonej salwie nic się nie zmienia — strzał z wątku wywołującego."""
+        res, _, _ = self.run_with({19: (True, "accepted", "tx19")},
+                                  cfg=self.cfg(salvo=0), slots=self.slots(19))
+        self.assertTrue(res["s19"][0])
+        self.assertEqual(self.threads, {threading.current_thread().name})
+
+
 class SalvoRobustnessTest(SalvoHelpers, unittest.TestCase):
     """Awarie w trakcie salwy nie mogą zostawić zajętego kortu bez śladu."""
 
@@ -1715,6 +1744,79 @@ class WarmSalvoTest(unittest.TestCase):
         with mock.patch.object(cp, "open_url", side_effect=fake_open):
             cp.warm_connections(cp.salvo_pool(4), 4, "https://go.decathlon.pl/api/listing/X")
         self.assertEqual(len(seen), 4, f"rozgrzano tylko {len(seen)} połączeń")
+
+    def test_authenticated_warmup_runs_on_every_thread(self):
+        """Rozgrzewka uwierzytelniona musi objąć KAŻDY wątek salwy.
+
+        Sedno zmiany z 9.08: sam GET nie usunął kosztu pierwszego strzału (319 ms wobec
+        57–84 ms następnych), a jedyna różnica to POST z nagłówkiem Authorization.
+        """
+        wolny = jwt_with_exp(int(datetime.now(timezone.utc).timestamp()) + 3600)
+        watki = set()
+
+        def fake_rpc(method, token, payload, extend=None, timeout=30):
+            watki.add(threading.current_thread().name)
+            self.assertEqual(method, "users.getMe")
+            self.assertEqual(payload, {})   # bez skutków ubocznych na koncie
+            return {}
+
+        with mock.patch.object(cp, "open_url", return_value=io.BytesIO(b"{}")), \
+                mock.patch.object(cp, "decathlon_rpc", side_effect=fake_rpc):
+            czasy = cp.warm_connections(cp.salvo_pool(4), 4,
+                                        "https://go.decathlon.pl/api/listing/X",
+                                        auth_cfg={"token": wolny})
+        self.assertEqual(len(watki), 4)
+        self.assertEqual(len(czasy), 4)
+
+    def test_expired_token_never_triggers_refresh(self):
+        """Wygasły token = brak rozgrzewki, NIE odnowienie.
+
+        Refresh token bywa jednorazowy — rozgrzewka spaliłaby go tuż przed rejestracją.
+        """
+        martwy = jwt_with_exp(int(datetime.now(timezone.utc).timestamp()) - 60)
+        with mock.patch.object(cp, "decathlon_rpc") as rpc, \
+                mock.patch.object(cp, "refresh_decathlon_token") as refresh:
+            self.assertIsNone(cp.warm_auth({"token": martwy}))
+            self.assertIsNone(cp.warm_auth({"token": ""}))
+        rpc.assert_not_called()
+        refresh.assert_not_called()
+
+    def test_rpc_failure_is_swallowed(self):
+        """Nieudana rozgrzewka nie może wywrócić polowania."""
+        wolny = jwt_with_exp(int(datetime.now(timezone.utc).timestamp()) + 3600)
+        with mock.patch.object(cp, "decathlon_rpc", side_effect=OSError("padło")):
+            self.assertIsNone(cp.warm_auth({"token": wolny}))
+
+    def test_uses_short_timeout(self):
+        """Rozgrzewka blokuje start sprintu — domyślne 30 s zjadłoby okno publikacji."""
+        wolny = jwt_with_exp(int(datetime.now(timezone.utc).timestamp()) + 3600)
+        with mock.patch.object(cp, "decathlon_rpc", return_value={}) as rpc:
+            cp.warm_auth({"token": wolny})
+        self.assertLessEqual(rpc.call_args.kwargs["timeout"], 5)
+
+    def test_no_auth_warmup_without_auto_register(self):
+        """Bez auto-rejestracji nie ma czego rozgrzewać — to byłoby zbędne zapytanie."""
+        with mock.patch.object(cp, "load_config", return_value={"auto_register": False}), \
+                mock.patch.dict(os.environ, {"AUTO_REGISTER": ""}, clear=False):
+            self.assertIsNone(cp.warm_auth_cfg())
+
+    def test_summary_line_reports_range(self):
+        self.assertEqual(cp.fmt_auth_warm(None), "")   # nie prosiliśmy — cisza
+        self.assertIn("70–310 ms", cp.fmt_auth_warm([120, 310, 70]))
+
+    def test_silent_warmup_failure_is_visible(self):
+        """Cicha awaria rozgrzewki nie może wyglądać jak wyłączona opcja.
+
+        Bare `except` w `warm_auth` połyka także błąd programistyczny (tak wyszło
+        przy pisaniu tych testów) — bez tego rozróżnienia log nie powiedziałby nic.
+        """
+        self.assertIn("NIEUDANE", cp.fmt_auth_warm([]))
+        wolny = jwt_with_exp(int(datetime.now(timezone.utc).timestamp()) + 3600)
+        with mock.patch.object(cp, "open_url", return_value=io.BytesIO(b"{}")), \
+                mock.patch.object(cp, "decathlon_rpc", side_effect=OSError("padło")):
+            czasy = cp.warm_connections(cp.salvo_pool(4), 4, "https://x/y",
+                                        auth_cfg={"token": wolny})
+        self.assertEqual(czasy, [])   # lista, nie None: prosiliśmy i nie wyszło
 
 
 class LogPrecisionTest(unittest.TestCase):

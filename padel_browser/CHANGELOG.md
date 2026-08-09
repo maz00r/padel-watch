@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.9.0 — rozgrzewka uwierzytelniona, salwa także dla jednego terminu
+- **Pojedynczy termin idzie teraz przez pulę salwy.** Dotąd salwa włączała się dopiero
+  przy dwóch terminach, więc samotny strzał leciał z wątku głównego — poza pulą, którą
+  rozgrzewamy tuż przed sprintem. 9.08 kosztowało to termin: 19:00 przyszedł w osobnej
+  partii, sam, strzał zajął **319 ms** wobec 57–84 ms strzałów z puli w tej samej
+  sekundzie, i termin przepadł na 409.
+- **Rozgrzewka wysyła też uwierzytelniony POST** (`users.getMe` — bez skutków ubocznych
+  na koncie). Powód: hipoteza „wystygnięte gniazda" upadła po raz drugi. 9.08
+  połączenia salwy odświeżono 2,5 s przed strzałem, a pierwsza rejestracja i tak
+  zapłaciła nadmiar (8.08 identycznie: 294 ms wobec 73 ms). Skoro gniazdo było ciepłe,
+  koszt siedzi gdzie indziej — jedyne, czym rejestracja różni się od rozgrzewkowego
+  GET-a, to metoda POST i nagłówek `Authorization`. Jeśli brama waliduje JWT przy
+  pierwszym użyciu, płacimy to teraz **poza ścieżką krytyczną**.
+- **Czas tej rozgrzewki trafia do Dziennika** (`uwierzytelnienie 70–310 ms`). To jest
+  pomiar powyższej hipotezy, nie ozdobnik: jeśli rozgrzewka jest droga, a pierwszy
+  strzał spadnie do ~70 ms — hipoteza się broni. Jeśli rozgrzewka jest szybka,
+  a strzał dalej wolny — upada i trzeba szukać dalej.
+- **Wygasły token nie uruchamia odnowienia w rozgrzewce.** Refresh token bywa
+  jednorazowy, więc rozgrzewka spaliłaby go tuż przed rejestracją. Martwy token
+  to po prostu brak rozgrzewki.
+- **Rozgrzewka ma własny, krótki limit czasu (3 s)** zamiast domyślnych 30 s. Stoi
+  tuż przed startem sprintu i go blokuje — zawieszone zapytanie zjadłoby całą sekundę
+  publikacji, a przecież bez rozgrzewki polujemy dalej.
+- **Nieudana rozgrzewka jest widoczna w Dzienniku** (`uwierzytelnienie NIEUDANE`).
+  Bez tego cicha awaria wyglądałaby dokładnie tak samo jak wyłączona opcja — czyli
+  jak nic.
+- **`auto_register_salvo` domyślnie 6** zamiast 4. 9.08 publikacja przyniosła 6 terminów
+  naraz, więc dwa ostatnie poszły ogonem sekwencyjnym, ~120 ms później.
+
 ## 0.8.0 — kalendarz usuwa odwołane rezerwacje
 - **Plik `.ics` niesie teraz odwołania.** Dotąd anulowane rezerwacje były z niego
   wycinane, więc kalendarz nigdy się nie dowiadywał, że termin przepadł — wisiał

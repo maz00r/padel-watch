@@ -662,6 +662,21 @@ def newer_decathlon_token(config_token, state_token):
     return state_token if jwt_expiry(state_token) > jwt_expiry(config_token) else config_token
 
 
+def resolve_decathlon_token(cfg, state_doc):
+    """Token z trzech źródeł: przeglądarka (plik), opcje dodatku, zapamiętany stan.
+
+    Wygrywa ten o NAJDALSZYM exp — nie kolejność. Dzięki temu ręcznie wklejony świeży
+    token działa nawet, gdy plik z przeglądarki trzyma stary (np. sesja padła), i odwrotnie.
+    """
+    return newer_decathlon_token(
+        newer_decathlon_token(
+            token_from_file(),
+            os.environ.get("DECATHLON_TOKEN") or cfg.get("decathlon_token") or "",
+        ),
+        (state_doc or {}).get("decathlon_jwt") or "",
+    )
+
+
 def refresh_decathlon_token(token, cookie=None, refresh_token=None):
     """Pozyskuje świeży JWT z /api/auth/refresh — dokładnie jak aplikacja Decathlon GO.
 
@@ -856,7 +871,7 @@ def wait_for_fresher_token(token, attempts=TOKEN_WAIT_ATTEMPTS, delay=TOKEN_WAIT
     return ""
 
 
-def decathlon_rpc(method, token, payload, extend=None):
+def decathlon_rpc(method, token, payload, extend=None, timeout=30):
     """Wywołuje endpoint RPC Decathlon GO: POST /api/v2/{method} z tokenem sesji."""
     req = urllib.request.Request(
         f"{DECATHLON_API_URL}/v2/{method}",
@@ -871,7 +886,7 @@ def decathlon_rpc(method, token, payload, extend=None):
         method="POST",
     )
     # Podtrzymane połączenie: to jest TO zapytanie, które wygrywa albo przegrywa termin.
-    with open_url(req, timeout=30) as resp:
+    with open_url(req, timeout=timeout) as resp:
         raw = resp.read()
         if resp.headers.get("Content-Encoding") == "gzip":
             raw = gzip.decompress(raw)
@@ -1304,16 +1319,78 @@ def salvo_pool(size):
     return _salvo_pool
 
 
-def warm_connections(pool, size, url):
+# Rozgrzewka blokuje start sprintu, a sprint ma sekundy — nie minuty.
+WARM_AUTH_TIMEOUT = 3
+
+
+def warm_auth(cfg):
+    """Uwierzytelniony POST bez skutków ubocznych. Zwraca czas w ms albo None.
+
+    ZMIERZONE DWA RAZY: pierwsza rejestracja po publikacji kosztuje ~300 ms
+    (8.08: 294 ms, 9.08: 319 ms), a każda następna w tej samej sekundzie 57–84 ms.
+    Rozgrzewka samym GET-em tego NIE usunęła — 9.08 połączenia salwy odświeżono
+    2,5 s przed strzałem i pierwszy strzał i tak zapłacił nadmiar. Skoro gniazdo
+    było ciepłe, koszt siedzi gdzieś indziej: jedyne, czym rejestracja różni się
+    od rozgrzewkowego GET-a, to metoda POST i nagłówek Authorization. Stąd
+    hipoteza — brama waliduje JWT przy pierwszym użyciu i cache'uje wynik na krótko.
+
+    `users.getMe` ma ten sam kształt co rejestracja (POST /api/v2/*, Bearer)
+    i niczego nie zmienia po stronie konta. Jeśli hipoteza jest prawdziwa, koszt
+    płacimy TUTAJ, poza ścieżką krytyczną. Jeśli nie — czas w logu to pokaże
+    (rozgrzewka też będzie szybka, a pierwszy strzał dalej wolny) i hipoteza upada.
+
+    Nigdy nie podnosi wyjątku: rozgrzewka nie może wywrócić polowania.
+    """
+    # Świadomie NIE wołamy ensure_decathlon_token: przy wygasłym tokenie próbowałby
+    # odnowienia, a refresh token bywa jednorazowy — rozgrzewka spaliłaby go tuż
+    # przed rejestracją. Martwy token to po prostu brak rozgrzewki.
+    token = clean_decathlon_token(cfg.get("token"))
+    exp = jwt_expiry(token) if token else 0
+    if not token or (exp > 0 and exp <= time.time()):
+        return None
+    started = time.monotonic()
+    try:
+        # KRÓTKI limit, nie domyślne 30 s: ta rozgrzewka stoi tuż przed sprintem
+        # i blokuje jego start. Zawieszone zapytanie zjadłoby całą sekundę publikacji,
+        # a przecież rozgrzewka jest tylko usprawnieniem — bez niej polujemy dalej.
+        decathlon_rpc("users.getMe", token, {}, timeout=WARM_AUTH_TIMEOUT)
+    except Exception:  # noqa: BLE001 - brak rozgrzewki jest gorszy niż jej brak z hukiem
+        return None
+    return int((time.monotonic() - started) * 1000)
+
+
+def warm_auth_cfg():
+    """Świeży, minimalny cfg dla `warm_auth` — albo None, gdy nie ma czego rozgrzewać.
+
+    Budowany PRZY KAŻDYM użyciu, nie raz przy starcie procesu: JWT rotuje co ~15 min,
+    więc zapamiętany byłby dawno martwy. Bez auto-rejestracji nie strzelamy, więc
+    uwierzytelniona rozgrzewka byłaby tylko zbędnym zapytaniem.
+    """
+    cfg = load_config(quiet=True)
+    if not boolish(os.environ.get("AUTO_REGISTER") or cfg.get("auto_register")):
+        return None
+    return {"token": resolve_decathlon_token(cfg, load_state_doc())}
+
+
+def warm_connections(pool, size, url, auth_cfg=None):
     """Rozgrzewa `size` połączeń w RÓŻNYCH wątkach podanej puli (bariera je rozdziela).
 
     Bez bariery szybkie zadania wykonałyby się na jednym wątku i rozgrzałoby się
     jedno połączenie zamiast wszystkich. Dotyczy tak samo salwy, jak i sprintu:
     kilka równoczesnych uzgodnień TLS na zimno potrafi zająć sekundy, a sprint
     ma do dyspozycji tylko kilka sekund wokół publikacji.
+
+    `auth_cfg` (tylko dla puli, która STRZELA — sprint robi same GET-y) dokłada
+    uwierzytelniony POST; patrz `warm_auth`.
+
+    Zwraca listę czasów tego POST-a w ms, a None — gdy o niego nie proszono. To NIE
+    jest to samo co pusta lista: pusta znaczy „prosiłem i nie wyszło", i ma prawo
+    być widoczna w logu. Inaczej cicha awaria rozgrzewki wyglądałaby dokładnie jak
+    jej wyłączenie.
     """
     size = max(1, size)
     barrier = threading.Barrier(size, timeout=10)
+    czasy_auth = [] if auth_cfg is not None else None
 
     def rozgrzej(_):
         try:
@@ -1323,12 +1400,31 @@ def warm_connections(pool, size, url):
                 resp.read()
         except Exception:  # noqa: BLE001 - rozgrzewka nie może wywrócić polowania
             pass
+        if auth_cfg is not None:
+            ms = warm_auth(auth_cfg)
+            if ms is not None:
+                czasy_auth.append(ms)   # append jest atomowy — bez zamka
         try:
             barrier.wait()   # trzyma wątek zajęty, aż ruszą wszystkie pozostałe
         except threading.BrokenBarrierError:
             pass
 
     list(pool.map(rozgrzej, range(size)))
+    return czasy_auth
+
+
+def fmt_auth_warm(czasy):
+    """Dopisek do linii rozgrzewki. Te liczby są POMIAREM hipotezy z `warm_auth`:
+    jeśli uwierzytelniony POST kosztuje tu ~300 ms, a pierwszy strzał spadnie do ~70 ms,
+    hipoteza się broni. Jeśli rozgrzewka jest szybka, a strzał dalej wolny — upada.
+
+    None = nie prosiliśmy. Pusta lista = prosiliśmy i NIE wyszło — to musi być widać,
+    bo inaczej cicha awaria wygląda jak wyłączona opcja."""
+    if czasy is None:
+        return ""
+    if not czasy:
+        return ", uwierzytelnienie NIEUDANE (token? sieć?)"
+    return f", uwierzytelnienie {min(czasy)}–{max(czasy)} ms"
 
 
 def fire_salvo(targets, listing_price_by_id, cfg, speculative, size):
@@ -1547,11 +1643,15 @@ def auto_register_new_slots(slots, listing_price_by_id, cfg, already_registered)
     except (TypeError, ValueError):
         salvo = 0
     queue = list(todo)
-    if salvo > 1 and len(queue) > 1:
+    # Także POJEDYNCZY termin idzie przez pulę salwy. Jej wątki są rozgrzane tuż przed
+    # sprintem, a wątek główny nie — i to na nim 9.08 poszedł samotny strzał w 19:00:
+    # 319 ms wobec 57–84 ms strzałów z puli w tej samej sekundzie. Termin przepadł.
+    if salvo > 1 and queue:
         fired = queue[:salvo]
         queue = queue[salvo:]
         opis = ", ".join(fmt_when(s["start_utc"].astimezone(_log_tz()), short=True) for s in fired)
-        log(f"⇉ Salwa: {len(fired)} prób równolegle ({opis})")
+        log(f"⇉ Salwa: {len(fired)} prób równolegle ({opis})" if len(fired) > 1
+            else f"⇉ Strzał z rozgrzanego wątku ({opis})")
         wins, auth_error = [], None
         wyniki = fire_salvo(fired, listing_price_by_id, cfg, speculative, salvo)
         # Któryś wątek mógł odnowić token po HTTP 401 (pracował na kopii cfg).
@@ -1781,17 +1881,7 @@ def run_once(announce_startup=False, skip_light=False, prefetched=None):
     reg_cfg = {
         "enabled": boolish(os.environ.get("AUTO_REGISTER") or cfg.get("auto_register")),
         "speculative": boolish(os.environ.get("AUTO_REGISTER_DRY_RUN") or cfg.get("auto_register_dry_run")),
-        # Źródła tokenu: przeglądarka (plik) / ręcznie wklejony w opcjach / zapamiętany
-        # w stanie. Wygrywa ten o NAJDALSZYM exp — nie kolejność. Dzięki temu ręcznie
-        # wklejony świeży token działa nawet, gdy plik z przeglądarki trzyma stary
-        # (np. sesja padła), i odwrotnie.
-        "token": newer_decathlon_token(
-            newer_decathlon_token(
-                token_from_file(),
-                os.environ.get("DECATHLON_TOKEN") or cfg.get("decathlon_token") or "",
-            ),
-            (state_doc or {}).get("decathlon_jwt") or "",
-        ),
+        "token": resolve_decathlon_token(cfg, state_doc),
         "refresh_cookie": os.environ.get("DECATHLON_COOKIE") or cfg.get("decathlon_cookie") or "",
         # rt bywa zwracany przez serwer przy odświeżaniu i zapisywany w stanie (rotacja).
         "refresh_token": (state_doc or {}).get("decathlon_rt") or "",
@@ -2076,16 +2166,19 @@ def main():
                 # za uzgodnienie TLS, czyli dokładnie to, co salwa ma wyeliminować.
                 if warm_url and (salvo_size > 1 or sprint):
                     warmed = time.monotonic()
+                    auth_ms = None
                     if salvo_size > 1:
-                        warm_connections(salvo_pool(salvo_size),
-                                         min(salvo_size, SALVO_MAX), warm_url)
+                        auth_ms = warm_connections(salvo_pool(salvo_size),
+                                                   min(salvo_size, SALVO_MAX), warm_url,
+                                                   auth_cfg=warm_auth_cfg())
                     # Sprint ma WŁASNĄ pulę, więc jej połączenia trzeba rozgrzać osobno —
                     # inaczej pierwsze sekundy sprintu zjadłoby uzgadnianie TLS.
+                    # Uwierzytelnionej rozgrzewki NIE potrzebuje: robi same GET-y.
                     if sprint:
                         warm_connections(sprint_pool(), sprint_threads, warm_url)
                     log(f"⇉ Połączenia gotowe (salwa {salvo_size if salvo_size > 1 else 0}, "
                         f"sprint {sprint_threads if sprint else 0}) "
-                        f"[{int((time.monotonic() - warmed) * 1000)} ms]")
+                        f"[{int((time.monotonic() - warmed) * 1000)} ms]{fmt_auth_warm(auth_ms)}")
             else:
                 # Ta linia leci dopiero przy NASTĘPNYM sprawdzeniu, czyli sporo po końcu
                 # okna — dlatego podajemy faktyczne granice, a nie sugerujemy „teraz".
@@ -2109,19 +2202,22 @@ def main():
                     f"do {sprint_bounds[1]:%H:%M:%S}")
                 in_sprint = True
                 # Salwa strzela dopiero, gdy sprint coś znajdzie — a jej pula leży
-                # bezczynnie od startu zrywu. UWAGA: pomiar pokazał, że połączenie
-                # przeżywa 12 s bezczynności (66–70 ms), więc sama przerwa NIE jest
-                # przyczyną wolnej pierwszej salwy z 8.08 (294 ms wobec 73 ms drugiej;
-                # najpewniej obciążenie serwera w sekundzie publikacji). To jest
-                # tanie ubezpieczenie — gwarantuje ciepłe gniazda tuż przed użyciem,
-                # niezależnie od tego, jak serwer zachowa się pod obciążeniem.
+                # bezczynnie od startu zrywu. UWAGA: „wystygnięte gniazda" jako
+                # wyjaśnienie wolnego PIERWSZEGO strzału zostały obalone DWA RAZY:
+                # (1) pomiarem — połączenie przeżywa 12 s bezczynności (66–70 ms),
+                # (2) produkcyjnie 9.08 — połączenia odświeżono tu, 2,5 s przed
+                # strzałem, a pierwsza rejestracja i tak kosztowała 319 ms wobec
+                # 57–84 ms następnych (8.08 identycznie: 294 ms wobec 73 ms).
+                # Dlatego rozgrzewka jest teraz UWIERZYTELNIONA — patrz `warm_auth`.
                 # Sprint swojej puli nie potrzebuje: zaraz zacznie pobierać bez przerw.
                 if salvo_size > 1:
                     odswiezone = time.monotonic()
-                    warm_connections(salvo_pool(salvo_size),
-                                     min(salvo_size, SALVO_MAX), warm_url)
+                    auth_ms = warm_connections(salvo_pool(salvo_size),
+                                               min(salvo_size, SALVO_MAX), warm_url,
+                                               auth_cfg=warm_auth_cfg())
                     log(f"⇉ Salwa odświeżona przed sprintem "
-                        f"[{int((time.monotonic() - odswiezone) * 1000)} ms]")
+                        f"[{int((time.monotonic() - odswiezone) * 1000)} ms]"
+                        f"{fmt_auth_warm(auth_ms)}")
             szukanie = time.monotonic()
             deadline = szukanie + max(0.0, (sprint_bounds[1] - now_local).total_seconds())
             prefetched = run_sprint(deadline, sprint_threads, first_listing[0],
