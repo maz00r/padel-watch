@@ -57,6 +57,16 @@ PL_DAYS = ["poniedziałek", "wtorek", "środa", "czwartek", "piątek", "sobota",
 PL_DAYS_SHORT = ["pon", "wt", "śr", "czw", "pt", "sob", "niedz"]
 
 
+def plural(n, one, few, many):
+    """Polski liczebnik: 1 / 2-4 / reszta, z wyjątkiem nastek (12-14 idą jak 'reszta')."""
+    last, teens = n % 10, n % 100
+    if n == 1:
+        return one
+    if 2 <= last <= 4 and not 12 <= teens <= 14:
+        return few
+    return many
+
+
 def fmt_when(dt, short=False):
     days = PL_DAYS_SHORT if short else PL_DAYS
     return f"{days[dt.weekday()]} {dt:%d.%m %H:%M}"
@@ -375,8 +385,13 @@ def fetch_listing(listing_id):
 
 # ------------------------------------------------------------------ core logic
 
-def free_slots(doc, listing_id, now_utc):
-    """Zwraca listę słowników opisujących wolne terminy (przyszłe, niezarezerwowane)."""
+def parse_slots(doc, listing_id, now_utc, only_free=True):
+    """Terminy z dokumentu API. `only_free=False` zachowuje także ZAJĘTE.
+
+    Zajęte są potrzebne, żeby dało się policzyć CAŁY grafik dnia. Bez nich log widział
+    wyłącznie to, co jeszcze wolne, i nie sposób było odpowiedzieć na pytanie „czy ktoś
+    zdążył przed nami" — brakujące godziny wyglądały tak samo jak nigdy niewystawione.
+    """
     out = []
     for item in doc.get("included", []):
         if item.get("type") != "listing-date":
@@ -388,7 +403,7 @@ def free_slots(doc, listing_id, now_utc):
         if limit is None:  # bez limitu miejsc — pomijamy (nie da się ocenić)
             continue
         count = a.get("participantsCount") or 0
-        if count >= limit:
+        if only_free and count >= limit:
             continue
         start = parse_dt(a.get("date"))
         if start is None or start <= now_utc:
@@ -409,6 +424,44 @@ def free_slots(doc, listing_id, now_utc):
             }
         )
     return out
+
+
+def free_slots(doc, listing_id, now_utc):
+    """Wolne terminy (przyszłe, niezarezerwowane)."""
+    return parse_slots(doc, listing_id, now_utc, only_free=True)
+
+
+def day_grid(doc, listing_id, now_utc, day_local, tz):
+    """(wolne, wszystkie) w grafiku danego dnia lokalnego.
+
+    W momencie publikacji różnica między tymi liczbami to terminy zajęte, ZANIM
+    zdążyliśmy zobaczyć grafik — jedyny sposób, żeby to w ogóle zmierzyć. Bez tego
+    „nie było takiej godziny" i „ktoś ją zabrał przed nami" wyglądają identycznie.
+    """
+    wszystkie = [s for s in parse_slots(doc, listing_id, now_utc, only_free=False)
+                 if s["start_utc"].astimezone(tz).date() == day_local]
+    return sum(1 for s in wszystkie if s["count"] < s["limit"]), len(wszystkie)
+
+
+def log_day_grids(new_slots, docs_by_lid, now_utc, tz):
+    """Loguje, ile terminów danego dnia jest wolnych, a ile liczy CAŁY grafik.
+
+    Wołane w chwili wykrycia nowych terminów, czyli — w dniu publikacji — przy
+    pierwszym spojrzeniu na świeży grafik. Różnica to terminy, których nigdy nie
+    zobaczyliśmy jako wolne. Bez tej liczby brakująca godzina wygląda tak samo,
+    niezależnie od tego, czy nikt jej nie wystawił, czy ktoś był szybszy od nas.
+    """
+    dni = {(s["listing_id"], s["start_utc"].astimezone(tz).date()) for s in new_slots}
+    for lid, dzien in sorted(dni, key=lambda k: (k[1], k[0])):
+        doc = docs_by_lid.get(lid)
+        if doc is None:
+            continue
+        wolne, wszystkie = day_grid(doc, lid, now_utc, dzien, tz)
+        zajete = wszystkie - wolne
+        log(f"📋 Grafik na {PL_DAYS_SHORT[dzien.weekday()]} {dzien:%d.%m}: "
+            f"{wolne} {plural(wolne, 'wolny', 'wolne', 'wolnych')} z {wszystkie}"
+            + (f" — {zajete} {plural(zajete, 'zajęty', 'zajęte', 'zajętych')}, "
+               f"zanim zobaczyliśmy grafik" if zajete else ""))
 
 
 def passes_filter(slot, filters, tz):
@@ -871,7 +924,7 @@ def wait_for_fresher_token(token, attempts=TOKEN_WAIT_ATTEMPTS, delay=TOKEN_WAIT
     return ""
 
 
-def decathlon_rpc(method, token, payload, extend=None, timeout=30):
+def decathlon_rpc(method, token, payload, extend=None):
     """Wywołuje endpoint RPC Decathlon GO: POST /api/v2/{method} z tokenem sesji."""
     req = urllib.request.Request(
         f"{DECATHLON_API_URL}/v2/{method}",
@@ -886,7 +939,7 @@ def decathlon_rpc(method, token, payload, extend=None, timeout=30):
         method="POST",
     )
     # Podtrzymane połączenie: to jest TO zapytanie, które wygrywa albo przegrywa termin.
-    with open_url(req, timeout=timeout) as resp:
+    with open_url(req, timeout=30) as resp:
         raw = resp.read()
         if resp.headers.get("Content-Encoding") == "gzip":
             raw = gzip.decompress(raw)
@@ -1319,60 +1372,7 @@ def salvo_pool(size):
     return _salvo_pool
 
 
-# Rozgrzewka blokuje start sprintu, a sprint ma sekundy — nie minuty.
-WARM_AUTH_TIMEOUT = 3
-
-
-def warm_auth(cfg):
-    """Uwierzytelniony POST bez skutków ubocznych. Zwraca czas w ms albo None.
-
-    ZMIERZONE DWA RAZY: pierwsza rejestracja po publikacji kosztuje ~300 ms
-    (8.08: 294 ms, 9.08: 319 ms), a każda następna w tej samej sekundzie 57–84 ms.
-    Rozgrzewka samym GET-em tego NIE usunęła — 9.08 połączenia salwy odświeżono
-    2,5 s przed strzałem i pierwszy strzał i tak zapłacił nadmiar. Skoro gniazdo
-    było ciepłe, koszt siedzi gdzieś indziej: jedyne, czym rejestracja różni się
-    od rozgrzewkowego GET-a, to metoda POST i nagłówek Authorization. Stąd
-    hipoteza — brama waliduje JWT przy pierwszym użyciu i cache'uje wynik na krótko.
-
-    `users.getMe` ma ten sam kształt co rejestracja (POST /api/v2/*, Bearer)
-    i niczego nie zmienia po stronie konta. Jeśli hipoteza jest prawdziwa, koszt
-    płacimy TUTAJ, poza ścieżką krytyczną. Jeśli nie — czas w logu to pokaże
-    (rozgrzewka też będzie szybka, a pierwszy strzał dalej wolny) i hipoteza upada.
-
-    Nigdy nie podnosi wyjątku: rozgrzewka nie może wywrócić polowania.
-    """
-    # Świadomie NIE wołamy ensure_decathlon_token: przy wygasłym tokenie próbowałby
-    # odnowienia, a refresh token bywa jednorazowy — rozgrzewka spaliłaby go tuż
-    # przed rejestracją. Martwy token to po prostu brak rozgrzewki.
-    token = clean_decathlon_token(cfg.get("token"))
-    exp = jwt_expiry(token) if token else 0
-    if not token or (exp > 0 and exp <= time.time()):
-        return None
-    started = time.monotonic()
-    try:
-        # KRÓTKI limit, nie domyślne 30 s: ta rozgrzewka stoi tuż przed sprintem
-        # i blokuje jego start. Zawieszone zapytanie zjadłoby całą sekundę publikacji,
-        # a przecież rozgrzewka jest tylko usprawnieniem — bez niej polujemy dalej.
-        decathlon_rpc("users.getMe", token, {}, timeout=WARM_AUTH_TIMEOUT)
-    except Exception:  # noqa: BLE001 - brak rozgrzewki jest gorszy niż jej brak z hukiem
-        return None
-    return int((time.monotonic() - started) * 1000)
-
-
-def warm_auth_cfg():
-    """Świeży, minimalny cfg dla `warm_auth` — albo None, gdy nie ma czego rozgrzewać.
-
-    Budowany PRZY KAŻDYM użyciu, nie raz przy starcie procesu: JWT rotuje co ~15 min,
-    więc zapamiętany byłby dawno martwy. Bez auto-rejestracji nie strzelamy, więc
-    uwierzytelniona rozgrzewka byłaby tylko zbędnym zapytaniem.
-    """
-    cfg = load_config(quiet=True)
-    if not boolish(os.environ.get("AUTO_REGISTER") or cfg.get("auto_register")):
-        return None
-    return {"token": resolve_decathlon_token(cfg, load_state_doc())}
-
-
-def warm_connections(pool, size, url, auth_cfg=None):
+def warm_connections(pool, size, url):
     """Rozgrzewa `size` połączeń w RÓŻNYCH wątkach podanej puli (bariera je rozdziela).
 
     Bez bariery szybkie zadania wykonałyby się na jednym wątku i rozgrzałoby się
@@ -1380,17 +1380,14 @@ def warm_connections(pool, size, url, auth_cfg=None):
     kilka równoczesnych uzgodnień TLS na zimno potrafi zająć sekundy, a sprint
     ma do dyspozycji tylko kilka sekund wokół publikacji.
 
-    `auth_cfg` (tylko dla puli, która STRZELA — sprint robi same GET-y) dokłada
-    uwierzytelniony POST; patrz `warm_auth`.
-
-    Zwraca listę czasów tego POST-a w ms, a None — gdy o niego nie proszono. To NIE
-    jest to samo co pusta lista: pusta znaczy „prosiłem i nie wyszło", i ma prawo
-    być widoczna w logu. Inaczej cicha awaria rozgrzewki wyglądałaby dokładnie jak
-    jej wyłączenie.
+    UWAGA HISTORYCZNA: w 0.9.0 rozgrzewka wysyłała też uwierzytelniony POST
+    (`users.getMe`), żeby sprawdzić hipotezę „brama waliduje JWT przy pierwszym
+    użyciu i dlatego pierwsza rejestracja kosztuje ~300 ms". 10.08 hipoteza UPADŁA:
+    ten POST kosztował 48 ms, a pierwsza rejestracja i tak 232 ms. Nie wracaj do tego
+    pomysłu — koszt nie siedzi ani w połączeniu, ani w uwierzytelnieniu.
     """
     size = max(1, size)
     barrier = threading.Barrier(size, timeout=10)
-    czasy_auth = [] if auth_cfg is not None else None
 
     def rozgrzej(_):
         try:
@@ -1400,31 +1397,12 @@ def warm_connections(pool, size, url, auth_cfg=None):
                 resp.read()
         except Exception:  # noqa: BLE001 - rozgrzewka nie może wywrócić polowania
             pass
-        if auth_cfg is not None:
-            ms = warm_auth(auth_cfg)
-            if ms is not None:
-                czasy_auth.append(ms)   # append jest atomowy — bez zamka
         try:
             barrier.wait()   # trzyma wątek zajęty, aż ruszą wszystkie pozostałe
         except threading.BrokenBarrierError:
             pass
 
     list(pool.map(rozgrzej, range(size)))
-    return czasy_auth
-
-
-def fmt_auth_warm(czasy):
-    """Dopisek do linii rozgrzewki. Te liczby są POMIAREM hipotezy z `warm_auth`:
-    jeśli uwierzytelniony POST kosztuje tu ~300 ms, a pierwszy strzał spadnie do ~70 ms,
-    hipoteza się broni. Jeśli rozgrzewka jest szybka, a strzał dalej wolny — upada.
-
-    None = nie prosiliśmy. Pusta lista = prosiliśmy i NIE wyszło — to musi być widać,
-    bo inaczej cicha awaria wygląda jak wyłączona opcja."""
-    if czasy is None:
-        return ""
-    if not czasy:
-        return ", uwierzytelnienie NIEUDANE (token? sieć?)"
-    return f", uwierzytelnienie {min(czasy)}–{max(czasy)} ms"
 
 
 def fire_salvo(targets, listing_price_by_id, cfg, speculative, size):
@@ -1789,6 +1767,51 @@ def ntfy_post(topic, title, message, click=None, priority="high", tags="tennis")
         return None
 
 
+# ODŁOŻONY PUSH: ntfy.sh to zapytanie do CAŁKIEM INNEGO serwera, a w zrywie wysyłamy
+# je w najgorętszej sekundzie dnia. Zmierzone w logach z 9. i 10.08: między wykryciem
+# partii a wznowieniem sprintu mijało 643–819 ms, w większości właśnie na tym pushu —
+# i przez ten czas NIE PATRZYLIŚMY na grafik, choć publikacja wciąż trwała.
+# Dlatego w zrywie powiadomienia lądują w kolejce i idą po zamknięciu okna.
+# Poza zrywem nic się nie zmienia: push leci natychmiast, jak dotąd.
+_pending_notifications = []
+NOTIFY_MAX_ATTEMPTS = 3
+
+
+def queue_notification(wpis):
+    """Odkłada paczkę powiadomień na po zrywie (patrz `flush_notifications`)."""
+    _pending_notifications.append(wpis)
+
+
+def flush_notifications():
+    """Wysyła odłożone powiadomienia. Zwraca liczbę wysłanych paczek.
+
+    Nieudane wracają do kolejki i są ponawiane, ale nie w nieskończoność — po
+    NOTIFY_MAX_ATTEMPTS porzucamy je GŁOŚNO. Cicho porzucone powiadomienie o wolnym
+    terminie jest gorsze niż żadne, bo wygląda jak brak terminów.
+    """
+    if not _pending_notifications:
+        return 0
+    czekaly = list(_pending_notifications)
+    _pending_notifications.clear()
+    wyslane = 0
+    for topic, slots, tz, listing_price, url, wyniki, proba in czekaly:
+        failed = notify_new(topic, slots, tz, listing_price, url, wyniki)
+        if not failed:
+            wyslane += 1
+            continue
+        if proba + 1 < NOTIFY_MAX_ATTEMPTS:
+            _pending_notifications.append(
+                (topic, slots, tz, listing_price, url, wyniki, proba + 1))
+        else:
+            log(f"! Porzucam {len(failed)} odłożonych powiadomień po "
+                f"{NOTIFY_MAX_ATTEMPTS} próbach — sprawdź NTFY_TOPIC.")
+    if wyslane:
+        log(f"📨 Wysłano {wyslane} {plural(wyslane, 'odłożone powiadomienie', 
+                                            'odłożone powiadomienia', 'odłożonych powiadomień')} "
+            f"(zryw ich nie blokował).")
+    return wyslane
+
+
 def notify_new(topic, slots, tz, listing_price, book_url, registration_results=None):
     """Powiadom o nowych wolnych terminach. Pojedynczo, a przy wielu — zbiorczo.
 
@@ -1873,8 +1896,12 @@ def notify_startup(topic, count, tz, book_url=None):
 
 # -------------------------------------------------------------------------- main
 
-def run_once(announce_startup=False, skip_light=False, prefetched=None):
-    """Zwraca 0 przy powodzeniu, 2 przy błędzie sieci (stan nietknięty)."""
+def run_once(announce_startup=False, skip_light=False, prefetched=None, defer_push=False):
+    """Zwraca 0 przy powodzeniu, 2 przy błędzie sieci (stan nietknięty).
+
+    `defer_push=True` (tylko w zrywie/sprincie) odkłada powiadomienia do kolejki
+    zamiast wysyłać je od razu — patrz `flush_notifications`.
+    """
     cfg = load_config()
     state_doc = load_state_doc()
     topic = os.environ.get("NTFY_TOPIC") or cfg.get("ntfy_topic") or ""
@@ -1909,6 +1936,7 @@ def run_once(announce_startup=False, skip_light=False, prefetched=None):
     current = {}  # id -> slot
     book_url_by_id = {}
     listing_price_by_id = {}
+    docs_by_lid = {}   # do policzenia CAŁEGO grafiku dnia, nie tylko wolnych terminów
 
     for url in listings:
         # Podążaj za przekierowaniem -> aktualne ID kortu (do monitoringu i linku).
@@ -1953,6 +1981,7 @@ def run_once(announce_startup=False, skip_light=False, prefetched=None):
             except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as e:
                 log(f"! Błąd pobierania terminów kortu {lid}: {e} — nie zmieniam stanu, kończę.")
                 return 2  # błąd sieci: nie nadpisuj stanu
+        docs_by_lid[lid] = doc
         slots = [s for s in free_slots(doc, lid, now_utc) if passes_filter(s, filters, tz)]
         # W zrywie dokładamy czas pobrania — pozwala oddzielić opóźnienie sieci
         # od opóźnienia wykrycia przy analizie logu po polowaniu.
@@ -2028,14 +2057,24 @@ def run_once(announce_startup=False, skip_light=False, prefetched=None):
     if new_ids:
         log(f"NOWE wolne terminy: {len(new_ids)}")
         new_slots = sorted((current[i] for i in new_ids), key=lambda x: x["start_utc"])
+        log_day_grids(new_slots, docs_by_lid, now_utc, tz)
         # grupuj powiadomienia per listing (book_url)
         by_url = {}
         for s in new_slots:
             by_url.setdefault(book_url_by_id[s["id"]], []).append(s)
         for url, slots in by_url.items():
-            failed_ids |= notify_new(
-                topic, slots, tz, listing_price_by_id[slots[0]["id"]], url, registration_results
-            )
+            cena = listing_price_by_id[slots[0]["id"]]
+            if defer_push:
+                # Slot trafia do stanu MIMO nieudanej jeszcze wysyłki: gdyby go pominąć,
+                # następna iteracja uznałaby go za nowy i odłożyła DRUGĄ paczkę.
+                # Ponawianie jest tu zadaniem kolejki, nie stanu.
+                queue_notification((topic, slots, tz, cena, url, registration_results, 0))
+            else:
+                failed_ids |= notify_new(topic, slots, tz, cena, url, registration_results)
+        if defer_push:
+            log(f"📨 Powiadomienia odłożone na po zrywie "
+                f"({len(by_url)} {plural(len(by_url), 'paczka', 'paczki', 'paczek')}) "
+                f"— sprint wraca do patrzenia od razu.")
         if failed_ids:
             log(f"! Nie wysłano {len(failed_ids)} powiadomień — ponowię w następnej iteracji.")
     else:
@@ -2166,19 +2205,16 @@ def main():
                 # za uzgodnienie TLS, czyli dokładnie to, co salwa ma wyeliminować.
                 if warm_url and (salvo_size > 1 or sprint):
                     warmed = time.monotonic()
-                    auth_ms = None
                     if salvo_size > 1:
-                        auth_ms = warm_connections(salvo_pool(salvo_size),
-                                                   min(salvo_size, SALVO_MAX), warm_url,
-                                                   auth_cfg=warm_auth_cfg())
+                        warm_connections(salvo_pool(salvo_size),
+                                         min(salvo_size, SALVO_MAX), warm_url)
                     # Sprint ma WŁASNĄ pulę, więc jej połączenia trzeba rozgrzać osobno —
                     # inaczej pierwsze sekundy sprintu zjadłoby uzgadnianie TLS.
-                    # Uwierzytelnionej rozgrzewki NIE potrzebuje: robi same GET-y.
                     if sprint:
                         warm_connections(sprint_pool(), sprint_threads, warm_url)
                     log(f"⇉ Połączenia gotowe (salwa {salvo_size if salvo_size > 1 else 0}, "
                         f"sprint {sprint_threads if sprint else 0}) "
-                        f"[{int((time.monotonic() - warmed) * 1000)} ms]{fmt_auth_warm(auth_ms)}")
+                        f"[{int((time.monotonic() - warmed) * 1000)} ms]")
             else:
                 # Ta linia leci dopiero przy NASTĘPNYM sprawdzeniu, czyli sporo po końcu
                 # okna — dlatego podajemy faktyczne granice, a nie sugerujemy „teraz".
@@ -2208,16 +2244,16 @@ def main():
                 # (2) produkcyjnie 9.08 — połączenia odświeżono tu, 2,5 s przed
                 # strzałem, a pierwsza rejestracja i tak kosztowała 319 ms wobec
                 # 57–84 ms następnych (8.08 identycznie: 294 ms wobec 73 ms).
-                # Dlatego rozgrzewka jest teraz UWIERZYTELNIONA — patrz `warm_auth`.
+                # Uwierzytelniona rozgrzewka (0.9.0) tego NIE naprawiła i została
+                # usunięta — patrz `warm_connections`. Zostaje jako tanie ubezpieczenie
+                # na wypadek, gdyby serwer jednak zamknął bezczynne gniazdo.
                 # Sprint swojej puli nie potrzebuje: zaraz zacznie pobierać bez przerw.
                 if salvo_size > 1:
                     odswiezone = time.monotonic()
-                    auth_ms = warm_connections(salvo_pool(salvo_size),
-                                               min(salvo_size, SALVO_MAX), warm_url,
-                                               auth_cfg=warm_auth_cfg())
+                    warm_connections(salvo_pool(salvo_size),
+                                     min(salvo_size, SALVO_MAX), warm_url)
                     log(f"⇉ Salwa odświeżona przed sprintem "
-                        f"[{int((time.monotonic() - odswiezone) * 1000)} ms]"
-                        f"{fmt_auth_warm(auth_ms)}")
+                        f"[{int((time.monotonic() - odswiezone) * 1000)} ms]")
             szukanie = time.monotonic()
             deadline = szukanie + max(0.0, (sprint_bounds[1] - now_local).total_seconds())
             prefetched = run_sprint(deadline, sprint_threads, first_listing[0],
@@ -2231,11 +2267,17 @@ def main():
             set_log_precision(active)   # milisekundy zostają tylko, jeśli trwa zryw
 
         try:
-            rc = run_once(announce_startup=first, skip_light=active, prefetched=prefetched)
+            rc = run_once(announce_startup=first, skip_light=active,
+                          prefetched=prefetched, defer_push=active or in_sprint)
             if rc != 2:  # 2 = błąd sieci; ponów próbę startowego powiadomienia później
                 first = False
         except Exception as e:  # noqa: BLE001 - pętla ma przetrwać każdy błąd
             log(f"! Nieoczekiwany błąd w iteracji: {e!r} — kontynuuję.")
+        # Spłukanie kolejki dopiero POZA zrywem i sprintem. Stoi za try/except, więc
+        # odłożone powiadomienia wyjdą nawet wtedy, gdy iteracja padła albo nie było
+        # nowych terminów — inaczej wisiałyby w pamięci do końca procesu.
+        if not (active or in_sprint):
+            flush_notifications()
         # Czas pracy odejmujemy od uśpienia: bez tego ustawione 2s dawały realnie ~2,4s.
         elapsed = time.monotonic() - started
         sleep_s = plan_sleep(interval, windows, burst, tz, elapsed)

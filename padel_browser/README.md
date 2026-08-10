@@ -216,19 +216,15 @@ i taka partia potrafi mieć jeden termin — a wątek główny nie jest rozgrzew
 9.08 kosztowało to termin: samotne 19:00 dostało strzał w 319 ms, podczas gdy strzały
 z puli w tej samej sekundzie schodziły w 57–84 ms.
 
-#### Rozgrzewka jest uwierzytelniona
+#### Pierwsza rejestracja dnia kosztuje ~300 ms i nie wiadomo dlaczego
 
-Rozgrzewka wysyła na każdym wątku salwy nie tylko zwykły GET, ale też jeden
-**uwierzytelniony POST** (`users.getMe` — niczego nie zmienia na koncie). Powód jest
-zmierzony: pierwsza rejestracja po publikacji kosztowała ~300 ms (8.08: 294 ms,
-9.08: 319 ms), a każda następna w tej samej sekundzie 57–84 ms — mimo że połączenia
-były świeżo rozgrzane. Jedyne, czym rejestracja różni się od rozgrzewkowego GET-a,
-to `POST` i nagłówek `Authorization`, więc prawdopodobnie brama waliduje token przy
-pierwszym użyciu. Teraz płacimy to poza ścieżką krytyczną.
-
-Czas tej rozgrzewki widać w Dzienniku (`uwierzytelnienie 70–310 ms`) — to celowo
-pomiar powyższej hipotezy, a nie ozdobnik. Jeśli rozgrzewka będzie droga, a pierwszy
-strzał spadnie do ~70 ms, hipoteza się broni.
+Powtarzalnie: pierwszy zapis po publikacji zajmuje 232–319 ms, a każdy następny
+w tej samej sekundzie 57–84 ms. Sprawdzone i **wykluczone**: wystygnięte połączenie
+(gniazdo przeżywa 12 s bezczynności; rozgrzewka 2,5 s przed strzałem nic nie dała)
+oraz walidacja tokenu przy pierwszym użyciu (uwierzytelniony `users.getMe` w tej samej
+sekundzie kosztował 48 ms). Najpewniej coś po stronie Decathlonu przy pierwszym zapisie
+do świeżo opublikowanego grafiku — czyli poza naszym zasięgiem, bo grafik przed
+publikacją nie istnieje. W praktyce nie kosztowało dotąd żadnego terminu.
 
 W Dzienniku:
 
@@ -244,6 +240,32 @@ W Dzienniku:
 > **Zryw musi startować kilka sekund przed publikacją** — rozgrzanie połączeń salwy
 > zajmuje ~250 ms i dzieje się na jego początku. Domyślne `11:00:45` przy publikacji
 > ~11:00:53 daje ośmiosekundowy zapas, czyli z dużym nadmiarem.
+
+### Ile terminów w ogóle było — licznik grafiku
+
+Gdy pojawią się nowe terminy, Dziennik pokazuje cały grafik danego dnia:
+
+```
+📋 Grafik na pon 17.08: 3 wolne z 14 — 11 zajętych, zanim zobaczyliśmy grafik
+```
+
+To odpowiedź na pytanie „a może było więcej terminów, tylko ich nie złapaliśmy".
+Bez tej liczby brakująca godzina wygląda tak samo, niezależnie od tego, czy nikt jej
+nie wystawił, czy ktoś był szybszy. **W chwili publikacji** liczba „zajętych" to
+dokładnie terminy, których nigdy nie zobaczyliśmy jako wolne. Później to już zwykłe
+rezerwacje innych graczy.
+
+### Powiadomienia w zrywie czekają
+
+Push do ntfy.sh to zapytanie do zupełnie innego serwera. W zrywie wysyłaliśmy je
+w najgorętszej sekundzie dnia, a monitor przez ten czas **przestawał patrzeć** na
+grafik — zmierzone 643–819 ms między wykryciem jednej partii terminów a wznowieniem
+sprintu, choć publikacja wciąż trwała.
+
+Dlatego **w zrywie powiadomienia lądują w kolejce** i wychodzą po zamknięciu okna
+(w Dzienniku: `📨 Powiadomienia odłożone na po zrywie`, potem `📨 Wysłano N odłożonych`).
+Rezerwacja dzieje się natychmiast, jak dotąd — opóźniony jest wyłącznie push.
+**Poza zrywem nic się nie zmienia**: powiadomienie leci od razu.
 
 ### Sprint (`sprint`) — ostatnie 90 ms
 
