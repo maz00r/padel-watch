@@ -11,7 +11,7 @@ import threading
 import time
 import unittest
 import urllib.error
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from unittest import mock
 from zoneinfo import ZoneInfo
 
@@ -1745,79 +1745,6 @@ class WarmSalvoTest(unittest.TestCase):
             cp.warm_connections(cp.salvo_pool(4), 4, "https://go.decathlon.pl/api/listing/X")
         self.assertEqual(len(seen), 4, f"rozgrzano tylko {len(seen)} połączeń")
 
-    def test_authenticated_warmup_runs_on_every_thread(self):
-        """Rozgrzewka uwierzytelniona musi objąć KAŻDY wątek salwy.
-
-        Sedno zmiany z 9.08: sam GET nie usunął kosztu pierwszego strzału (319 ms wobec
-        57–84 ms następnych), a jedyna różnica to POST z nagłówkiem Authorization.
-        """
-        wolny = jwt_with_exp(int(datetime.now(timezone.utc).timestamp()) + 3600)
-        watki = set()
-
-        def fake_rpc(method, token, payload, extend=None, timeout=30):
-            watki.add(threading.current_thread().name)
-            self.assertEqual(method, "users.getMe")
-            self.assertEqual(payload, {})   # bez skutków ubocznych na koncie
-            return {}
-
-        with mock.patch.object(cp, "open_url", return_value=io.BytesIO(b"{}")), \
-                mock.patch.object(cp, "decathlon_rpc", side_effect=fake_rpc):
-            czasy = cp.warm_connections(cp.salvo_pool(4), 4,
-                                        "https://go.decathlon.pl/api/listing/X",
-                                        auth_cfg={"token": wolny})
-        self.assertEqual(len(watki), 4)
-        self.assertEqual(len(czasy), 4)
-
-    def test_expired_token_never_triggers_refresh(self):
-        """Wygasły token = brak rozgrzewki, NIE odnowienie.
-
-        Refresh token bywa jednorazowy — rozgrzewka spaliłaby go tuż przed rejestracją.
-        """
-        martwy = jwt_with_exp(int(datetime.now(timezone.utc).timestamp()) - 60)
-        with mock.patch.object(cp, "decathlon_rpc") as rpc, \
-                mock.patch.object(cp, "refresh_decathlon_token") as refresh:
-            self.assertIsNone(cp.warm_auth({"token": martwy}))
-            self.assertIsNone(cp.warm_auth({"token": ""}))
-        rpc.assert_not_called()
-        refresh.assert_not_called()
-
-    def test_rpc_failure_is_swallowed(self):
-        """Nieudana rozgrzewka nie może wywrócić polowania."""
-        wolny = jwt_with_exp(int(datetime.now(timezone.utc).timestamp()) + 3600)
-        with mock.patch.object(cp, "decathlon_rpc", side_effect=OSError("padło")):
-            self.assertIsNone(cp.warm_auth({"token": wolny}))
-
-    def test_uses_short_timeout(self):
-        """Rozgrzewka blokuje start sprintu — domyślne 30 s zjadłoby okno publikacji."""
-        wolny = jwt_with_exp(int(datetime.now(timezone.utc).timestamp()) + 3600)
-        with mock.patch.object(cp, "decathlon_rpc", return_value={}) as rpc:
-            cp.warm_auth({"token": wolny})
-        self.assertLessEqual(rpc.call_args.kwargs["timeout"], 5)
-
-    def test_no_auth_warmup_without_auto_register(self):
-        """Bez auto-rejestracji nie ma czego rozgrzewać — to byłoby zbędne zapytanie."""
-        with mock.patch.object(cp, "load_config", return_value={"auto_register": False}), \
-                mock.patch.dict(os.environ, {"AUTO_REGISTER": ""}, clear=False):
-            self.assertIsNone(cp.warm_auth_cfg())
-
-    def test_summary_line_reports_range(self):
-        self.assertEqual(cp.fmt_auth_warm(None), "")   # nie prosiliśmy — cisza
-        self.assertIn("70–310 ms", cp.fmt_auth_warm([120, 310, 70]))
-
-    def test_silent_warmup_failure_is_visible(self):
-        """Cicha awaria rozgrzewki nie może wyglądać jak wyłączona opcja.
-
-        Bare `except` w `warm_auth` połyka także błąd programistyczny (tak wyszło
-        przy pisaniu tych testów) — bez tego rozróżnienia log nie powiedziałby nic.
-        """
-        self.assertIn("NIEUDANE", cp.fmt_auth_warm([]))
-        wolny = jwt_with_exp(int(datetime.now(timezone.utc).timestamp()) + 3600)
-        with mock.patch.object(cp, "open_url", return_value=io.BytesIO(b"{}")), \
-                mock.patch.object(cp, "decathlon_rpc", side_effect=OSError("padło")):
-            czasy = cp.warm_connections(cp.salvo_pool(4), 4, "https://x/y",
-                                        auth_cfg={"token": wolny})
-        self.assertEqual(czasy, [])   # lista, nie None: prosiliśmy i nie wyszło
-
 
 class LogPrecisionTest(unittest.TestCase):
     """Milisekundy w Dzienniku tylko na czas zrywu — poza nim byłyby szumem."""
@@ -2467,3 +2394,163 @@ class PanelTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DayGridTest(unittest.TestCase):
+    """Cały grafik dnia, nie tylko wolne terminy — inaczej nie da się zmierzyć,
+    czy ktoś zabrał godzinę, zanim ją w ogóle zobaczyliśmy."""
+
+    NOW = datetime(2026, 8, 10, 9, 0, tzinfo=timezone.utc)
+    TZ = ZoneInfo("Europe/Warsaw") if ZoneInfo else timezone.utc
+
+    def doc(self):
+        item = TestFreeSlots.date_item
+        return {"included": [
+            item("2026-08-17T13:00:00+00:00", "a"),              # wolny (15:00 lokalnie)
+            item("2026-08-17T15:00:00+00:00", "b"),              # wolny (17:00)
+            item("2026-08-17T07:00:00+00:00", "c", count=1),     # ZAJĘTY (09:00)
+            item("2026-08-17T08:00:00+00:00", "d", count=1),     # ZAJĘTY (10:00)
+            item("2026-08-17T09:00:00+00:00", "e", cancelled=True),   # odwołany — poza grafikiem
+            item("2026-08-18T13:00:00+00:00", "f"),              # inny dzień
+        ]}
+
+    def test_counts_taken_slots_too(self):
+        wolne, wszystkie = cp.day_grid(self.doc(), "L", self.NOW, date(2026, 8, 17), self.TZ)
+        self.assertEqual((wolne, wszystkie), (2, 4))
+
+    def test_free_slots_still_hides_taken(self):
+        """Regresja: rozdzielenie parsera nie może zmienić tego, co widzi monitor."""
+        wolne = cp.free_slots(self.doc(), "L", self.NOW)
+        self.assertEqual(len(wolne), 3)   # 2 z 17.08 + 1 z 18.08, zajęte pominięte
+
+    def test_other_days_do_not_leak_in(self):
+        _, wszystkie = cp.day_grid(self.doc(), "L", self.NOW, date(2026, 8, 18), self.TZ)
+        self.assertEqual(wszystkie, 1)
+
+    def test_log_names_the_missing_hours(self):
+        nowe = [s for s in cp.free_slots(self.doc(), "L", self.NOW)
+                if s["start_utc"].astimezone(self.TZ).date() == date(2026, 8, 17)]
+        buf = io.StringIO()
+        with mock.patch("sys.stdout", buf):
+            cp.log_day_grids(nowe, {"L": self.doc()}, self.NOW, self.TZ)
+        out = buf.getvalue()
+        self.assertIn("pon 17.08", out)
+        self.assertIn("2 wolne z 4", out)
+        self.assertIn("2 zajęte, zanim zobaczyliśmy", out)
+
+    def test_full_grid_says_nothing_about_being_late(self):
+        """Gdy nic nie jest zajęte, nie sugerujemy, że ktoś nas ubiegł."""
+        doc = {"included": [TestFreeSlots.date_item("2026-08-17T13:00:00+00:00", "a")]}
+        nowe = cp.free_slots(doc, "L", self.NOW)
+        buf = io.StringIO()
+        with mock.patch("sys.stdout", buf):
+            cp.log_day_grids(nowe, {"L": doc}, self.NOW, self.TZ)
+        self.assertIn("1 wolny z 1", buf.getvalue())
+        self.assertNotIn("zajętych", buf.getvalue())
+
+
+class DeferredPushTest(unittest.TestCase):
+    """W zrywie push czeka; poza zrywem leci od razu, dokładnie jak dotąd.
+
+    Powód: ntfy.sh to zapytanie do innego serwera, wysyłane w sekundzie publikacji.
+    Zmierzone 9. i 10.08: 643–819 ms bez patrzenia na grafik, głównie na tym pushu.
+    """
+
+    def setUp(self):
+        cp._pending_notifications.clear()
+        self.addCleanup(cp._pending_notifications.clear)
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        for attr, val in (("STATE_PATH", os.path.join(self.dir.name, "s.json")),):
+            patcher = mock.patch.object(cp, attr, val)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.env = mock.patch.dict(os.environ, {
+            "LISTINGS": "https://go.decathlon.pl/l/" + "a" * 8 + "-1111-2222-3333-444444444444",
+            "NTFY_TOPIC": "temat", "FILTERS": "mon-sun:00:00-24:00",
+            "AUTO_REGISTER": "false", "TIMEZONE": "Europe/Warsaw",
+            "CONFIG_PATH": os.path.join(self.dir.name, "brak.json"),
+        })
+        self.env.start()
+        self.addCleanup(self.env.stop)
+        self.lid = "aaaaaaaa-1111-2222-3333-444444444444"
+
+    def doc(self, *items):
+        return {"data": {"attributes": {"title": "Kort", "price": None,
+                                        "datesStats": {"availableListingDates": len(items)}}},
+                "included": list(items)}
+
+    def przebieg(self, doc, defer_push=False):
+        """Jeden bieg run_once na gotowych danych. Zwraca (log, wywołania ntfy)."""
+        buf = io.StringIO()
+        with mock.patch.object(cp, "resolve_current_id", side_effect=lambda x: self.lid), \
+                mock.patch.object(cp, "ntfy_post", return_value=True) as push, \
+                mock.patch("sys.stdout", buf):
+            cp.run_once(skip_light=True, prefetched=(self.lid, doc), defer_push=defer_push)
+        return buf.getvalue(), push
+
+    def z_terminem(self):
+        jutro = datetime.now(timezone.utc) + timedelta(days=7)
+        return self.doc(TestFreeSlots.date_item(jutro.isoformat(), "d1"))
+
+    def test_outside_burst_push_is_immediate(self):
+        """Zachowanie poza zrywem MUSI zostać nietknięte."""
+        self.przebieg(self.doc())                      # baseline
+        _, push = self.przebieg(self.z_terminem(), defer_push=False)
+        self.assertTrue(push.called)
+        self.assertEqual(cp._pending_notifications, [])
+
+    def test_in_burst_push_is_queued_not_sent(self):
+        self.przebieg(self.doc())
+        out, push = self.przebieg(self.z_terminem(), defer_push=True)
+        self.assertFalse(push.called, "push poleciał w zrywie — po to była ta zmiana")
+        self.assertEqual(len(cp._pending_notifications), 1)
+        self.assertIn("odłożone na po zrywie", out)
+
+    def test_queued_slot_is_saved_so_it_is_not_queued_twice(self):
+        """Odłożony termin trafia do stanu — inaczej następna iteracja odłożyłaby go znowu."""
+        self.przebieg(self.doc())
+        doc = self.z_terminem()
+        self.przebieg(doc, defer_push=True)
+        self.przebieg(doc, defer_push=True)
+        self.assertEqual(len(cp._pending_notifications), 1)
+
+    def test_flush_sends_everything_and_empties_queue(self):
+        self.przebieg(self.doc())
+        self.przebieg(self.z_terminem(), defer_push=True)
+        buf = io.StringIO()
+        with mock.patch.object(cp, "ntfy_post", return_value=True) as push, \
+                mock.patch("sys.stdout", buf):
+            wyslane = cp.flush_notifications()
+        self.assertEqual(wyslane, 1)
+        self.assertTrue(push.called)
+        self.assertEqual(cp._pending_notifications, [])
+        self.assertIn("Wysłano 1 odłożone powiadomienie", buf.getvalue())
+
+    def test_flush_retries_then_gives_up_loudly(self):
+        """Ciche porzucenie powiadomienia wygląda jak brak terminów — to musi być głośne."""
+        self.przebieg(self.doc())
+        self.przebieg(self.z_terminem(), defer_push=True)
+        buf = io.StringIO()
+        # None = wpadka sieciowa (ponawiamy). False to 404 tematu — trwałe, bez ponowień.
+        with mock.patch.object(cp, "ntfy_post", return_value=None), \
+                mock.patch("sys.stdout", buf):
+            for _ in range(cp.NOTIFY_MAX_ATTEMPTS):
+                cp.flush_notifications()
+        self.assertEqual(cp._pending_notifications, [])
+        self.assertIn("Porzucam", buf.getvalue())
+
+    def test_flush_on_empty_queue_is_free(self):
+        with mock.patch.object(cp, "ntfy_post") as push:
+            self.assertEqual(cp.flush_notifications(), 0)
+        push.assert_not_called()
+
+    def test_default_is_immediate(self):
+        """Domyślnie zachowanie jak dotąd — odkładanie trzeba włączyć świadomie."""
+        self.przebieg(self.doc())
+        with mock.patch.object(cp, "resolve_current_id", side_effect=lambda x: self.lid), \
+                mock.patch.object(cp, "ntfy_post", return_value=True) as push, \
+                mock.patch("sys.stdout", io.StringIO()):
+            cp.run_once(skip_light=True, prefetched=(self.lid, self.z_terminem()))
+        self.assertTrue(push.called)
+        self.assertEqual(cp._pending_notifications, [])

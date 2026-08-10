@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.10.0 — cały grafik w logu, push poza sekundą publikacji
+
+- **Log pokazuje CAŁY grafik dnia, nie tylko wolne terminy**:
+  `📋 Grafik na pon 17.08: 3 wolne z 14 — 11 zajętych, zanim zobaczyliśmy grafik`.
+  Dotąd zajęte terminy były wycinane przy parsowaniu, więc godzina, której nigdy nie
+  zobaczyliśmy jako wolnej, wyglądała identycznie jak godzina nigdy niewystawiona.
+  Nie dało się odpowiedzieć na pytanie „czy ktoś zdążył przed nami" — teraz odpowiedź
+  jest w Dzienniku każdego dnia, bez dopytywania. Dane były w każdej odpowiedzi API
+  od zawsze; po prostu je wyrzucaliśmy.
+- **W zrywie powiadomienia ntfy czekają w kolejce** i idą po zamknięciu okna.
+  Zmierzone w logach z 9. i 10.08: między wykryciem partii terminów a wznowieniem
+  sprintu mijało **643–819 ms, w większości na pushu do ntfy.sh** — czyli na
+  zapytaniu do zupełnie innego serwera. Przez ten czas NIE PATRZYLIŚMY na grafik,
+  choć publikacja wciąż trwała i sypały się kolejne partie.
+  **Poza zrywem nic się nie zmienia** — push leci natychmiast, jak dotąd.
+- **Odłożone powiadomienia są ponawiane, a porzucane głośno** (po 3 próbach).
+  Ciche zgubienie powiadomienia o wolnym terminie wygląda jak brak terminów.
+- **Zapisu stanu NIE odłożyliśmy**, wbrew wcześniejszemu planowi. Pomiar: 0,12 ms
+  (mediana, 300 terminów). Odłożenie dałoby zysk w granicach szumu, a kosztowałoby
+  ryzyko podwójnej rezerwacji przy restarcie procesu w złym momencie.
+- **Usunięta rozgrzewka uwierzytelniona z 0.9.0 — hipoteza UPADŁA.** 10.08 pomiar
+  rozstrzygnął: `users.getMe` w rozgrzewce kosztował **48 ms**, a pierwsza rejestracja
+  i tak **232 ms**. Gdyby brama walidowała JWT przy pierwszym użyciu, drogi byłby ten
+  POST — było odwrotnie. Koszt pierwszego zapisu nie siedzi ani w połączeniu, ani
+  w uwierzytelnieniu; zostaje w kodzie ostrzeżenie, żeby nie wracać do tego pomysłu.
+- Zostaje to, co się obroniło w 0.9.0: **pojedynczy termin idzie przez pulę salwy**
+  (10.08 samotne 15:00 zarezerwowane tą drogą).
+
 ## 0.9.0 — rozgrzewka uwierzytelniona, salwa także dla jednego terminu
 - **Pojedynczy termin idzie teraz przez pulę salwy.** Dotąd salwa włączała się dopiero
   przy dwóch terminach, więc samotny strzał leciał z wątku głównego — poza pulą, którą
