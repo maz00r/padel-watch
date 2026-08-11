@@ -40,9 +40,8 @@ PATH = "/api/listing/{id}?include=dates"
 DOMYSLNY_LISTING = "1c0ec93e-ca77-44b9-a3a6-c72a99d050dd"
 UA = "padel-watch-probe/1.0 (+https://go.decathlon.pl)"
 PROBEK = 7
-# Próg, powyżej którego rdzeń jest ewidentnie wygłodzony. Odniesienie zmierzone
-# na laptopie (Apple Silicon): ~36 ms. Zwykły x86 w chmurze: ~60–120 ms.
-CPU_PODEJRZANE = 200
+# Pamięć, przy której Lambda daje pełny rdzeń. Poniżej dostajesz jego ułamek.
+LAMBDA_PELNY_RDZEN_MB = 1769
 
 
 def _ms(od):
@@ -223,11 +222,17 @@ def podsumuj(w):
         f"CPU (bez sieci) : {w['cpu_ms']} ms na ustaloną porcję liczenia"
         + (f", pamięć {w['pamiec_mb']} MB" if w['pamiec_mb'] else ""),
     ]
-    if w.get("cpu_ms", 0) > CPU_PODEJRZANE:
+    # Ostrzegamy WYŁĄCZNIE na podstawie przydziału pamięci, nie czasu liczenia.
+    # Pierwsza wersja porównywała cpu_ms z progiem skalibrowanym na laptopie
+    # (Apple Silicon, 36 ms) i krzyczała także przy 1769 MB, gdzie rdzeń jest już
+    # pełny, a x86 w chmurze i tak liczy ~220 ms. Kazała podnieść pamięć do wartości,
+    # która była już ustawiona — bezużyteczna rada z fałszywego pomiaru.
+    pamiec = w.get("pamiec_mb")
+    if pamiec and pamiec < LAMBDA_PELNY_RDZEN_MB:
         linie.append("")
-        linie.append("UWAGA: procesor jest wolny — w Lambdzie moc skaluje się z PAMIĘCIĄ. "
-                     "Podnieś ją do 1769 MB (pełny rdzeń) i powtórz, bo inaczej mierzysz "
-                     "własne wygłodzenie CPU, a nie serwer Decathlonu.")
+        linie.append(f"UWAGA: {pamiec} MB to UŁAMEK rdzenia — w Lambdzie moc CPU skaluje się "
+                     f"z pamięcią. Podnieś do {LAMBDA_PELNY_RDZEN_MB} MB i powtórz, bo teraz "
+                     f"mierzysz własne wygłodzenie, a nie serwer Decathlonu.")
     ciepl = w["http_cieply_mediana_ms"]
     tcp = min(d["tcp_mediana_ms"] for d in w["tcp_per_ip"].values()) if w["tcp_per_ip"] else None
     if ciepl and tcp:
