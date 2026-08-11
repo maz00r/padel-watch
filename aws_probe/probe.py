@@ -40,10 +40,32 @@ PATH = "/api/listing/{id}?include=dates"
 DOMYSLNY_LISTING = "1c0ec93e-ca77-44b9-a3a6-c72a99d050dd"
 UA = "padel-watch-probe/1.0 (+https://go.decathlon.pl)"
 PROBEK = 7
+# Próg, powyżej którego rdzeń jest ewidentnie wygłodzony. Odniesienie zmierzone
+# na laptopie (Apple Silicon): ~36 ms. Zwykły x86 w chmurze: ~60–120 ms.
+CPU_PODEJRZANE = 200
 
 
 def _ms(od):
     return (time.monotonic() - od) * 1000
+
+
+def zmierz_cpu():
+    """Ile ms zajmuje ustalona porcja liczenia. NIE dotyka sieci.
+
+    Bez tego nie da się odróżnić „serwer jest wolny" od „nasz procesor jest wolny",
+    a w Lambdzie moc CPU przydziela się PROPORCJONALNIE DO PAMIĘCI. Przy 512 MB
+    dostajemy ułamek rdzenia, więc deszyfrowanie TLS i czytanie 25 KB potrafi
+    kosztować dziesiątki ms — i wygląda to w pomiarze jak wolny serwer.
+
+    Skala dobrana tak, żeby na normalnym rdzeniu wyszło kilkadziesiąt ms — wtedy
+    wygłodzony rdzeń Lambdy odstaje o rząd wielkości i widać to na pierwszy rzut oka.
+    """
+    import hashlib
+    dane = b"padel" * 200
+    start = time.monotonic()
+    for _ in range(60000):
+        dane = hashlib.sha256(dane).digest() + dane[:995]
+    return _ms(start)
 
 
 def zmierz_dns(host):
@@ -110,7 +132,7 @@ def zmierz_http(ip, host, path, probek=PROBEK):
             resp = conn.getresponse()
             dane = resp.read()
             czasy.append(_ms(start))
-            bajty = len(dane)
+            bajty = len(dane)   # NA DRUCIE (gzip) — celowo nie dekompresujemy
             if resp.status >= 400:
                 raise RuntimeError(f"HTTP {resp.status}")
     finally:
@@ -121,6 +143,7 @@ def zmierz_http(ip, host, path, probek=PROBEK):
 def zmierz(listing_id=DOMYSLNY_LISTING):
     """Pełny pomiar. Zwraca słownik gotowy do porównania dom vs Irlandia."""
     path = PATH.format(id=listing_id)
+    cpu_ms = zmierz_cpu()   # PRZED siecią, żeby nie mierzyć rozgrzanego już rdzenia
     dns_ms, adresy = zmierz_dns(HOST)
     if not adresy:
         return {"blad": f"brak adresów dla {HOST}"}
@@ -154,8 +177,18 @@ def zmierz(listing_id=DOMYSLNY_LISTING):
         "http_cieply_mediana_ms": round(statistics.median(cieple), 1) if cieple else None,
         "http_cieply_min_ms": round(min(cieple), 1) if cieple else None,
         "http_cieply_max_ms": round(max(cieple), 1) if cieple else None,
-        "odpowiedz_bajtow": bajty,
+        "http_cieple_kolejno": [round(c, 1) for c in cieple],
+        "odpowiedz_bajtow_na_drucie": bajty,
+        "cpu_ms": round(cpu_ms, 1),
+        "pamiec_mb": pamiec_mb(),
     }
+
+
+def pamiec_mb():
+    """Przydział pamięci Lambdy (czyli w praktyce przydział CPU). None poza Lambdą."""
+    import os
+    wartosc = os.environ.get("AWS_LAMBDA_FUNCTION_MEMORY_SIZE")
+    return int(wartosc) if wartosc else None
 
 
 def gdzie_jestem():
@@ -185,8 +218,16 @@ def podsumuj(w):
         f"HTTP CIEPŁY     : {w['http_cieply_mediana_ms']} ms   "
         f"(min {w['http_cieply_min_ms']}, max {w['http_cieply_max_ms']})  "
         f"<- tyle kosztuje jedno zapytanie sprintu i jeden strzał salwy",
-        f"Rozmiar odpowiedzi: {w['odpowiedz_bajtow']} B po dekompresji",
+        f"  kolejno       : {w['http_cieple_kolejno']} ms",
+        f"Odpowiedź       : {w['odpowiedz_bajtow_na_drucie']} B na drucie (gzip)",
+        f"CPU (bez sieci) : {w['cpu_ms']} ms na ustaloną porcję liczenia"
+        + (f", pamięć {w['pamiec_mb']} MB" if w['pamiec_mb'] else ""),
     ]
+    if w.get("cpu_ms", 0) > CPU_PODEJRZANE:
+        linie.append("")
+        linie.append("UWAGA: procesor jest wolny — w Lambdzie moc skaluje się z PAMIĘCIĄ. "
+                     "Podnieś ją do 1769 MB (pełny rdzeń) i powtórz, bo inaczej mierzysz "
+                     "własne wygłodzenie CPU, a nie serwer Decathlonu.")
     ciepl = w["http_cieply_mediana_ms"]
     tcp = min(d["tcp_mediana_ms"] for d in w["tcp_per_ip"].values()) if w["tcp_per_ip"] else None
     if ciepl and tcp:

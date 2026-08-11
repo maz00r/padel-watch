@@ -47,8 +47,14 @@ cokolwiek. Pomiar w innym regionie nie odpowie na żadne z naszych pytań.
 3. **Create function**
 4. W edytorze kodu otwórz `lambda_function.py`, skasuj zawartość i wklej **całą** treść [`probe.py`](probe.py)
 5. **Deploy**
-6. Zakładka **Configuration → General configuration → Edit**: **Timeout 30 s**, **Memory 512 MB**
-   (pamięć w Lambdzie skaluje też przepustowość sieci, a mierzymy właśnie sieć)
+6. Zakładka **Configuration → General configuration → Edit**: **Timeout 30 s**, **Memory 1769 MB**
+
+   > **Pamięć w Lambdzie to w praktyce suwak od PROCESORA**, nie od RAM-u. Pełny rdzeń
+   > dostajesz dopiero przy **1769 MB**. Przy 512 MB masz jego ułamek, a wtedy
+   > deszyfrowanie TLS i przeczytanie 25 KB odpowiedzi kosztuje dziesiątki milisekund
+   > i w pomiarze wygląda jak wolny serwer Decathlonu. Sprawdzone: przy 512 MB samo
+   > uzgodnienie TLS zajęło **17 ms mimo rundy 0,3 ms** — to był czysty procesor.
+   > Zużycie RAM-u to i tak tylko ~53 MB, więc nie podnosisz pamięci dla pamięci.
 7. **Test** → nazwa dowolna, treść zdarzenia zostaw `{}` → **Test**
 
 Wynik zobaczysz w oknie wykonania i w CloudWatch Logs.
@@ -71,13 +77,21 @@ Przy nowym koncie to ważniejsze niż sam pomiar:
 ```
 Miejsce pomiaru : lambda:eu-west-1
 Adresy ELB      : 52.30.168.98, 54.76.133.149
-DNS             : 2.1 ms
-  TCP 52.30.168.98    : 1.4 ms (min 1.2, max 1.9)
-  TCP 54.76.133.149   : 1.5 ms (min 1.3, max 2.1)
-TLS             : 3.2 ms (TLSv1.3)
-HTTP zimny      : 12.8 ms   (nowe połączenie)
-HTTP CIEPŁY     : 6.4 ms   (min 5.9, max 8.8)   <- ta liczba decyduje
+DNS             : 40.3 ms
+  TCP 52.30.168.98    : 0.3 ms (min 0.3, max 0.6)
+  TCP 54.76.133.149   : 0.8 ms (min 0.7, max 0.8)
+TLS             : 17.3 ms (TLSv1.3)
+HTTP zimny      : 63.3 ms   (nowe połączenie)
+HTTP CIEPŁY     : 65.0 ms   (min 33.1, max 187.9)   <- ta liczba decyduje
+  kolejno       : [...] ms
+Odpowiedź       : 25744 B na drucie (gzip)
+CPU (bez sieci) : ... ms
 ```
+
+To jest **prawdziwy wynik z 11.08 przy 512 MB**. Sieć zniknęła zgodnie z planem
+(0,3 ms zamiast 61 ms), ale ciepłe pobranie zostało na 65 ms. Podejrzenie: rdzeń był
+wygłodzony — patrz `CPU (bez sieci)` i uwaga o pamięci wyżej. Dlatego pomiar trzeba
+powtórzyć przy 1769 MB, zanim wyciągnie się z niego wniosek.
 
 Każda warstwa osobno, bo tylko tak widać, gdzie siedzi czas. `HTTP CIEPŁY` to dokładnie
 koszt jednego zapytania sprintu i jednego strzału salwy.
