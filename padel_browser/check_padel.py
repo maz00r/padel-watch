@@ -1510,7 +1510,7 @@ def sprint_pool():
     return _sprint_pool
 
 
-def run_sprint(deadline, threads, listing_url, baseline_ids, tz):
+def run_sprint(deadline, threads, listing_url, baseline_ids, tz, filters=None):
     """Pobiera bez przerw, aż pojawi się termin spoza `baseline_ids`.
 
     Zwraca (listing_id, dokument) — dane SĄ JUŻ POBRANE, więc rejestracja nie płaci
@@ -1526,8 +1526,11 @@ def run_sprint(deadline, threads, listing_url, baseline_ids, tz):
     except Exception as e:  # noqa: BLE001 - sprint nie może wywrócić polowania
         log(f"! Sprint: nie rozwiązałem adresu kortu ({e!r}) — pomijam")
         return None
-    cfg = load_config(quiet=True)
-    filters = resolve_filters(cfg)
+    # Filtry można podać z zewnątrz — w Lambdzie nie ma config.json, a i tak muszą
+    # być IDENTYCZNE z tymi, których używa monitor (inaczej sprint uzna za „nowy"
+    # termin, którego monitor w ogóle nie śledzi).
+    if filters is None:
+        filters = resolve_filters(load_config(quiet=True))
     znalezione, lock, stop = {}, threading.Lock(), threading.Event()
 
     def obserwuj(_):
@@ -1556,6 +1559,113 @@ def run_sprint(deadline, threads, listing_url, baseline_ids, tz):
     stop.wait(timeout=max(0.0, deadline - time.monotonic()))
     stop.set()   # okno minęło albo mamy trafienie — pozostałe wątki kończą same
     return znalezione.get("hit")
+
+
+# ---------------------------------------------------- zdalny strzał (eu-west-1)
+
+# Serwer Decathlona stoi w AWS eu-west-1 (sporteo-01-*.eu-west-1.elb.amazonaws.com).
+# Zmierzone 11.08 z Lambdy w tym samym regionie: runda 0,5 ms zamiast ~42 ms z domu,
+# a ciężkie pobranie 39 ms zamiast ~80 ms. Ścieżka „termin się pojawia → nasze żądanie
+# dociera" spada ze ~107 ms do ~32 ms. Dlatego w sekundzie publikacji sprint i salwę
+# wykonuje funkcja w Irlandii, a cała reszta (token, panel, kalendarz, stan,
+# powiadomienia) zostaje w Home Assistancie.
+#
+# Token leci w TREŚCI żądania i nigdzie w AWS nie jest zapisywany.
+REMOTE_TIMEOUT_MARGIN = 6      # ile sekund ponad okno sprintu dajemy na odpowiedź
+
+
+def call_remote(url, secret, payload, timeout):
+    """Odpala zdalny sprint+salwę. Zwraca (wynik, błąd) — dokładnie jedno jest None.
+
+    Odpowiedź jest spakowana gzipem: dokument kortu ma ~260 KB, a spakowany ~25 KB.
+    Leci już PO rejestracji, więc nie jest na ścieżce krytycznej, ale nie ma powodu
+    ciągnąć ćwierć megabajta przez łącze domowe.
+    """
+    dane = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=dane,
+        headers={
+            "Content-Type": "application/json",
+            "Accept-Encoding": "gzip",
+            "User-Agent": UA,
+            # Function URL zostaje bez autoryzacji IAM, więc wpuszczamy tylko żądania
+            # z tym sekretem. Świadomy wybór: klucze AWS w konfiguracji dodatku byłyby
+            # groźniejsze w razie wycieku kopii zapasowej niż sekret do jednej funkcji.
+            "X-Padel-Secret": secret or "",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            surowe = resp.read()
+            if resp.headers.get("Content-Encoding") == "gzip":
+                surowe = gzip.decompress(surowe)
+        return json.loads(surowe.decode("utf-8")), None
+    except urllib.error.HTTPError as e:
+        szczegol = ""
+        try:
+            szczegol = e.read().decode("utf-8", "replace")[:200]
+        except Exception:  # noqa: BLE001
+            pass
+        finally:
+            try:
+                e.close()
+            except Exception:  # noqa: BLE001
+                pass
+        return None, f"HTTP {e.code}: {szczegol or e.reason}"
+    except (urllib.error.URLError, TimeoutError, socket.timeout) as e:
+        return None, f"brak odpowiedzi: {e!r}"
+    except (ValueError, OSError) as e:
+        return None, f"zła odpowiedź: {e!r}"
+
+
+def remote_payload(listing_url, baseline_ids, tz_name, seconds, threads, reg_cfg):
+    """Treść żądania do Irlandii. Filtry idą SUROWYM napisem z env, żeby zdalna
+    strona sparsowała je tą samą funkcją — inaczej ryzykujemy dwie różne interpretacje."""
+    return {
+        "token": reg_cfg.get("token") or "",
+        "listing_url": listing_url,
+        "filters": os.environ.get("FILTERS", ""),
+        "timezone": tz_name,
+        "baseline_ids": sorted(baseline_ids),
+        "sprint_seconds": seconds,
+        "sprint_threads": threads,
+        "salvo": reg_cfg.get("salvo") or 0,
+        "max_per_run": reg_cfg.get("max_per_run") or 1,
+        "order": reg_cfg.get("order") or "earliest",
+        "name": reg_cfg.get("name") or "",
+        "age": reg_cfg.get("age"),
+        "free_only": bool(reg_cfg.get("free_only", True)),
+        "speculative": bool(reg_cfg.get("speculative")),
+        "enabled": bool(reg_cfg.get("enabled")),
+    }
+
+
+def adopt_remote(wynik):
+    """Przenosi wynik z Irlandii do struktur, których używa `run_once`.
+
+    Zwraca (prefetched, remote) albo (None, None), gdy nic nie znaleziono.
+    Linie dziennika ze zdalnej strony przepisujemy do NASZEGO Dziennika — inaczej
+    trzeba by ich szukać w CloudWatch, a to jedyny ślad po sekundzie publikacji.
+    """
+    for linia in wynik.get("log") or []:
+        # Zdalna linia ma już swój znacznik czasu, a `log()` dokłada własny —
+        # bez tego w Dzienniku byłyby dwa obok siebie.
+        log(f"   ☁ {re.sub(r'^\[[^]]+\]\s*', '', linia)}")
+    czasy = wynik.get("timings") or {}
+    if czasy:
+        log(f"☁ Irlandia: sprint {czasy.get('sprint_ms', '?')} ms, "
+            f"całość {czasy.get('total_ms', '?')} ms")
+    if not wynik.get("doc"):
+        return None, None
+    remote = {
+        # klucze przychodzą jako listy (JSON nie ma krotek) — normalizujemy do (ok, msg)
+        "results": {k: (bool(v[0]), v[1]) for k, v in (wynik.get("results") or {}).items()},
+        "registered": set(wynik.get("registered") or []),
+        "transactions": wynik.get("transactions") or {},
+    }
+    return (wynik["listing_id"], wynik["doc"]), remote
 
 
 def resolve_filters(cfg):
@@ -1896,16 +2006,13 @@ def notify_startup(topic, count, tz, book_url=None):
 
 # -------------------------------------------------------------------------- main
 
-def run_once(announce_startup=False, skip_light=False, prefetched=None, defer_push=False):
-    """Zwraca 0 przy powodzeniu, 2 przy błędzie sieci (stan nietknięty).
+def build_reg_cfg(cfg, state_doc):
+    """Ustawienia auto-rejestracji z opcji dodatku i stanu.
 
-    `defer_push=True` (tylko w zrywie/sprincie) odkłada powiadomienia do kolejki
-    zamiast wysyłać je od razu — patrz `flush_notifications`.
+    Wspólne dla lokalnego biegu i dla żądania do Irlandii — gdyby liczyły się osobno,
+    zdalna strona mogłaby np. dostać inny limit niż lokalna i zarezerwować za dużo.
     """
-    cfg = load_config()
-    state_doc = load_state_doc()
-    topic = os.environ.get("NTFY_TOPIC") or cfg.get("ntfy_topic") or ""
-    reg_cfg = {
+    return {
         "enabled": boolish(os.environ.get("AUTO_REGISTER") or cfg.get("auto_register")),
         "speculative": boolish(os.environ.get("AUTO_REGISTER_DRY_RUN") or cfg.get("auto_register_dry_run")),
         "token": resolve_decathlon_token(cfg, state_doc),
@@ -1921,6 +2028,23 @@ def run_once(announce_startup=False, skip_light=False, prefetched=None, defer_pu
         "order": os.environ.get("AUTO_REGISTER_ORDER") or cfg.get("auto_register_order") or "earliest",
         "salvo": os.environ.get("AUTO_REGISTER_SALVO") or cfg.get("auto_register_salvo") or 0,
     }
+
+
+def run_once(announce_startup=False, skip_light=False, prefetched=None, defer_push=False,
+             remote=None):
+    """Zwraca 0 przy powodzeniu, 2 przy błędzie sieci (stan nietknięty).
+
+    `defer_push=True` (tylko w zrywie/sprincie) odkłada powiadomienia do kolejki
+    zamiast wysyłać je od razu — patrz `flush_notifications`.
+
+    `remote` (wynik z Irlandii) niesie rejestracje, które JUŻ SIĘ ODBYŁY. Ich ID
+    dokładamy do zapisanych, zanim policzymy kandydatów — inaczej lokalna strona
+    próbowałaby zarezerwować drugi raz to, co zdalna właśnie zajęła.
+    """
+    cfg = load_config()
+    state_doc = load_state_doc()
+    topic = os.environ.get("NTFY_TOPIC") or cfg.get("ntfy_topic") or ""
+    reg_cfg = build_reg_cfg(cfg, state_doc)
     tzname = os.environ.get("TIMEZONE") or cfg.get("timezone") or "Europe/Warsaw"
     tz = ZoneInfo(tzname) if ZoneInfo else timezone.utc
     filters = resolve_filters(cfg)
@@ -2028,6 +2152,9 @@ def run_once(announce_startup=False, skip_light=False, prefetched=None, defer_pu
     failed_ids = set()
     registered_ids = load_registered_ids()
     registration_results = {}
+    if remote:
+        registered_ids = registered_ids | remote["registered"]
+        registration_results.update(remote["results"])
 
     # Auto-rejestracja: kandydaci to NOWE terminy + te zapamiętane po awarii tokenu
     # (pending), o ile nadal są wolne i jeszcze niezapisane. Dzięki temu naprawienie
@@ -2039,9 +2166,12 @@ def run_once(announce_startup=False, skip_light=False, prefetched=None, defer_pu
         if retried:
             log(f"↻ Ponawiam auto-rejestrację dla {len(retried)} zapamiętanego(-ych) "
                 f"terminu(-ów) po wcześniejszym błędzie tokenu.")
-        registration_results, registered_ids = auto_register_new_slots(
+        wyniki_lokalne, registered_ids = auto_register_new_slots(
             [current[i] for i in candidate_ids], listing_price_by_id, reg_cfg, registered_ids
         )
+        # update, nie podstawienie: wyniki z Irlandii muszą przetrwać, bo to one
+        # trafiają do powiadomienia jako „co udało się zarezerwować".
+        registration_results.update(wyniki_lokalne)
 
     # Alert o tokenie: raz na incydent (kasowany, gdy token znów działa).
     auth_error = reg_cfg.get("auth_error")
@@ -2162,6 +2292,17 @@ def main():
         log(f"⇉ Salwa włączona: do {salvo_size} prób rejestracji równolegle "
             f"(nadmiar ponad auto_register_max jest anulowany).")
 
+    # Zdalny strzał z eu-west-1. Puste = wszystko dzieje się lokalnie, jak dotąd.
+    remote_url = (os.environ.get("REMOTE_URL") or "").strip()
+    remote_secret = (os.environ.get("REMOTE_SECRET") or "").strip()
+    if remote_url and not remote_secret:
+        log("! REMOTE_URL ustawione bez REMOTE_SECRET — adres funkcji byłby otwarty "
+            "dla każdego, kto go pozna. Wyłączam zdalny strzał.")
+        remote_url = ""
+    if remote_url:
+        log(f"☁ Zdalny strzał włączony: sprint i salwa lecą z {urllib.parse.urlsplit(remote_url).netloc}. "
+            f"Gdy nie odpowie, poluję lokalnie.")
+
     # Sprint: wąskie okno pobierania bez przerw, wycelowane w samą sekundę publikacji.
     sprint = None
     sprint_env = os.environ.get("SPRINT", "")
@@ -2215,6 +2356,15 @@ def main():
                     log(f"⇉ Połączenia gotowe (salwa {salvo_size if salvo_size > 1 else 0}, "
                         f"sprint {sprint_threads if sprint else 0}) "
                         f"[{int((time.monotonic() - warmed) * 1000)} ms]")
+                if remote_url:
+                    # Zimny start Lambdy to ~165 ms na init plus ~75 ms na import
+                    # silnika. Pukamy TERAZ, na starcie zrywu, żeby o 11:00:51
+                    # funkcja była już ciepła — kontener żyje potem kilka minut.
+                    zdalne = time.monotonic()
+                    _, blad_warm = call_remote(remote_url, remote_secret, {"warm": True},
+                                               timeout=REMOTE_TIMEOUT_MARGIN)
+                    log(f"☁ Rozgrzewka Irlandii [{int((time.monotonic() - zdalne) * 1000)} ms]"
+                        + (f" — NIEUDANA: {blad_warm}" if blad_warm else ""))
             else:
                 # Ta linia leci dopiero przy NASTĘPNYM sprawdzeniu, czyli sporo po końcu
                 # okna — dlatego podajemy faktyczne granice, a nie sugerujemy „teraz".
@@ -2228,6 +2378,7 @@ def main():
         # SPRINT: przez kilka sekund wokół sekundy publikacji pobieramy BEZ PRZERW
         # kilkoma wątkami. Zwycięzca oddaje gotowe dane, więc rejestracja rusza od razu.
         prefetched = None
+        remote_result = None
         sprint_bounds = burst_bounds(sprint, tz, now_local) if sprint else None
         if sprint_bounds and sprint_bounds[0] <= now_local < sprint_bounds[1] and warm_url:
             if not in_sprint:
@@ -2255,9 +2406,36 @@ def main():
                     log(f"⇉ Salwa odświeżona przed sprintem "
                         f"[{int((time.monotonic() - odswiezone) * 1000)} ms]")
             szukanie = time.monotonic()
-            deadline = szukanie + max(0.0, (sprint_bounds[1] - now_local).total_seconds())
-            prefetched = run_sprint(deadline, sprint_threads, first_listing[0],
-                                    set((load_state_doc() or {}).get("free_ids") or []), tz)
+            zostalo = max(0.0, (sprint_bounds[1] - now_local).total_seconds())
+            deadline = szukanie + zostalo
+            baseline = set((load_state_doc() or {}).get("free_ids") or [])
+            remote_result = None
+            if remote_url:
+                # ZDALNY STRZAŁ: sprint i salwa lecą z eu-west-1, obok serwera Decathlona.
+                # Rejestracja odbywa się TAM, więc wynik trzeba przenieść do stanu tutaj.
+                wynik, blad = call_remote(
+                    remote_url, remote_secret,
+                    remote_payload(first_listing[0], baseline, tzname, zostalo,
+                                   sprint_threads,
+                                   build_reg_cfg(load_config(quiet=True), load_state_doc())),
+                    timeout=zostalo + REMOTE_TIMEOUT_MARGIN)
+                if blad:
+                    # ZAPAS: gdy Irlandia milczy, polujemy lokalnie. Gorzej, ale wciąż.
+                    # Jedyny groźny przypadek to timeout PO rejestracji — wtedy termin
+                    # jest zajęty, a my o tym nie wiemy, więc mówimy o tym głośno.
+                    log(f"! ☁ Zdalny sprint nieudany ({blad}) — poluję lokalnie.")
+                    if "brak odpowiedzi" in blad:
+                        log("! ☁ UWAGA: brak odpowiedzi NIE znaczy, że nic nie "
+                            "zarezerwowano. Sprawdź panel Padel po polowaniu.")
+                else:
+                    prefetched, remote_result = adopt_remote(wynik)
+            # Zapas lokalny ma sens tylko przy SZYBKIEJ wpadce zdalnej (odmowa, zły
+            # adres, brak sekretu) — te wracają w milisekundach i okno jeszcze trwa.
+            # Po timeoucie okna już nie ma, a do tego zdalna strona mogła zarezerwować:
+            # dlatego wtedy nie strzelamy powtórnie, tylko ostrzegamy (wyżej).
+            if prefetched is None and remote_result is None and time.monotonic() < deadline:
+                prefetched = run_sprint(deadline, sprint_threads, first_listing[0],
+                                        baseline, tz, filters=resolve_filters(load_config(quiet=True)))
             if prefetched:
                 log(f"🏁 Sprint: NOWE terminy wykryte po "
                     f"{int((time.monotonic() - szukanie) * 1000)} ms — rejestruję z gotowych danych")
@@ -2268,7 +2446,8 @@ def main():
 
         try:
             rc = run_once(announce_startup=first, skip_light=active,
-                          prefetched=prefetched, defer_push=active or in_sprint)
+                          prefetched=prefetched, defer_push=active or in_sprint,
+                          remote=remote_result)
             if rc != 2:  # 2 = błąd sieci; ponów próbę startowego powiadomienia później
                 first = False
         except Exception as e:  # noqa: BLE001 - pętla ma przetrwać każdy błąd

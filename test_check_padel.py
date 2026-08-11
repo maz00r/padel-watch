@@ -2,6 +2,7 @@
 """Testy jednostkowe silnika (bez sieci). Uruchomienie: python3 -m unittest -v test_check_padel"""
 
 import io
+import gzip
 import base64
 import json
 import os
@@ -2554,3 +2555,208 @@ class DeferredPushTest(unittest.TestCase):
             cp.run_once(skip_light=True, prefetched=(self.lid, self.z_terminem()))
         self.assertTrue(push.called)
         self.assertEqual(cp._pending_notifications, [])
+
+
+class RemoteHandlerTest(unittest.TestCase):
+    """Zdalny strzał z eu-west-1: handler Lambdy + przeniesienie wyniku do dodatku.
+
+    Najważniejsza własność: skoro rejestracja odbyła się w Irlandii, strona lokalna
+    NIE MOŻE zarezerwować tego samego terminu drugi raz.
+    """
+
+    LID = "aaaaaaaa-1111-2222-3333-444444444444"
+
+    def setUp(self):
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "aws_remote"))
+        self.addCleanup(lambda: sys.path.remove(
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "aws_remote")))
+        import handler
+        self.handler = handler
+        self.env = mock.patch.dict(os.environ, {"PADEL_SECRET": "tajne"})
+        self.env.start()
+        self.addCleanup(self.env.stop)
+
+    def doc(self, *godziny):
+        start = datetime.now(timezone.utc) + timedelta(days=7)
+        included = [TestFreeSlots.date_item(
+            start.replace(hour=h, minute=0, second=0, microsecond=0).isoformat(), f"d{h}")
+            for h in godziny]
+        return {"data": {"attributes": {"title": "Kort", "price": None,
+                                        "datesStats": {"availableListingDates": len(included)}}},
+                "included": included}
+
+    def zadanie(self, tresc, sekret="tajne"):
+        return {"headers": {"x-padel-secret": sekret}, "body": json.dumps(tresc)}
+
+    def tresc(self, **nadpisz):
+        baza = {"listing_url": f"https://go.decathlon.pl/l/{self.LID}",
+                "filters": "mon-sun:00:00-24:00", "timezone": "Europe/Warsaw",
+                "baseline_ids": [], "sprint_seconds": 1, "sprint_threads": 1,
+                "salvo": 0, "max_per_run": 5, "name": "Jan", "enabled": True,
+                "token": jwt_with_exp(int(datetime.now(timezone.utc).timestamp()) + 3600)}
+        baza.update(nadpisz)
+        return baza
+
+    def odpal(self, doc, rejestracja=None):
+        """Uruchamia handler z podstawionym pobieraniem i rejestracją."""
+        def fake_register(slot, price, cfg, speculative=False):
+            cfg["transaction_id"] = "tx-" + slot["date_id"]
+            return (rejestracja or (True, "accepted"))
+        with mock.patch.object(cp, "resolve_current_id", side_effect=lambda x: self.LID), \
+                mock.patch.object(cp, "fetch_listing", return_value=doc), \
+                mock.patch.object(cp, "register_slot", side_effect=fake_register), \
+                mock.patch("sys.stdout", io.StringIO()):
+            return self.handler.lambda_handler(self.zadanie(self.tresc()), None)
+
+    def rozpakuj(self, odp):
+        """Dekoduje odpowiedź dokładnie tak, jak zrobi to `call_remote`."""
+        self.assertTrue(odp.get("isBase64Encoded"))
+        self.assertEqual(odp["headers"]["Content-Encoding"], "gzip")
+        return json.loads(gzip.decompress(base64.b64decode(odp["body"])).decode("utf-8"))
+
+    def test_bad_secret_is_rejected_without_details(self):
+        """Adres Function URL jest publiczny — odmowa nie może zdradzać, czemu."""
+        odp = self.handler.lambda_handler(self.zadanie({}, sekret="zle"), None)
+        self.assertEqual(odp["statusCode"], 403)
+        self.assertNotIn("tajne", json.dumps(odp))
+
+    def test_missing_secret_on_function_disables_it(self):
+        """Funkcja bez ustawionego PADEL_SECRET nie wpuszcza NIKOGO (a nie wszystkich)."""
+        with mock.patch.dict(os.environ, {"PADEL_SECRET": ""}):
+            odp = self.handler.lambda_handler(self.zadanie({}, sekret=""), None)
+        self.assertEqual(odp["statusCode"], 403)
+
+    def test_registers_and_returns_results(self):
+        wynik = self.rozpakuj(self.odpal(self.doc(15, 17)))
+        self.assertTrue(wynik["ok"])
+        self.assertEqual(wynik["listing_id"], self.LID)
+        self.assertEqual(len(wynik["registered"]), 2)
+        self.assertTrue(all(v[0] for v in wynik["results"].values()))
+        self.assertTrue(wynik["timings"]["sprint_ms"] >= 0)
+
+    def test_token_never_appears_in_response(self):
+        """Token wraca do domu tylko w postaci, w jakiej przyszedł — czyli wcale."""
+        tresc = self.tresc()
+        odp = self.odpal(self.doc(15))
+        self.assertNotIn(tresc["token"], json.dumps(self.rozpakuj(odp)))
+        self.assertNotIn(tresc["token"], json.dumps(odp))
+
+    def test_no_slots_returns_empty_without_doc(self):
+        wynik = self.rozpakuj(self.odpal(self.doc()))
+        self.assertIsNone(wynik["doc"])
+        self.assertEqual(cp.adopt_remote(wynik), (None, None))
+
+    def test_engine_log_travels_home(self):
+        """Dziennik z Irlandii musi trafić do Dziennika dodatku — inaczej ślad po
+        sekundzie publikacji zostaje tylko w CloudWatch."""
+        wynik = self.rozpakuj(self.odpal(self.doc(15)))
+        self.assertTrue(any("Sprint" in w for w in wynik["log"]))
+        buf = io.StringIO()
+        with mock.patch("sys.stdout", buf):
+            cp.adopt_remote(wynik)
+        self.assertIn("☁", buf.getvalue())
+
+    def test_local_side_does_not_book_again(self):
+        """SEDNO: termin zajęty w Irlandii nie może dostać drugiego strzału z domu."""
+        wynik = self.rozpakuj(self.odpal(self.doc(15)))
+        prefetched, remote = cp.adopt_remote(wynik)
+        self.assertIsNotNone(remote)
+
+        katalog = tempfile.mkdtemp()
+        with mock.patch.object(cp, "STATE_PATH", os.path.join(katalog, "s.json")), \
+                mock.patch.dict(os.environ, {
+                    "LISTINGS": f"https://go.decathlon.pl/l/{self.LID}",
+                    "NTFY_TOPIC": "", "FILTERS": "mon-sun:00:00-24:00",
+                    "AUTO_REGISTER": "true", "AUTO_REGISTER_NAME": "Jan",
+                    "AUTO_REGISTER_DRY_RUN": "false", "AUTO_REGISTER_MAX": "5",
+                    "CONFIG_PATH": os.path.join(katalog, "brak.json")}), \
+                mock.patch.object(cp, "resolve_current_id", side_effect=lambda x: self.LID), \
+                mock.patch.object(cp, "register_slot") as lokalny, \
+                mock.patch("sys.stdout", io.StringIO()):
+            cp.run_once(skip_light=True, prefetched=(self.LID, self.doc()))   # baseline
+            cp.run_once(skip_light=True, prefetched=prefetched, remote=remote)
+        lokalny.assert_not_called()
+
+    def test_remote_results_reach_the_notification(self):
+        """To, co zarezerwowała Irlandia, musi wejść do treści powiadomienia."""
+        wynik = self.rozpakuj(self.odpal(self.doc(15)))
+        prefetched, remote = cp.adopt_remote(wynik)
+        katalog = tempfile.mkdtemp()
+        with mock.patch.object(cp, "STATE_PATH", os.path.join(katalog, "s.json")), \
+                mock.patch.dict(os.environ, {
+                    "LISTINGS": f"https://go.decathlon.pl/l/{self.LID}",
+                    "NTFY_TOPIC": "temat", "FILTERS": "mon-sun:00:00-24:00",
+                    "AUTO_REGISTER": "true", "AUTO_REGISTER_NAME": "Jan",
+                    "CONFIG_PATH": os.path.join(katalog, "brak.json")}), \
+                mock.patch.object(cp, "resolve_current_id", side_effect=lambda x: self.LID), \
+                mock.patch.object(cp, "ntfy_post", return_value=True) as push, \
+                mock.patch("sys.stdout", io.StringIO()):
+            cp.run_once(skip_light=True, prefetched=(self.LID, self.doc()))
+            cp.run_once(skip_light=True, prefetched=prefetched, remote=remote)
+        tresc = " ".join(str(a) for c in push.call_args_list for a in c.args)
+        self.assertIn("Auto-rejestracja: OK", tresc)
+
+    def test_warm_ping_is_cheap_and_needs_no_listing(self):
+        """Rozgrzewka ma odpowiedzieć od razu — jej sens to uniknięcie zimnego startu."""
+        odp = self.handler.lambda_handler(self.zadanie({"warm": True}), None)
+        wynik = self.rozpakuj(odp)
+        self.assertTrue(wynik["warm"])
+        self.assertNotIn("doc", wynik)
+
+    def test_warm_ping_still_requires_the_secret(self):
+        odp = self.handler.lambda_handler(self.zadanie({"warm": True}, sekret="zle"), None)
+        self.assertEqual(odp["statusCode"], 403)
+
+
+class RemoteClientTest(unittest.TestCase):
+    """Klient zdalnego strzału: sekret obowiązkowy, wpadka nie wywraca polowania."""
+
+    def test_response_is_gunzipped(self):
+        dane = gzip.compress(json.dumps({"ok": True, "doc": None}).encode())
+
+        class Odp(io.BytesIO):
+            headers = {"Content-Encoding": "gzip"}
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+
+        with mock.patch.object(cp.urllib.request, "urlopen", return_value=Odp(dane)):
+            wynik, blad = cp.call_remote("https://x/y", "s", {"a": 1}, timeout=5)
+        self.assertIsNone(blad)
+        self.assertTrue(wynik["ok"])
+
+    def test_timeout_is_reported_as_no_answer(self):
+        """Rozróżnienie jest istotne: brak odpowiedzi NIE znaczy, że nic nie zapisano."""
+        with mock.patch.object(cp.urllib.request, "urlopen",
+                               side_effect=cp.urllib.error.URLError("timed out")):
+            wynik, blad = cp.call_remote("https://x/y", "s", {}, timeout=1)
+        self.assertIsNone(wynik)
+        self.assertIn("brak odpowiedzi", blad)
+
+    def test_secret_goes_in_header_and_token_in_body(self):
+        zlapane = {}
+
+        class Odp(io.BytesIO):
+            headers = {}
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+
+        def fake(req, timeout=None):
+            zlapane["naglowki"] = dict(req.headers)
+            zlapane["tresc"] = json.loads(req.data.decode())
+            return Odp(b'{"ok":true}')
+
+        with mock.patch.object(cp.urllib.request, "urlopen", side_effect=fake):
+            cp.call_remote("https://x/y", "sekret", {"token": "JWT"}, timeout=5)
+        self.assertEqual(zlapane["naglowki"].get("X-padel-secret"), "sekret")
+        self.assertEqual(zlapane["tresc"]["token"], "JWT")
+        # Token NIE MOŻE trafić do adresu ani nagłówków — tam bywa logowany po drodze.
+        self.assertNotIn("JWT", json.dumps(zlapane["naglowki"]))
+
+    def test_payload_carries_raw_filter_string(self):
+        """Filtry jadą surowym napisem, żeby obie strony sparsowały je tak samo."""
+        with mock.patch.dict(os.environ, {"FILTERS": "mon-fri:15:00-02:00"}):
+            tresc = cp.remote_payload("https://go.decathlon.pl/l/x", {"a"}, "Europe/Warsaw",
+                                      4.0, 3, {"salvo": 6, "max_per_run": 8, "token": "t"})
+        self.assertEqual(tresc["filters"], "mon-fri:15:00-02:00")
+        self.assertEqual(tresc["baseline_ids"], ["a"])
+        self.assertEqual(tresc["salvo"], 6)

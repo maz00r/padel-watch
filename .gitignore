@@ -4,5 +4,6 @@ __pycache__/
 .venv/
 state.json
 data/
+aws_remote/padel-remote.zip
 # lokalne ustawienia Claude Code
 .claude/
