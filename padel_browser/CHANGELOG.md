@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.11.0 — zdalny strzał z eu-west-1 (opcjonalny)
+
+- **Sprint i salwa mogą wykonywać się w AWS Irlandia**, tuż obok serwera Decathlona.
+  Włącza się dwiema opcjami: `remote_url` i `remote_secret`. Puste = wszystko dzieje
+  się lokalnie, dokładnie jak dotąd. Instrukcja krok po kroku: `aws_remote/README.md`.
+- **Zmierzony zysk** (`aws_probe/`, Lambda 1769 MB): runda do serwera 0,5 ms zamiast
+  ~42 ms, ciężkie pobranie 39 ms zamiast ~80 ms. Ścieżka „termin pojawia się na
+  serwerze → nasze żądanie tam dociera" spada ze **~107 ms do ~32 ms**.
+- **W Home Assistancie zostaje wszystko poza tymi 15 sekundami**: logowanie,
+  przeglądarka, token, panel, kalendarz, powiadomienia, stan.
+- **Token nie jest w AWS zapisywany.** Leci w treści żądania, żyje w pamięci przez
+  jedno wywołanie i znika; w dzienniku funkcji widać wyłącznie jego długość.
+- **Zdalna strona używa TEGO SAMEGO `check_padel.py`.** Paczka Lambdy zawiera silnik
+  dodatku, więc filtry, limity i salwa są identyczne. Dwie osobne implementacje
+  rozjechałyby się przy pierwszej zmianie — i skończyło się rezerwacją terminu,
+  którego nie chcesz, albo o jeden za dużo.
+- **Zapas lokalny.** Gdy Irlandia odmówi lub nie odpowie szybko, dodatek poluje sam.
+  Po timeoucie NIE strzela powtórnie (funkcja mogła zdążyć zarezerwować) i mówi
+  o tym wprost w Dzienniku.
+- **`remote_url` bez `remote_secret` wyłącza zdalny strzał** zamiast wysyłać token
+  pod adres bez żadnej bramki.
+- Dziennik z Irlandii jest przepisywany do Dziennika dodatku (linie z `☁`) — bez tego
+  jedyny ślad po sekundzie publikacji zostawałby w CloudWatch.
+- `run_sprint` przyjmuje filtry z zewnątrz (w Lambdzie nie ma `config.json`), a budowa
+  ustawień auto-rejestracji trafiła do wspólnego `build_reg_cfg`.
+
 ## 0.10.0 — cały grafik w logu, push poza sekundą publikacji
 
 - **Log pokazuje CAŁY grafik dnia, nie tylko wolne terminy**:

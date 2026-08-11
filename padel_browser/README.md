@@ -41,6 +41,8 @@ przechodzisz normalne logowanie, łącznie z kodem z maila.
 | `sprint` | **sprint**: wąskie okno pobierania BEZ PRZERW, `DNI:GG:MM:SS`. Puste = wyłączony | `mon-sun:11:00:51` |
 | `sprint_seconds` | ile sekund trwa sprint (1–30) | `4` |
 | `sprint_threads` | ile wątków pobiera równolegle w sprincie (1–4) | `3` |
+| `remote_url` | adres funkcji AWS w eu-west-1, która wykona sprint i salwę. Puste = wszystko lokalnie | `` |
+| `remote_secret` | sekret do tej funkcji (ta sama wartość co `PADEL_SECRET` w Lambdzie) | `` |
 | `listing_url` | link do kortu (Decathlon GO); app sam podąża za zmianą adresu | `https://go.decathlon.pl/l/1c0ec93e-...` |
 | `timezone` | strefa czasowa filtrów i logów | `Europe/Warsaw` |
 | `auto_register` | próba automatycznego zapisu na nowy termin | `false` |
@@ -266,6 +268,24 @@ Dlatego **w zrywie powiadomienia lądują w kolejce** i wychodzą po zamknięciu
 (w Dzienniku: `📨 Powiadomienia odłożone na po zrywie`, potem `📨 Wysłano N odłożonych`).
 Rezerwacja dzieje się natychmiast, jak dotąd — opóźniony jest wyłącznie push.
 **Poza zrywem nic się nie zmienia**: powiadomienie leci od razu.
+
+### Zdalny strzał z Irlandii (`remote_url`) — opcjonalny
+
+`go.decathlon.pl` stoi w AWS eu-west-1. Zmierzone: runda do serwera **0,5 ms** stamtąd
+wobec ~42 ms z domu, a ścieżka „termin się pojawia → nasze żądanie dociera" spada
+ze **~107 ms do ~32 ms**. Konkurent zabiera wieczorne godziny w ~200 ms, więc to
+spory kawałek jego przewagi.
+
+Przenosi się **tylko te kilkanaście sekund**: sprint i salwa. Logowanie, przeglądarka,
+token, panel, kalendarz, powiadomienia i stan zostają w Home Assistancie. Token leci
+w treści żądania i **nigdzie w AWS nie jest zapisywany**.
+
+Pełna instrukcja: [`aws_remote/README.md`](../aws_remote/README.md). Koszt: praktycznie
+zero (~530 GB-s miesięcznie z 400 000 darmowych).
+
+Gdy Irlandia odmówi lub nie odpowie, dodatek poluje lokalnie. Po **timeoucie** nie
+strzela powtórnie — funkcja mogła zdążyć zarezerwować — i ostrzega w Dzienniku,
+żeby sprawdzić panel.
 
 ### Sprint (`sprint`) — ostatnie 90 ms
 
