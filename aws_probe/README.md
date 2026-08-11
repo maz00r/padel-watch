@@ -72,41 +72,49 @@ Przy nowym koncie to ważniejsze niż sam pomiar:
 3. **Reserved concurrency = 1** (Configuration → Concurrency) — funkcja nigdy nie odpali się równolegle.
 4. **Nie dodawaj Function URL** do tej funkcji. Pomiar odpalasz przyciskiem Test; adres publiczny jest tu niepotrzebny.
 
-## Jak czytać wynik
+## Wynik pomiaru (11.08.2026) — ROZSTRZYGNIĘTY
 
-```
-Miejsce pomiaru : lambda:eu-west-1
-Adresy ELB      : 52.30.168.98, 54.76.133.149
-DNS             : 40.3 ms
-  TCP 52.30.168.98    : 0.3 ms (min 0.3, max 0.6)
-  TCP 54.76.133.149   : 0.8 ms (min 0.7, max 0.8)
-TLS             : 17.3 ms (TLSv1.3)
-HTTP zimny      : 63.3 ms   (nowe połączenie)
-HTTP CIEPŁY     : 65.0 ms   (min 33.1, max 187.9)   <- ta liczba decyduje
-  kolejno       : [...] ms
-Odpowiedź       : 25744 B na drucie (gzip)
-CPU (bez sieci) : ... ms
-```
+Przy 512 MB, czyli ułamku rdzenia, wynik był zafałszowany. Przy **1769 MB**:
 
-To jest **prawdziwy wynik z 11.08 przy 512 MB**. Sieć zniknęła zgodnie z planem
-(0,3 ms zamiast 61 ms), ale ciepłe pobranie zostało na 65 ms. Podejrzenie: rdzeń był
-wygłodzony — patrz `CPU (bez sieci)` i uwaga o pamięci wyżej. Dlatego pomiar trzeba
-powtórzyć przy 1769 MB, zanim wyciągnie się z niego wniosek.
+| warstwa | dom | eu-west-1 (1769 MB) |
+|---|---|---|
+| TCP (jedna runda) | „61 ms" | **0,5 ms** |
+| TLS | — | 3,2 ms *(przy 512 MB: 17,3 ms — czysty procesor)* |
+| HTTP ciepły | ~80 ms | **38,8 ms** (31–48) |
 
-Każda warstwa osobno, bo tylko tak widać, gdzie siedzi czas. `HTTP CIEPŁY` to dokładnie
-koszt jednego zapytania sprintu i jednego strzału salwy.
+Ciepłe pomiary kolejno: `[32.5, 43.3, 34.3, 44.0, 31.2, 47.5]` — bez trendu malejącego,
+więc to zmienność serwera, nie rozgrzewka.
 
-**Reguła decyzyjna** — porównaj `HTTP CIEPŁY` z `pobranie` z Dziennika (~80 ms):
+### Sprzeczność 61 ms vs 48 ms — wyjaśniona
 
-| wynik | wniosek |
-|---|---|
-| ≤ 20 ms | przeprowadzka warta zachodu; oszczędza ~120 ms na ścieżce rezerwacji |
-| 20–50 ms | zysk realny, ale mniejszy — wtedy VPS w Londynie za kilkanaście zł może wystarczyć |
-| > 50 ms | premisa upada, nie ruszamy się nigdzie i szukamy gdzie indziej |
+Pomiar daje **czas serwera bez udziału sieci: ~38 ms** na ciężką odpowiedź. Podstawmy
+to do obserwacji z domu:
 
-Osobno warto zerknąć na `TCP` obu adresów ELB. Jeśli różnią się wyraźnie, to znaczy,
-że DNS podaje je na zmianę i część naszej dziennej zmienności bierze się stąd,
-a nie z obciążenia serwera.
+| obserwacja z Dziennika | model `RTT + serwer` | pasuje? |
+|---|---|---|
+| ciężkie pobranie **80 ms** | 42 + 38 | ✓ |
+| `users.getMe` **48 ms** (lekka odpowiedź) | 42 + 6 | ✓ |
+
+Obie liczby wychodzą przy **RTT ≈ 42 ms**, a żadna nie wychodzi przy 61 ms. Czyli
+**to `log_rtt` w dodatku podaje wartość zawyżoną** — mierzy raz, przy starcie procesu,
+często wiele godzin przed polowaniem. 42 ms to zresztą wartość znacznie bardziej
+wiarygodna dla trasy Warszawa–Dublin (~1800 km).
+
+### Ile realnie kupuje przeprowadzka
+
+Licząc od „termin pojawia się na serwerze" do „nasze żądanie rezerwacji tam dociera":
+
+| | dom | eu-west-1 |
+|---|---|---|
+| wykrycie (sprint, 3 wątki bez przerw) | ~65 ms | ~32 ms |
+| dolot strzału | ~42 ms | ~0,3 ms |
+| **razem** | **~107 ms** | **~32 ms** |
+
+**Około 75 ms, czyli trzykrotnie szybciej do celu.** Przy konkurencie zabierającym
+wieczorne godziny w ~200 ms to jest różnica, która może przeważyć.
+
+Czego przeprowadzka NIE zmieni: ~38 ms, które serwer Decathlonu potrzebuje na
+wygenerowanie ciężkiej odpowiedzi, oraz zmienności 31–48 ms.
 
 ## Czego ten pomiar NIE rozstrzygnie
 
