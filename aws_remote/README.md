@@ -28,20 +28,26 @@ z **400 000 darmowych**. Nawet bez darmowego limitu wychodzi kilka groszy miesi�
 
 ---
 
-## 1. Zbuduj paczkę
+## 1. Pobierz paczkę
 
-Na komputerze z repozytorium:
+Gotowa paczka leży w repozytorium — nie musisz nic budować:
 
-```bash
-./aws_remote/build.sh
-```
+**[⬇ padel-remote.zip](https://github.com/maz00r/padel-watch/raw/main/aws_remote/padel-remote.zip)**
 
-Powstaje `aws_remote/padel-remote.zip` (~40 KB). W środku są dwa pliki: `handler.py`
-i `check_padel.py` — **ten sam silnik, którego używa dodatek**. To celowe: dwie osobne
-implementacje filtrów albo limitu rezerwacji rozjechałyby się przy pierwszej zmianie,
-a skutkiem byłaby rezerwacja terminu, którego nie chcesz, albo o jeden za dużo.
+W środku są dwa pliki: `handler.py` i `check_padel.py` — **ten sam silnik, którego używa
+dodatek**. To celowe: dwie osobne implementacje filtrów albo limitu rezerwacji
+rozjechałyby się przy pierwszej zmianie, a skutkiem byłaby rezerwacja terminu, którego
+nie chcesz, albo o jeden za dużo.
 
-Paczkę trzeba przebudować i wgrać ponownie po **każdej** zmianie w `check_padel.py`.
+Paczka jest przebudowywana przy każdej zmianie silnika, a **CI pilnuje, żeby nie
+rozjechała się ze źródłami** — porównuje jej zawartość z `handler.py` i `check_padel.py`
+przy każdym PR. Gdyby się rozjechała, wgrałbyś stary silnik i dowiedziałbyś się o tym
+dopiero po przegranym terminie.
+
+> Jeśli wolisz zbudować samodzielnie: `./aws_remote/build.sh`.
+
+**Po każdej aktualizacji dodatku** wróć tu, pobierz paczkę ponownie i wgraj
+(punkt 3) — Lambda nie aktualizuje się sama.
 
 ## 2. Utwórz funkcję
 
