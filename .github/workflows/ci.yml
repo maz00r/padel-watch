@@ -19,3 +19,14 @@ jobs:
         run: python3 -m unittest -v test_check_cinema
       - name: Składnia silników
         run: python3 -m py_compile padel_browser/check_padel.py padel_browser/read_token.py padel_browser/panel.py cinema_watch/check_cinema.py
+      - name: Paczka Lambdy jest aktualna
+        # Wersjonowana paczka to plik, który użytkownik pobiera i wgrywa do AWS.
+        # Gdyby rozjechała się ze źródłami, wgrałby STARY silnik i nie dowiedziałby
+        # się o tym inaczej niż po przegranym terminie. Porównujemy ZAWARTOŚĆ,
+        # nie bajty archiwum: zip niesie znaczniki czasu, więc bajty różnią się zawsze.
+        run: |
+          mkdir -p /tmp/zip-check
+          unzip -q -o aws_remote/padel-remote.zip -d /tmp/zip-check
+          diff -q /tmp/zip-check/handler.py aws_remote/handler.py
+          diff -q /tmp/zip-check/check_padel.py padel_browser/check_padel.py
+          echo "paczka zgodna ze źródłami"
