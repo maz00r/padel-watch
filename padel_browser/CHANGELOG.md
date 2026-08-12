@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.11.1 — naprawa: zdalna rejestracja padała na ważnym tokenie
+
+- **Zdalna strona uznawała ważny token za wygasły i próbowała go odświeżyć.**
+  W `handler.py` ustawiłem `browser_mode: False`, przez co `ensure_decathlon_token`
+  traktował token jako wygasły już **300 s (`TOKEN_EXPIRY_MARGIN`) przed czasem**
+  i szedł po serwerowy `/auth/refresh` — a ten w Decathlon GO **zawsze** zwraca 401.
+  Token żyje ~15 min, więc rejestracja z Irlandii padała przez **ostatnią 1/3 jego
+  życia**. 12.08 tak przepadło **17:00**: obie próby zwróciły
+  `nie udało się odświeżyć tokenu: HTTPError 401` po 8–9 ms.
+  To dokładnie ten sam błąd, który naprawiono lokalnie w 0.3.1 — wprowadzony ponownie
+  po zdalnej stronie.
+- **Poprawka: `browser_mode: True` w Lambdzie**, mimo że żadnej przeglądarki tam nie ma.
+  Chodzi o semantykę wygaśnięcia, nie o przeglądarkę: w tym trybie „wygasły" znaczy
+  `exp` w przeszłości i nie ma żadnego refreshu.
+- **`wait_for_fresher_token` wraca natychmiast, gdy nie ma pliku tokenu.** Bez tego
+  po HTTP 401 czekałaby ~24 s na przeglądarkę, której w danym środowisku nie ma —
+  i to w samej sekundzie publikacji.
+- **Zapas lokalny zadziałał** i uratował 15:00: po wpadce zdalnej dodatek zarejestrował
+  z domu 209 ms później. To była pierwsza produkcyjna próba tej ścieżki.
+
+
 ## 0.11.0 — zdalny strzał z eu-west-1 (opcjonalny)
 
 - **Sprint i salwa mogą wykonywać się w AWS Irlandia**, tuż obok serwera Decathlona.

@@ -1100,6 +1100,7 @@ class BrowserModeTokenTest(unittest.TestCase):
         cfg = {"token": jwt_with_exp(now + 3600), "browser_mode": True,
                "name": "Jan Kowalski", "free_only": True}
         with mock.patch.object(cp, "decathlon_rpc", fake_rpc), \
+                mock.patch.object(cp, "TOKEN_FILE", "/data/token.json"), \
                 mock.patch.object(cp, "token_from_file", lambda: fresh), \
                 mock.patch.object(cp, "refresh_decathlon_token",
                                   side_effect=AssertionError("w trybie przeglądarki nie wolno odświeżać")):
@@ -2318,12 +2319,16 @@ class PanelRenewalDipTest(unittest.TestCase):
 
     def test_wait_returns_first_different_token(self):
         tokens = iter(["stary", "stary", "nowy"])
-        with mock.patch.object(cp, "token_from_file", side_effect=lambda: next(tokens)), \
+        # TOKEN_FILE musi być ustawiony: bez pliku funkcja słusznie wraca od razu,
+        # a podstawianie token_from_file przy pustym TOKEN_FILE to stan niemożliwy.
+        with mock.patch.object(cp, "TOKEN_FILE", "/data/token.json"), \
+                mock.patch.object(cp, "token_from_file", side_effect=lambda: next(tokens)), \
                 mock.patch.object(cp.time, "sleep"):
             self.assertEqual(cp.wait_for_fresher_token("stary"), "nowy")
 
     def test_wait_gives_up_after_attempts(self):
-        with mock.patch.object(cp, "token_from_file", return_value="stary"), \
+        with mock.patch.object(cp, "TOKEN_FILE", "/data/token.json"), \
+                mock.patch.object(cp, "token_from_file", return_value="stary"), \
                 mock.patch.object(cp.time, "sleep") as slept:
             self.assertEqual(cp.wait_for_fresher_token("stary", attempts=3), "")
         self.assertEqual(slept.call_count, 3)
@@ -2695,6 +2700,36 @@ class RemoteHandlerTest(unittest.TestCase):
             cp.run_once(skip_light=True, prefetched=prefetched, remote=remote)
         tresc = " ".join(str(a) for c in push.call_args_list for a in c.args)
         self.assertIn("Auto-rejestracja: OK", tresc)
+
+    def test_token_inside_expiry_margin_still_registers(self):
+        """REGRESJA 12.08: zdalna rejestracja padała na tokenie WAŻNYM, ale bliskim końca.
+
+        Przy `browser_mode=False` `ensure_decathlon_token` uznaje token za wygasły już
+        TOKEN_EXPIRY_MARGIN (300 s) przed czasem i próbuje serwerowego /auth/refresh,
+        który w Decathlon GO zawsze zwraca 401. Token żyje ~15 min, więc wywracało to
+        rejestrację przez ostatnią 1/3 jego życia — tak przepadło 17:00.
+        """
+        zaraz_wygasa = jwt_with_exp(int(datetime.now(timezone.utc).timestamp()) + 120)
+        with mock.patch.object(cp, "refresh_decathlon_token") as refresh, \
+                mock.patch.object(cp, "resolve_current_id", side_effect=lambda x: self.LID), \
+                mock.patch.object(cp, "fetch_listing", return_value=self.doc(15)), \
+                mock.patch.object(cp, "decathlon_rpc", return_value={"id": "tx", "processState": "accepted"}), \
+                mock.patch("sys.stdout", io.StringIO()):
+            odp = self.handler.lambda_handler(
+                self.zadanie(self.tresc(token=zaraz_wygasa)), None)
+        refresh.assert_not_called()
+        wynik = self.rozpakuj(odp)
+        self.assertEqual(len(wynik["registered"]), 1,
+                         f"rejestracja padła mimo ważnego tokenu: {wynik.get('results')}")
+
+    def test_expired_token_does_not_wait_for_a_browser_that_is_not_there(self):
+        """Bez pliku tokenu nie ma na co czekać — czekanie zjadłoby całe okno sprintu."""
+        start = time.monotonic()
+        with mock.patch.object(cp, "TOKEN_FILE", ""), mock.patch.object(cp, "time") as fake_time:
+            fake_time.sleep.side_effect = AssertionError("nie wolno spać bez pliku tokenu")
+            fake_time.monotonic = time.monotonic
+            self.assertEqual(cp.wait_for_fresher_token("stary"), "")
+        self.assertLess(time.monotonic() - start, 1.0)
 
     def test_warm_ping_is_cheap_and_needs_no_listing(self):
         """Rozgrzewka ma odpowiedzieć od razu — jej sens to uniknięcie zimnego startu."""

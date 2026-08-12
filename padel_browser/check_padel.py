@@ -915,7 +915,14 @@ TOKEN_WAIT_DELAY = 3
 
 
 def wait_for_fresher_token(token, attempts=TOKEN_WAIT_ATTEMPTS, delay=TOKEN_WAIT_DELAY):
-    """Czeka, aż przeglądarka zapisze token INNY niż podany. Zwraca '' gdy się nie doczekał."""
+    """Czeka, aż przeglądarka zapisze token INNY niż podany. Zwraca '' gdy się nie doczekał.
+
+    Bez pliku tokenu nie ma na co czekać — wracamy NATYCHMIAST. Inaczej czekalibyśmy
+    pełne ~24 s na przeglądarkę, której w danym środowisku w ogóle nie ma (np. w Lambdzie
+    w Irlandii), i to dokładnie w sekundzie publikacji.
+    """
+    if not TOKEN_FILE:
+        return ""
     for _ in range(attempts):
         got = token_from_file()
         if got and got != token:

@@ -107,9 +107,17 @@ def poluj(wejscie):
             "enabled": True,
             "speculative": bool(wejscie.get("speculative")),
             "token": wejscie.get("token") or "",
-            # W Irlandii NIE MA pliku z przeglądarki, więc nie ma na co czekać po 401.
-            # Świeżość tokenu jest obowiązkiem strony wywołującej — ona jedna ją zna.
-            "browser_mode": False,
+            # browser_mode=True, mimo że tu ŻADNEJ przeglądarki nie ma. Chodzi
+            # o semantykę wygaśnięcia, nie o przeglądarkę:
+            #   False -> token uznany za wygasły już na TOKEN_EXPIRY_MARGIN (300 s)
+            #            przed czasem i próba serwerowego /auth/refresh, która
+            #            w Decathlon GO ZAWSZE kończy się 401,
+            #   True  -> wygasły znaczy exp w przeszłości, bez żadnego refreshu.
+            # Przy tokenie żyjącym ~15 min ustawienie False wywracało rejestrację
+            # przez ostatnią 1/3 jego życia. Tak przepadło 17:00 w dniu 12.08.
+            # Czekania na świeższy token z pliku nie ma się co bać: bez TOKEN_FILE
+            # `wait_for_fresher_token` wraca natychmiast.
+            "browser_mode": True,
             "refresh_cookie": "", "refresh_token": "",
             "name": wejscie.get("name") or "",
             "age": wejscie.get("age"),
