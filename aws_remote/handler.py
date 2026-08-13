@@ -31,6 +31,11 @@ import time
 import check_padel as cp
 
 SEKRET_NAGLOWEK = "x-padel-secret"
+# Pamięć, przy której Lambda daje PEŁNY rdzeń. Poniżej dostajesz jego ułamek,
+# a moc procesora decyduje tu o wszystkim: TLS, parsowanie 260 KB JSON-a w każdym
+# wątku sprintu i równoległe strzały salwy. W sondzie (`aws_probe/`) przy 512 MB
+# samo uzgodnienie TLS zajmowało 17 ms zamiast 3 ms.
+LAMBDA_PELNY_RDZEN_MB = 1769
 # Twardy sufit na okno sprintu. Wywołujący i tak podaje własne, krótsze, ale bez
 # sufitu literówka w konfiguracji dodatku potrafiłaby trzymać funkcję do timeoutu.
 MAX_SPRINT_SEKUND = 20
@@ -76,6 +81,15 @@ def _odpowiedz(dane, kod=200):
 def poluj(wejscie):
     """Sprint + salwa. Zwraca słownik wyniku; nie podnosi wyjątków sieciowych."""
     started = time.monotonic()
+    # Przydział pamięci = przydział CPU. Raportujemy go ZAWSZE, bo bez tej liczby
+    # nie da się odróżnić „serwer Decathlona jest wolny" od „nasza funkcja jest
+    # wygłodzona" — a to dwa zupełnie różne problemy z różnymi rozwiązaniami.
+    pamiec = os.environ.get("AWS_LAMBDA_FUNCTION_MEMORY_SIZE")
+    if pamiec:
+        cp.log(f"Lambda: {pamiec} MB" + (
+            f" — UWAGA, to UŁAMEK rdzenia. Ustaw {LAMBDA_PELNY_RDZEN_MB} MB, "
+            f"inaczej strzały są wolne z NASZEJ winy, nie Decathlona."
+            if int(pamiec) < LAMBDA_PELNY_RDZEN_MB else " (pełny rdzeń)"))
     tz = cp.ZoneInfo(wejscie.get("timezone") or "Europe/Warsaw") if cp.ZoneInfo else None
     # Filtry parsujemy TĄ SAMĄ funkcją co dodatek, z tego samego surowego napisu.
     filtry = []
@@ -86,6 +100,16 @@ def poluj(wejscie):
     sekundy = max(1, min(float(wejscie.get("sprint_seconds") or 4), MAX_SPRINT_SEKUND))
     watki = int(wejscie.get("sprint_threads") or 3)
     baseline = set(wejscie.get("baseline_ids") or [])
+
+    # Rozgrzewka połączeń salwy — dokładnie ta sama osłona co w dodatku. W regionie
+    # kosztuje kilka ms, a zdejmuje z równania uzgadnianie TLS w chwili strzału.
+    # NIE jest wyjaśnieniem wolnych strzałów z 13.08, tylko usunięciem jednej zmiennej.
+    salwa = min(int(wejscie.get("salvo") or 0), cp.SALVO_MAX)
+    if salwa > 1:
+        rozgrzane = time.monotonic()
+        cp.warm_connections(cp.salvo_pool(salwa), salwa,
+                            cp.LISTING_URL.format(id=cp.listing_id_from_url(wejscie["listing_url"])))
+        cp.log(f"Salwa rozgrzana [{int((time.monotonic() - rozgrzane) * 1000)} ms]")
 
     szukanie = time.monotonic()
     trafienie = cp.run_sprint(szukanie + sekundy, watki, wejscie["listing_url"],

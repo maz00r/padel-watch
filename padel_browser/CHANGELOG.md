@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.11.2 — diagnostyka zdalnych strzałów
+
+- **Handler raportuje swój przydział pamięci** (czyli w Lambdzie przydział CPU)
+  i ostrzega, gdy jest poniżej 1769 MB. 13.08 strzały z Irlandii zajmowały
+  **185–382 ms**, podczas gdy lokalne z Polski w tej samej sekundzie **53–81 ms** —
+  czyli zdalne były 3–5× WOLNIEJSZE mimo rundy 0,5 ms zamiast ~42 ms. Nie dało się
+  rozstrzygnąć dlaczego, bo nie logowałem najważniejszej zmiennej. W sondzie
+  (`aws_probe/`) raportuję ją od początku; w handlerze zabrakło.
+- **Połączenia salwy są rozgrzewane w Lambdzie**, tak samo jak lokalnie. W regionie
+  kosztuje kilka ms. To NIE jest wyjaśnienie wolnych strzałów, tylko usunięcie
+  jednej zmiennej z równania.
+
+
 ## 0.11.1 — naprawa: zdalna rejestracja padała na ważnym tokenie
 
 - **Zdalna strona uznawała ważny token za wygasły i próbowała go odświeżyć.**
