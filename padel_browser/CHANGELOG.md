@@ -2,6 +2,16 @@
 
 ## 0.11.2 — diagnostyka zdalnych strzałów
 
+- **Każdy strzał salwy pokazuje, KIEDY ruszył** względem startu salwy:
+  `[start +1 ms, 155 ms]`. To rozstrzyga, kto odpowiada za „schodek" czasów.
+  13.08 z Irlandii cztery strzały naraz zajęły **185/217/326/382 ms**, a jeden samotny
+  **121 ms** — jeśli starty są bliskie zeru, kolejkuje serwer Decathlona; jeśli się
+  rozjeżdżają, wina jest po naszej stronie (pula wątków, DNS, TLS). Bez tej liczby
+  to była zgadywanka.
+- **Hipoteza „wygłodzony rdzeń Lambdy" ODPADA** — funkcja ma 1769 MB, czyli pełny
+  rdzeń, potwierdzone w konsoli. Zdalne strzały były wolniejsze od lokalnych mimo
+  80× krótszej drogi do serwera i to nadal nie jest wyjaśnione.
+
 - **Handler raportuje swój przydział pamięci** (czyli w Lambdzie przydział CPU)
   i ostrzega, gdy jest poniżej 1769 MB. 13.08 strzały z Irlandii zajmowały
   **185–382 ms**, podczas gdy lokalne z Polski w tej samej sekundzie **53–81 ms** —
