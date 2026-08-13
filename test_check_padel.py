@@ -2731,6 +2731,26 @@ class RemoteHandlerTest(unittest.TestCase):
             self.assertEqual(cp.wait_for_fresher_token("stary"), "")
         self.assertLess(time.monotonic() - start, 1.0)
 
+    def test_memory_allocation_is_always_reported(self):
+        """Bez tej liczby nie odróżnisz wolnego serwera od własnego wygłodzenia CPU.
+
+        13.08 strzały z Irlandii zajmowały 185–382 ms, podczas gdy lokalne z Polski
+        w tej samej sekundzie 53–81 ms. Nie dało się rozstrzygnąć, bo handler nie
+        raportował swojego przydziału pamięci — czyli w Lambdzie przydziału CPU.
+        """
+        with mock.patch.dict(os.environ, {"AWS_LAMBDA_FUNCTION_MEMORY_SIZE": "512"}):
+            wynik = self.rozpakuj(self.odpal(self.doc(15)))
+        dziennik = " ".join(wynik["log"])
+        self.assertIn("512 MB", dziennik)
+        self.assertIn("UŁAMEK rdzenia", dziennik)
+
+    def test_full_core_is_not_flagged(self):
+        with mock.patch.dict(os.environ, {"AWS_LAMBDA_FUNCTION_MEMORY_SIZE": "1769"}):
+            wynik = self.rozpakuj(self.odpal(self.doc(15)))
+        dziennik = " ".join(wynik["log"])
+        self.assertIn("pełny rdzeń", dziennik)
+        self.assertNotIn("UWAGA", dziennik)
+
     def test_warm_ping_is_cheap_and_needs_no_listing(self):
         """Rozgrzewka ma odpowiedzieć od razu — jej sens to uniknięcie zimnego startu."""
         odp = self.handler.lambda_handler(self.zadanie({"warm": True}), None)
