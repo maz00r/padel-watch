@@ -2815,3 +2815,38 @@ class RemoteClientTest(unittest.TestCase):
         self.assertEqual(tresc["filters"], "mon-fri:15:00-02:00")
         self.assertEqual(tresc["baseline_ids"], ["a"])
         self.assertEqual(tresc["salvo"], 6)
+
+
+class SalvoStartOffsetTest(SalvoHelpers, unittest.TestCase):
+    """Odstęp startu każdego strzału w salwie — rozstrzyga, kto robi „schodek".
+
+    13.08 z Irlandii cztery strzały naraz zajęły 185/217/326/382 ms, a jeden samotny
+    121 ms. Bez odstępów startu nie da się orzec, czy kolejkuje serwer, czy nasza pula.
+    """
+
+    def test_log_shows_when_each_shot_started(self):
+        _, _, out = self.run_with({15: (True, "accepted", "t1"), 17: (True, "accepted", "t2"),
+                                   18: (True, "accepted", "t3"), 19: (True, "accepted", "t4")},
+                                  cfg=self.cfg(max_per_run=4))
+        self.assertIn("start +", out, "brak odstępu startu — pomiar bezużyteczny")
+
+    def test_offsets_are_small_when_shots_really_are_parallel(self):
+        """Skoro salwa strzela równolegle, wszystkie starty muszą być blisko zera.
+
+        Gdyby któryś ruszał setki ms później, „schodek" byłby NASZĄ winą, nie serwera.
+        """
+        bariera = threading.Barrier(4, timeout=5)
+
+        def fake_register(slot, price, cfg, speculative=False):
+            bariera.wait()
+            return True, "accepted"
+
+        with mock.patch.object(cp, "register_slot", side_effect=fake_register), \
+                mock.patch("sys.stdout", io.StringIO()):
+            wyniki = cp.fire_salvo(self.slots(15, 17, 18, 19), {},
+                                   self.cfg(max_per_run=4), False, 4)
+        self.assertEqual(len(wyniki), 4)
+        for res in wyniki:
+            self.assertIn("start_ms", res)
+            self.assertLess(res["start_ms"], 250,
+                            f"strzał ruszył {res['start_ms']} ms po salwie — to nie jest równolegle")

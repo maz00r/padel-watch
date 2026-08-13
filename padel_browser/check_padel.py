@@ -1412,6 +1412,18 @@ def warm_connections(pool, size, url):
     list(pool.map(rozgrzej, range(size)))
 
 
+def fmt_shot(res):
+    """Opis czasu strzału: kiedy ruszył względem salwy i jak długo trwał.
+
+    Odstęp startu jest tu po to, żeby dało się przypisać winę za „schodek" czasów.
+    13.08 z Irlandii cztery strzały naraz zajęły 185/217/326/382 ms, a jeden samotny
+    121 ms. Jeśli starty są bliskie zeru, kolejkuje serwer; jeśli się rozjeżdżają,
+    problem jest u nas (pula wątków, DNS, TLS) — bez tej liczby to zgadywanka.
+    """
+    start = res.get("start_ms")
+    return f"{res['ms']} ms" if start is None else f"start +{start} ms, {res['ms']} ms"
+
+
 def fire_salvo(targets, listing_price_by_id, cfg, speculative, size):
     """Wysyła próby rejestracji RÓWNOLEGLE. Zwraca listę wyników w kolejności `targets`.
 
@@ -1419,6 +1431,7 @@ def fire_salvo(targets, listing_price_by_id, cfg, speculative, size):
     wątku nadpisywałoby stan pozostałych.
     """
     fired = targets[:size]
+    salwa_start = time.monotonic()
 
     def strzal(slot):
         local = dict(cfg)
@@ -1433,6 +1446,12 @@ def fire_salvo(targets, listing_price_by_id, cfg, speculative, size):
             ok, msg = False, f"nieoczekiwany błąd: {e!r}"
         return {"slot": slot, "ok": ok, "msg": msg,
                 "ms": int((time.monotonic() - started) * 1000),
+                # Odstęp od startu salwy. To NIE jest ozdobnik: rozstrzyga, czy strzały
+                # ruszyły razem (wtedy „schodek" czasów robi serwer), czy rozjechały się
+                # u nas (wtedy wina jest po naszej stronie — pula, DNS, TLS).
+                # 13.08 z Irlandii: 185/217/326/382 ms przy czterech naraz, a 121 ms
+                # przy jednym samotnym. Bez odstępów nie da się tego przypisać.
+                "start_ms": int((started - salwa_start) * 1000),
                 "tx": local.get("transaction_id") or "",
                 "token": local.get("token") or ""}
 
@@ -1762,9 +1781,9 @@ def auto_register_new_slots(slots, listing_price_by_id, cfg, already_registered)
                 wins.append(res)
             elif any(m in msg for m in AUTH_FAILURE_MARKERS):
                 auth_error = auth_error or msg
-                log(f"! Salwa: {when} — {msg} [{ms} ms]")
+                log(f"! Salwa: {when} — {msg} [{fmt_shot(res)}]")
             else:
-                log(f"! Auto-rejestracja nieudana dla {when}: {msg} [{ms} ms]")
+                log(f"! Auto-rejestracja nieudana dla {when}: {msg} [{fmt_shot(res)}]")
 
         # Zwycięzcy w kolejności preferencji; nadmiar ponad limit oddajemy od razu,
         # żeby nie blokować terminu innym grającym dłużej niż ułamek sekundy.
@@ -1774,10 +1793,10 @@ def auto_register_new_slots(slots, listing_price_by_id, cfg, already_registered)
             if done < limit:
                 done += 1
                 if speculative:
-                    log(f"~ Auto-rejestracja (test, bez rezerwacji): {when} — {msg} [{ms} ms]")
+                    log(f"~ Auto-rejestracja (test, bez rezerwacji): {when} — {msg} [{fmt_shot(res)}]")
                 else:
                     registered.add(slot["id"])
-                    log(f"✓ Auto-rejestracja: {when} — {msg} [{ms} ms]")
+                    log(f"✓ Auto-rejestracja: {when} — {msg} [{fmt_shot(res)}]")
                 continue
             if speculative:
                 results[slot["id"]] = (False, "ponad limit auto_register_max")
