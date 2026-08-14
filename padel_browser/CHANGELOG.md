@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.12.0 — odstęp między strzałami salwy (`auto_register_stagger`)
+
+- **Strzały salwy ruszają teraz w odstępie 8 ms, w kolejności Twoich preferencji.**
+  Powód jest zmierzony: 14.08 cztery strzały z Irlandii ruszyły z `start +0 ms`
+  co do jednego, a wróciły po **21 / 37 / 117 / 282 ms**. Skoro startują razem,
+  ten „schodek" powstaje po stronie Decathlona — najpewniej serwer **serializuje
+  zapisy per konto**, więc nasze własne strzały stoją w kolejce jeden za drugim.
+- **Miejsce w tej kolejce było LOSOWE.** 15:00, wymienione w salwie jako ostatnie,
+  weszło w 37 ms; 17:00 jako trzecie czekało 282 ms. Odstęp sprawia, że kolejność
+  jest NASZA: najbardziej pożądany termin wchodzi pierwszy.
+- **Kilka ms wystarczy.** W regionie rozrzut sieci jest poniżej milisekundy, więc nie
+  czekamy na odpowiedź — gwarantujemy tylko kolejność dotarcia. Przy 4 strzałach
+  ostatni rusza 24 ms później, czyli o rząd wielkości mniej niż obserwowany rozrzut.
+- **To wynika z HIPOTEZY**, nie z pewnika. Gdyby kolejka per konto okazała się fałszem,
+  kosztem jest te kilkanaście ms na dalszych strzałach. `auto_register_stagger: 0`
+  przywraca strzelanie wszystkim naraz.
+- **Log sam pokaże, czy zadziałało**: `start +N ms` odzwierciedla odstęp, a `ms` mierzy
+  wyłącznie żądanie (uśpienie jest przed pomiarem). Jeśli termin nr 1 zacznie
+  konsekwentnie wracać w ~21–37 ms, hipoteza się broni.
+- Odstęp jedzie w treści żądania do Irlandii, więc obie strony strzelają identycznie.
+
+
 ## 0.11.2 — diagnostyka zdalnych strzałów
 
 - **Każdy strzał salwy pokazuje, KIEDY ruszył** względem startu salwy:
