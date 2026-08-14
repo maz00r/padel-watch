@@ -57,6 +57,7 @@ przechodzisz normalne logowanie, łącznie z kodem z maila.
 | `auto_register_max` | ile terminów maksymalnie zapisać w jednym przebiegu (0–10); `0` = nic | `1` |
 | `auto_register_order` | kolejność prób: `earliest` (od najwcześniejszego) lub `latest` (od najpóźniejszego) | `latest` |
 | `auto_register_salvo` | ile prób rejestracji wysyłać **równolegle** (0–6); `0`/`1` = po kolei, jak dawniej | `6` |
+| `auto_register_stagger` | odstęp w ms między strzałami salwy (0–100); `0` = wszystkie naraz | `8` |
 | `test_token` | jednorazowy test poświadczeń przy starcie (nic nie rezerwuje) | `false` |
 | `clear_state` | jednorazowe czyszczenie stanu: `registered` lub `all`; puste = nic nie rób | `` |
 
@@ -212,6 +213,22 @@ Nigdy nie raportuje oddania terminu, którego nie oddał.
 Salwa strzela w pierwsze `auto_register_salvo` terminów według `auto_register_order`;
 reszta (np. bezpieczne 15:00, o które nikt nie walczy) jest próbowana po kolei zaraz
 potem — więc zabezpieczenie „przynajmniej cokolwiek" zostaje.
+
+#### Dlaczego strzały mają odstęp
+
+14.08 zmierzone z Irlandii: cztery strzały ruszyły z `start +0 ms` **co do jednego**,
+a wróciły po **21 / 37 / 117 / 282 ms**. Skoro startują razem, ten „schodek" powstaje
+po stronie Decathlona — najpewniej serwer serializuje zapisy **per konto**, więc nasze
+własne strzały stoją w kolejce jeden za drugim.
+
+Miejsce w kolejce było przy tym **losowe**: 15:00, wymienione jako ostatnie, weszło
+w 37 ms, a 17:00 jako trzecie czekało 282 ms. Odstęp (`auto_register_stagger`, domyślnie
+8 ms) sprawia, że kolejność jest Twoja — najbardziej pożądany termin wchodzi pierwszy.
+Przy 4 strzałach ostatni rusza 24 ms później, czyli o rząd wielkości mniej niż
+obserwowany rozrzut.
+
+To wynika z hipotezy, nie z pewnika. `auto_register_stagger: 0` wraca do strzelania
+wszystkim naraz.
 
 **Także pojedynczy termin idzie przez pulę salwy.** Publikacja przychodzi partiami
 i taka partia potrafi mieć jeden termin — a wątek główny nie jest rozgrzewany.

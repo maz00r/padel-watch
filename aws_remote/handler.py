@@ -149,6 +149,9 @@ def poluj(wejscie):
             "max_per_run": wejscie.get("max_per_run") or 1,
             "order": wejscie.get("order") or "earliest",
             "salvo": wejscie.get("salvo") or 0,
+            # Odstęp musi być IDENTYCZNY po obu stronach — inaczej zapas lokalny
+            # strzelałby inaczej niż Irlandia i porównanie logów przestałoby mieć sens.
+            "stagger": wejscie.get("stagger", cp.SALVO_STAGGER_MS),
         }
         ceny = {s["id"]: (doc.get("data", {}).get("attributes", {}) or {}).get("price")
                 for s in sloty}

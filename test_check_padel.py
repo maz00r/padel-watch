@@ -2850,3 +2850,63 @@ class SalvoStartOffsetTest(SalvoHelpers, unittest.TestCase):
             self.assertIn("start_ms", res)
             self.assertLess(res["start_ms"], 250,
                             f"strzał ruszył {res['start_ms']} ms po salwie — to nie jest równolegle")
+
+
+class SalvoStaggerTest(SalvoHelpers, unittest.TestCase):
+    """Odstęp między strzałami: kolejność w kolejce serwera ma być NASZA.
+
+    14.08 zmierzone: cztery strzały ruszyły z `start +0 ms` co do jednego, a wróciły
+    po 21/37/117/282 ms. Skoro startują razem, kolejkuje serwer — a miejsce w kolejce
+    było losowe (15:00 wymienione ostatnie weszło w 37 ms, 17:00 trzecie czekało 282 ms).
+    """
+
+    def strzel(self, godziny, stagger):
+        kolejnosc = []
+        lock = threading.Lock()
+
+        def fake_register(slot, price, cfg, speculative=False):
+            with lock:
+                kolejnosc.append(slot["start_utc"].hour)
+            return True, "accepted"
+
+        with mock.patch.object(cp, "register_slot", side_effect=fake_register), \
+                mock.patch("sys.stdout", io.StringIO()):
+            wyniki = cp.fire_salvo(self.slots(*godziny), {},
+                                   self.cfg(stagger=stagger), False, len(godziny))
+        return kolejnosc, wyniki
+
+    def test_most_wanted_slot_reaches_the_server_first(self):
+        """SEDNO: przy włączonym odstępie termin nr 1 startuje przed pozostałymi."""
+        # 25 ms z zapasem na zaplanowanie wątków w wolnym CI — przy pustej atrapie
+        # rejestracji to i tak rząd wielkości więcej niż jitter schedulera.
+        kolejnosc, _ = self.strzel([20, 19, 18, 17], stagger=25)
+        self.assertEqual(kolejnosc[0], 20, f"pierwszy poszedł {kolejnosc[0]}, nie 20:00")
+        self.assertEqual(kolejnosc, sorted(kolejnosc, reverse=True))
+
+    def test_offsets_grow_with_position(self):
+        _, wyniki = self.strzel([20, 19, 18], stagger=20)
+        odstepy = [r["start_ms"] for r in wyniki]
+        self.assertLess(odstepy[0], 10)
+        self.assertGreater(odstepy[1], 10)
+        self.assertGreater(odstepy[2], odstepy[1])
+
+    def test_stagger_is_not_counted_into_shot_duration(self):
+        """`ms` ma mierzyć samo żądanie — inaczej odstęp fałszowałby diagnostykę."""
+        _, wyniki = self.strzel([20, 19, 18], stagger=40)
+        for res in wyniki:
+            self.assertLess(res["ms"], 30, "czas strzału zawiera uśpienie odstępu")
+
+    def test_zero_disables_it_completely(self):
+        _, wyniki = self.strzel([20, 19, 18], stagger=0)
+        for res in wyniki:
+            self.assertLess(res["start_ms"], 30)
+
+    def test_bad_value_falls_back_to_default(self):
+        _, wyniki = self.strzel([20, 19], stagger="bzdura")
+        self.assertEqual(len(wyniki), 2)
+
+    def test_stagger_is_capped(self):
+        """Sufit chroni przed literówką w konfiguracji, która zjadłaby okno publikacji."""
+        start = time.monotonic()
+        self.strzel([20, 19], stagger=100000)
+        self.assertLess(time.monotonic() - start, 1.0)

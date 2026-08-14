@@ -1424,16 +1424,47 @@ def fmt_shot(res):
     return f"{res['ms']} ms" if start is None else f"start +{start} ms, {res['ms']} ms"
 
 
+# ODSTĘP MIĘDZY STRZAŁAMI SALWY (ms). Zmierzone 14.08 z Irlandii: cztery strzały
+# ruszyły z `start +0 ms` co do jednego, a wróciły po 21 / 37 / 117 / 282 ms. Skoro
+# startują razem, ten „schodek" powstaje po stronie Decathlona — najpewniej serwer
+# serializuje zapisy per KONTO, więc nasze własne strzały stoją w kolejce jeden za
+# drugim. Miejsce w tej kolejce było LOSOWE: 15:00 wymienione jako ostatnie weszło
+# w 37 ms, a 17:00 jako trzecie czekało 282 ms.
+#
+# Odstęp sprawia, że kolejność w kolejce jest NASZA, a nie przypadkowa: najbardziej
+# pożądany termin wchodzi pierwszy. Wystarczy kilka ms — w regionie rozrzut sieci
+# jest poniżej milisekundy, więc nie trzeba czekać na odpowiedź, tylko zagwarantować
+# kolejność dotarcia. Przy 4 strzałach ostatni rusza 24 ms później, czyli o rząd
+# wielkości mniej niż obserwowany rozrzut.
+#
+# UWAGA: to wynika z HIPOTEZY o kolejce per konto. Gdyby okazała się fałszywa, kosztem
+# jest te kilkanaście ms na dalszych strzałach. `auto_register_stagger: 0` przywraca
+# strzelanie wszystkim naraz.
+SALVO_STAGGER_MS = 8
+
+
 def fire_salvo(targets, listing_price_by_id, cfg, speculative, size):
-    """Wysyła próby rejestracji RÓWNOLEGLE. Zwraca listę wyników w kolejności `targets`.
+    """Wysyła próby rejestracji równolegle, w kolejności preferencji.
 
     Każdy wątek dostaje własną kopię cfg — inaczej odświeżenie tokenu w jednym
     wątku nadpisywałoby stan pozostałych.
+
+    `targets` są już posortowane wg `auto_register_order`, więc indeks 0 to termin
+    najbardziej pożądany — i to on dostaje przewagę, gdy odstęp jest włączony.
     """
     fired = targets[:size]
+    try:
+        odstep = max(0, min(int(cfg.get("stagger", SALVO_STAGGER_MS)), 100)) / 1000.0
+    except (TypeError, ValueError):
+        odstep = SALVO_STAGGER_MS / 1000.0
     salwa_start = time.monotonic()
 
-    def strzal(slot):
+    def strzal(numer_i_slot):
+        numer, slot = numer_i_slot
+        # Czekamy PRZED pomiarem, żeby `ms` był czystym czasem żądania, a odstęp
+        # widać było w `start_ms`. Dzięki temu log sam pokazuje, czy odstęp zadziałał.
+        if odstep and numer:
+            time.sleep(numer * odstep)
         local = dict(cfg)
         started = time.monotonic()
         try:
@@ -1456,7 +1487,7 @@ def fire_salvo(targets, listing_price_by_id, cfg, speculative, size):
                 "token": local.get("token") or ""}
 
     pool = salvo_pool(size)
-    return list(pool.map(strzal, fired))
+    return list(pool.map(strzal, enumerate(fired)))
 
 
 # --------------------------------------------------------- pomiar opóźnienia
@@ -1658,6 +1689,7 @@ def remote_payload(listing_url, baseline_ids, tz_name, seconds, threads, reg_cfg
         "sprint_seconds": seconds,
         "sprint_threads": threads,
         "salvo": reg_cfg.get("salvo") or 0,
+        "stagger": reg_cfg.get("stagger", SALVO_STAGGER_MS),
         "max_per_run": reg_cfg.get("max_per_run") or 1,
         "order": reg_cfg.get("order") or "earliest",
         "name": reg_cfg.get("name") or "",
@@ -2053,6 +2085,8 @@ def build_reg_cfg(cfg, state_doc):
         "max_per_run": os.environ.get("AUTO_REGISTER_MAX") or cfg.get("auto_register_max") or 1,
         "order": os.environ.get("AUTO_REGISTER_ORDER") or cfg.get("auto_register_order") or "earliest",
         "salvo": os.environ.get("AUTO_REGISTER_SALVO") or cfg.get("auto_register_salvo") or 0,
+        "stagger": os.environ.get("AUTO_REGISTER_STAGGER")
+                   or cfg.get("auto_register_stagger", SALVO_STAGGER_MS),
     }
 
 
