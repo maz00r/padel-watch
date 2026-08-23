@@ -147,6 +147,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.api_reservations()
         if path == "/api/raw":
             return self.api_raw()
+        if path == "/api/hunts":
+            return self.api_hunts()
         if path.startswith("/cal/") and path.endswith(".ics"):
             return self.serve_ics(path[len("/cal/"):-len(".ics")])
         return self.serve_static(path)
@@ -201,6 +203,18 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:  # noqa: BLE001 - diagnostyka ma pokazać błąd, nie 500
             raw, error = None, f"nieoczekiwany błąd: {e!r}"
         self._json({"ok": not error, "error": error, "items": raw or []})
+
+    def api_hunts(self):
+        """Dziennik polowań — po to, żeby nie trzeba było go szukać w Dzienniku dodatku.
+
+        Czyta tylko plik z dysku, więc nie dotyka API Decathlona i nie może zaszkodzić
+        polowaniu, nawet gdyby ktoś odświeżał panel o 11:00:15.
+        """
+        try:
+            wpisy = check_padel.load_hunts()
+        except Exception as e:  # noqa: BLE001 - historia nie może wywrócić panelu
+            return self._json({"ok": False, "error": f"nieoczekiwany błąd: {e!r}", "items": []})
+        self._json({"ok": True, "error": None, "items": wpisy})
 
     def api_cancel(self):
         # Anulowanie jest nieodwracalne, więc przyjmujemy je tylko jako JSON. Formularz

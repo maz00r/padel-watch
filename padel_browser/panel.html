@@ -58,6 +58,7 @@
 <body>
 <header>
   <button class="tab" id="tab-res" aria-selected="true" onclick="showTab('res')">Rezerwacje</button>
+  <button class="tab" id="tab-hunts" aria-selected="false" onclick="showTab('hunts')">Polowania</button>
   <button class="tab" id="tab-browser" aria-selected="false" onclick="showTab('browser')">Przeglądarka</button>
 </header>
 
@@ -79,6 +80,15 @@
   </details>
 </main>
 
+<main id="hunts" class="hide">
+  <div class="bar">
+    <button class="btn primary" onclick="loadHunts()">Odśwież</button>
+    <span class="sub grow">Jeden wpis na dobę. Dni wymagające uwagi są oznaczone.</span>
+  </div>
+  <div id="hunts-status" class="msg">Wczytuję dziennik…</div>
+  <div id="hunts-list"></div>
+</main>
+
 <main id="browser" class="hide"></main>
 
 <script>
@@ -87,11 +97,93 @@
 var reservations = [];
 
 function showTab(name) {
-  ["res", "browser"].forEach(function (id) {
+  ["res", "hunts", "browser"].forEach(function (id) {
     document.getElementById(id).classList.toggle("hide", id !== name);
     document.getElementById("tab-" + id).setAttribute("aria-selected", String(id === name));
   });
   if (name === "browser") mountBrowser();
+  if (name === "hunts" && !huntsLoaded) loadHunts();
+}
+
+// ------------------------------------------------------------ dziennik polowań
+// Sens tej zakładki: najważniejsze liczby z sekundy publikacji giną w tysiącach
+// linii Dziennika dodatku. Tutaj są odłożone, jeden wpis na dobę, i widać na oko,
+// czy dzień był w porządku — bez czytania czegokolwiek.
+var huntsLoaded = false;
+
+// Polski liczebnik: 1 / 2-4 / reszta, z wyjątkiem nastek. Ten sam podział co w silniku.
+function odmien(n, one, few, many) {
+  var last = n % 10, teens = n % 100;
+  if (n === 1) return one;
+  if (last >= 2 && last <= 4 && !(teens >= 12 && teens <= 14)) return few;
+  return many;
+}
+
+function loadHunts() {
+  var status = document.getElementById("hunts-status");
+  status.className = "msg";
+  status.textContent = "Wczytuję dziennik…";
+  fetch("api/hunts", { headers: { "Accept": "application/json" } })
+    .then(function (r) { return r.json(); })
+    .then(function (data) {
+      huntsLoaded = true;
+      if (!data.ok) throw new Error(data.error || "nieznany błąd");
+      renderHunts(data.items || []);
+      status.classList.add("hide");
+    })
+    .catch(function (e) {
+      status.className = "msg bad";
+      status.textContent = "Nie udało się wczytać dziennika: " + e.message;
+    });
+}
+
+function huntShots(shots) {
+  if (!shots || !shots.length) return "";
+  var opis = shots.map(function (s) {
+    var start = s.start_ms == null ? "" : "+" + s.start_ms + "\u2009ms \u2192 ";
+    return esc(s.when) + " " + (s.ok ? "\u2713" : "\u2717") + " " + start + s.ms + "\u2009ms";
+  }).join(" · ");
+  return '<div class="sub">Strzały: ' + opis + "</div>";
+}
+
+function huntCard(h) {
+  var uwaga = h.aligned === false || (!h.registered.length && h.failed.length);
+  var naglowek = esc(h.date) + " · publikacja " + esc(h.first_seen)
+    + (h.remote ? ' <span class="badge">Irlandia</span>' : "");
+  var stan = uwaga
+    ? '<span class="badge bad">wymaga uwagi</span>'
+    : '<span class="badge ok">' + h.registered.length + " "
+      + odmien(h.registered.length, "rezerwacja", "rezerwacje", "rezerwacji") + "</span>";
+  var linie = [];
+  if (h.total) {
+    linie.push('<div class="sub">Grafik ' + esc(h.target_day || "") + ": "
+      + h.free + " wolnych z " + h.total + "</div>");
+  }
+  if (h.registered.length) {
+    linie.push('<div class="sub">Zdobyte: ' + esc(h.registered.join(", ")) + "</div>");
+  }
+  if (h.failed.length) {
+    linie.push('<div class="sub">Przegrane: ' + h.failed.map(function (f) {
+      return esc(f.when) + " (" + esc(f.why) + ")";
+    }).join(", ") + "</div>");
+  }
+  if (h.aligned === false) {
+    linie.push('<div class="sub bad">Publikacja poza zrywem (' + esc(h.burst)
+      + ") — przesuń okna w konfiguracji.</div>");
+  }
+  linie.push(huntShots(h.shots));
+  return '<div class="card' + (uwaga ? "" : " dim") + '">'
+    + "<div><b>" + naglowek + "</b> " + stan + "</div>" + linie.join("") + "</div>";
+}
+
+function renderHunts(items) {
+  var host = document.getElementById("hunts-list");
+  if (!items.length) {
+    host.innerHTML = '<div class="msg">Jeszcze nic tu nie ma — pierwszy wpis pojawi się '
+      + "po najbliższej publikacji grafiku.</div>";
+    return;
+  }
+  host.innerHTML = items.map(huntCard).join("");
 }
 
 // noVNC buduje adres websocketu OD KORZENIA, więc 'path' musi zawierać prefiks

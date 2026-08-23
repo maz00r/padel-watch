@@ -125,7 +125,7 @@ def poluj(wejscie):
     sloty = [s for s in cp.free_slots(doc, lid, teraz) if cp.passes_filter(s, filtry, tz)]
     cp.log(f"Sprint: nowe terminy po {sprint_ms} ms — {len(sloty)} pasujących do filtra")
 
-    wyniki, zapisane = {}, set()
+    wyniki, zapisane, czasy_strzalow = {}, set(), []
     if sloty and wejscie.get("enabled"):
         reg_cfg = {
             "enabled": True,
@@ -156,6 +156,9 @@ def poluj(wejscie):
         ceny = {s["id"]: (doc.get("data", {}).get("attributes", {}) or {}).get("price")
                 for s in sloty}
         wyniki, zapisane = cp.auto_register_new_slots(sloty, ceny, reg_cfg, set())
+        # Czasy strzałów odsyłamy do domu — bez nich dziennik polowań wiedziałby,
+        # CO się udało, ale nie JAK szybko, a przy zdalnym strzale to jedyne źródło.
+        czasy_strzalow = reg_cfg.get("shots") or []
 
     return {
         "ok": True,
@@ -163,6 +166,7 @@ def poluj(wejscie):
         "doc": doc,
         "results": {k: [bool(v[0]), v[1]] for k, v in wyniki.items()},
         "registered": sorted(zapisane),
+        "shots": czasy_strzalow,
         "timings": {"sprint_ms": sprint_ms,
                     "total_ms": int((time.monotonic() - started) * 1000)},
     }
