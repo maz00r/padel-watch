@@ -1,0 +1,148 @@
+[
+  {
+    "date": "2026-08-23",
+    "first_seen": "18:30:25",
+    "burst": "",
+    "aligned": null,
+    "alerted": false,
+    "remote": true,
+    "registered": [
+      "niedz 30.08 17:00",
+      "niedz 30.08 17:00",
+      "niedz 30.08 17:00",
+      "niedz 30.08 17:00",
+      "niedz 30.08 17:00",
+      "niedz 30.08 17:00",
+      "niedz 30.08 17:00",
+      "niedz 30.08 17:00",
+      "niedz 30.08 17:00",
+      "niedz 30.08 17:00",
+      "niedz 30.08 17:00",
+      "niedz 30.08 17:00",
+      "niedz 30.08 17:00",
+      "niedz 30.08 17:00",
+      "niedz 30.08 17:00",
+      "niedz 30.08 17:00",
+      "niedz 30.08 17:00",
+      "niedz 30.08 17:00"
+    ],
+    "failed": [],
+    "shots": [
+      {
+        "when": "niedz 30.08 17:00",
+        "ok": true,
+        "ms": 0,
+        "start_ms": null,
+        "salwa": false
+      },
+      {
+        "when": "niedz 30.08 17:00",
+        "ok": true,
+        "ms": 0,
+        "start_ms": null,
+        "salwa": false
+      },
+      {
+        "when": "niedz 30.08 17:00",
+        "ok": true,
+        "ms": 0,
+        "start_ms": null,
+        "salwa": false
+      },
+      {
+        "when": "niedz 30.08 17:00",
+        "ok": true,
+        "ms": 0,
+        "start_ms": null,
+        "salwa": false
+      },
+      {
+        "when": "niedz 30.08 17:00",
+        "ok": true,
+        "ms": 0,
+        "start_ms": null,
+        "salwa": false
+      },
+      {
+        "when": "niedz 30.08 17:00",
+        "ok": true,
+        "ms": 0,
+        "start_ms": null,
+        "salwa": false
+      },
+      {
+        "when": "niedz 30.08 17:00",
+        "ok": true,
+        "ms": 0,
+        "start_ms": null,
+        "salwa": false
+      },
+      {
+        "when": "niedz 30.08 17:00",
+        "ok": true,
+        "ms": 0,
+        "start_ms": null,
+        "salwa": false
+      },
+      {
+        "when": "niedz 30.08 17:00",
+        "ok": true,
+        "ms": 0,
+        "start_ms": null,
+        "salwa": false
+      },
+      {
+        "when": "niedz 30.08 17:00",
+        "ok": true,
+        "ms": 0,
+        "start_ms": null,
+        "salwa": false
+      },
+      {
+        "when": "niedz 30.08 17:00",
+        "ok": true,
+        "ms": 0,
+        "start_ms": null,
+        "salwa": false
+      },
+      {
+        "when": "niedz 30.08 17:00",
+        "ok": true,
+        "ms": 0,
+        "start_ms": null,
+        "salwa": false
+      },
+      {
+        "when": "niedz 30.08 17:00",
+        "ok": true,
+        "ms": 0,
+        "start_ms": null,
+        "salwa": false
+      },
+      {
+        "when": "niedz 30.08 17:00",
+        "ok": true,
+        "ms": 0,
+        "start_ms": null,
+        "salwa": false
+      },
+      {
+        "when": "niedz 30.08 17:00",
+        "ok": true,
+        "ms": 0,
+        "start_ms": null,
+        "salwa": false
+      },
+      {
+        "when": "niedz 30.08 17:00",
+        "ok": true,
+        "ms": 0,
+        "start_ms": null,
+        "salwa": false
+      }
+    ],
+    "free": 1,
+    "total": 1,
+    "target_day": "niedz 30.08"
+  }
+]

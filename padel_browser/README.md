@@ -113,6 +113,28 @@ dnie, a co `check_interval` (np. 300 s) w pozostałych porach. Puste = zawsze `c
 Minimum 2 s (niższa wartość jest podbijana, z wpisem w logu; poniżej 5 s logowane jest
 ostrzeżenie — używaj tylko w wąskich oknach, bo grozi blokadą po IP). Zmiana interwału jest logowana (`⏱ aktualny interwał: ...`).
 
+## Panel: dziennik polowań
+
+Zakładka **Polowania** to jeden wpis na dobę z tym, co naprawdę się liczy: o której
+przyszła publikacja, ile terminów było w grafiku, co zdobyte, co przegrane i jak szybko
+poszedł każdy strzał. Powstała po to, żeby **nie trzeba było codziennie przeglądać
+Dziennika** — a te liczby i tak w nim giną wśród tysięcy linii.
+
+Push przychodzi **tylko wtedy, gdy dzień wymaga uwagi**:
+
+- publikacja wypadła **poza oknem zrywu** (wtedy zryw i sprint się nie odpalają),
+- **żadna rezerwacja się nie udała** mimo pasujących terminów.
+
+Raz na dobę, nie przy każdej partii. Powiadomienie, które przychodzi codziennie,
+przestaje być czytane.
+
+> Skąd to się wzięło: 23.08.2026 publikacja przesunęła się z ~11:00:53 na **11:00:15**,
+> więc zryw o 11:00:30 spóźnił się na własne przyjęcie i pięć z dwunastu terminów
+> zniknęło, zanim monitor spojrzał. Wyszło to na jaw tylko dlatego, że ktoś przeczytał
+> log. Teraz taki rozjazd zgłasza się sam.
+
+Historia trzymana jest w `hunts.json` (katalog `/data`), ostatnie 60 dni.
+
 ## Panel: moje rezerwacje
 
 Ikona **Padel** w menu bocznym otwiera panel z dwiema zakładkami:

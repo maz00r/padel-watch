@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.13.0 — dziennik polowań: zakładka „Polowania" i alert o rozjeździe
+
+- **Nowy plik `hunts.json` i zakładka „Polowania" w panelu.** Jeden wpis na dobę:
+  o której przyszła publikacja, ile terminów było w grafiku, co zdobyte, co przegrane
+  i z jakim czasem poszedł każdy strzał. Najważniejsze liczby z sekundy publikacji
+  przestają ginąć w tysiącach linii Dziennika dodatku.
+- **Push, gdy dzień wymaga uwagi** — żeby nie trzeba było zaglądać codziennie.
+  Alarmujemy w dwóch przypadkach: publikacja wypadła **poza oknem zrywu**, albo
+  **żadna rezerwacja się nie udała**. Raz na dobę, nie przy każdej partii terminów:
+  push, który przychodzi codziennie, przestaje być czytany.
+- **Powód powstania:** 23.08 publikacja przesunęła się z ~11:00:53 na **11:00:15**,
+  więc zryw (11:00:30) i sprint (11:00:51) w ogóle nie zdążyły wystartować.
+  Pięć z dwunastu terminów zniknęło, zanim spojrzeliśmy. Zauważyliśmy to wyłącznie
+  dlatego, że przyszedł log — inaczej wyglądałoby to jak seria gorszych dni.
+- **Czasy strzałów trafiają do wpisu z OBU stron** — zdalnej i lokalnej. Handler
+  odsyła je w odpowiedzi; bez tego przy zdalnym strzale dziennik wiedziałby, CO się
+  udało, ale nie JAK szybko, a to ta liczba rozstrzygała każdą dotychczasową zagadkę.
+- **Historia obcięta do 60 dni**, uszkodzony plik nie wywraca polowania, a błąd zapisu
+  dziennika jest głośny, ale nie przerywa biegu — rezerwacja jest cenniejsza niż historia.
+- Zakładka czyta **wyłącznie plik z dysku**, więc odświeżanie panelu o 11:00:15
+  nie może zaszkodzić polowaniu.
+
+
 ## 0.12.0 — odstęp między strzałami salwy (`auto_register_stagger`)
 
 - **Strzały salwy ruszają teraz w odstępie 8 ms, w kolejności Twoich preferencji.**

@@ -38,6 +38,11 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # CONFIG_PATH / STATE_DIR można nadpisać zmienną środowiskową (przydatne w Dockerze).
 CONFIG_PATH = os.environ.get("CONFIG_PATH") or os.path.join(HERE, "config.json")
 STATE_PATH = os.path.join(os.environ.get("STATE_DIR") or HERE, "state.json")
+# DZIENNIK POLOWAŃ — osobny plik, żeby najważniejsze liczby z sekundy publikacji
+# nie ginęły w tysiącach linii Dziennika dodatku. Jeden wpis na dobę, widoczny
+# w panelu (zakładka „Polowania"), plus push, gdy coś wymaga uwagi.
+HUNTS_PATH = os.path.join(os.environ.get("STATE_DIR") or HERE, "hunts.json")
+HUNTS_KEEP = 60   # ~2 miesiące historii; starsze i tak nikomu nie służą
 # Gdy monitor działa w tym samym kontenerze co przeglądarka (scalony dodatek), przeglądarka
 # zapisuje świeży go-sdk-jwt do tego pliku, a monitor go stąd czyta — bez ręcznego wklejania.
 TOKEN_FILE = os.environ.get("DECATHLON_TOKEN_FILE") or ""
@@ -144,6 +149,56 @@ def load_state_doc():
     except (json.JSONDecodeError, OSError):
         log("! state.json uszkodzony — traktuję jako pierwszy bieg")
         return None
+
+
+# ------------------------------------------------------------ dziennik polowań
+
+def load_hunts():
+    """Historia polowań, najnowsze pierwsze. Uszkodzony plik NIE może wywrócić biegu."""
+    try:
+        with open(HUNTS_PATH, encoding="utf-8") as f:
+            dane = json.load(f)
+        return dane if isinstance(dane, list) else []
+    except FileNotFoundError:
+        return []
+    except (OSError, ValueError):
+        log("! hunts.json uszkodzony — zaczynam historię od nowa")
+        return []
+
+
+def save_hunts(wpisy):
+    """Zapis dziennika. Błąd zapisu jest głośny, ale nie przerywa polowania —
+    historia jest cenna, a rezerwacja cenniejsza."""
+    try:
+        with open(HUNTS_PATH, "w", encoding="utf-8") as f:
+            json.dump(wpisy[:HUNTS_KEEP], f, ensure_ascii=False, indent=2)
+            f.write("\n")
+    except OSError as e:
+        log(f"! Nie zapisałem dziennika polowań: {e!r}")
+
+
+def hunt_window(now_local, tz):
+    """(czy publikacja trafiła w zryw, opis okna). (None, '') gdy zryw wyłączony.
+
+    To jest sedno alertu: 23.08 publikacja przyszła o 11:00:15, a zryw startował
+    o 11:00:30 — spóźniliśmy się na własne przyjęcie i pięć terminów zniknęło,
+    zanim w ogóle spojrzeliśmy. Bez tego sprawdzenia takie przesunięcie wygląda
+    po prostu jak seria gorszych dni.
+    """
+    surowy = (os.environ.get("BURST") or "").strip()
+    if not surowy:
+        return None, ""
+    try:
+        burst = parse_burst_env(surowy)
+        burst["seconds"] = max(1, min(int(os.environ.get("BURST_SECONDS") or 15),
+                                      BURST_MAX_SECONDS))
+    except Exception:  # noqa: BLE001 - zły zryw nie może wywrócić dziennika
+        return None, ""
+    granice = burst_bounds(burst, tz, now_local)
+    if not granice:
+        return None, ""
+    opis = f"{granice[0]:%H:%M:%S}–{granice[1]:%H:%M:%S}"
+    return granice[0] <= now_local < granice[1], opis
 
 
 def write_state_doc(doc):
@@ -443,6 +498,91 @@ def day_grid(doc, listing_id, now_utc, day_local, tz):
     return sum(1 for s in wszystkie if s["count"] < s["limit"]), len(wszystkie)
 
 
+def record_hunt(now_local, tz, new_slots, wyniki, shots, grid, zdalnie, topic):
+    """Dopisuje polowanie do dziennika i alarmuje, gdy coś wymaga uwagi.
+
+    JEDEN wpis na dobę — publikacja przychodzi partiami, więc kolejne wykrycia tego
+    samego dnia dokładają się do istniejącego wpisu zamiast tworzyć nowy.
+
+    Po to jest ten plik: najważniejsze liczby z sekundy publikacji giną w tysiącach
+    linii Dziennika, a użytkownik nie ma ich codziennie przeglądać. Wpis odkłada się
+    sam, widać go w panelu, a push przychodzi TYLKO wtedy, gdy jest o czym mówić.
+    """
+    dzis = now_local.date().isoformat()
+    wpisy = load_hunts()
+    wpis = wpisy[0] if wpisy and wpisy[0].get("date") == dzis else None
+    if wpis is None:
+        w_oknie, okno = hunt_window(now_local, tz)
+        wpis = {"date": dzis, "first_seen": f"{now_local:%H:%M:%S}", "burst": okno,
+                "aligned": w_oknie, "alerted": False, "remote": bool(zdalnie),
+                "registered": [], "failed": [], "shots": [], "free": 0, "total": 0}
+        wpisy.insert(0, wpis)
+
+    if grid:
+        wpis["target_day"], wpis["free"], wpis["total"] = grid
+    wpis["remote"] = wpis["remote"] or bool(zdalnie)
+    for s in sorted(new_slots, key=lambda x: x["start_utc"]):
+        kiedy = fmt_when(s["start_utc"].astimezone(tz), short=True)
+        ok, msg = wyniki.get(s["id"], (None, ""))
+        if ok:
+            wpis["registered"].append(kiedy)
+        elif ok is False:
+            wpis["failed"].append({"when": kiedy, "why": skroc_powod(msg)})
+    wpis["shots"].extend(shots or [])
+
+    powod = hunt_alert_reason(wpis)
+    if powod and not wpis["alerted"]:
+        wpis["alerted"] = True
+        log(f"⚠ {powod}")
+        # Push leci tu bez kolejki celowo: alert o rozjeździe z oknem może powstać
+        # WYŁĄCZNIE poza zrywem (w zrywie z definicji jesteśmy zsynchronizowani),
+        # więc nie ma czego odkładać.
+        notify_hunt(topic, wpis, powod)
+    save_hunts(wpisy)
+    return wpis
+
+
+def skroc_powod(msg):
+    """Powód porażki w jednym słowie — dziennik ma być czytelny, nie kompletny."""
+    if "No available seats" in msg or "409" in msg:
+        return "zajęty (409)"
+    for marker in AUTH_FAILURE_MARKERS:
+        if marker in msg:
+            return "token"
+    return (msg or "nieznany")[:60]
+
+
+def hunt_alert_reason(wpis):
+    """Czy ten dzień wymaga uwagi? Pusty napis = wszystko w normie.
+
+    Alarmujemy oszczędnie. Push, który przychodzi codziennie, przestaje być
+    czytany — a wtedy nie ma go po co wysyłać.
+    """
+    if wpis.get("aligned") is False:
+        return (f"Publikacja o {wpis['first_seen']} wypadła POZA zrywem "
+                f"({wpis['burst']}) — przesuń okna w konfiguracji dodatku.")
+    if not wpis["registered"] and wpis["failed"]:
+        return (f"Żadna rezerwacja się nie udała ({len(wpis['failed'])} prób) — "
+                f"sprawdź Dziennik.")
+    return ""
+
+
+def notify_hunt(topic, wpis, powod):
+    """Push o polowaniu wymagającym uwagi — raz na dobę, nie częściej."""
+    if not topic:
+        log("! Brak NTFY_TOPIC — pomijam alert o polowaniu (tryb testowy).")
+        return None
+    zdobyte = ", ".join(wpis["registered"]) or "nic"
+    return ntfy_post(
+        topic,
+        "⚠️ Polowanie wymaga uwagi",
+        f"{powod}\n\nZarezerwowano: {zdobyte}\n"
+        f"Grafik: {wpis.get('free', 0)} wolnych z {wpis.get('total', 0)}",
+        priority="high",
+        tags="warning",
+    )
+
+
 def log_day_grids(new_slots, docs_by_lid, now_utc, tz):
     """Loguje, ile terminów danego dnia jest wolnych, a ile liczy CAŁY grafik.
 
@@ -452,16 +592,20 @@ def log_day_grids(new_slots, docs_by_lid, now_utc, tz):
     niezależnie od tego, czy nikt jej nie wystawił, czy ktoś był szybszy od nas.
     """
     dni = {(s["listing_id"], s["start_utc"].astimezone(tz).date()) for s in new_slots}
+    pierwszy = None
     for lid, dzien in sorted(dni, key=lambda k: (k[1], k[0])):
         doc = docs_by_lid.get(lid)
         if doc is None:
             continue
         wolne, wszystkie = day_grid(doc, lid, now_utc, dzien, tz)
+        if pierwszy is None:
+            pierwszy = (f"{PL_DAYS_SHORT[dzien.weekday()]} {dzien:%d.%m}", wolne, wszystkie)
         zajete = wszystkie - wolne
         log(f"📋 Grafik na {PL_DAYS_SHORT[dzien.weekday()]} {dzien:%d.%m}: "
             f"{wolne} {plural(wolne, 'wolny', 'wolne', 'wolnych')} z {wszystkie}"
             + (f" — {zajete} {plural(zajete, 'zajęty', 'zajęte', 'zajętych')}, "
                f"zanim zobaczyliśmy grafik" if zajete else ""))
+    return pierwszy
 
 
 def passes_filter(slot, filters, tz):
@@ -1722,6 +1866,7 @@ def adopt_remote(wynik):
         "results": {k: (bool(v[0]), v[1]) for k, v in (wynik.get("results") or {}).items()},
         "registered": set(wynik.get("registered") or []),
         "transactions": wynik.get("transactions") or {},
+        "shots": wynik.get("shots") or [],
     }
     return (wynik["listing_id"], wynik["doc"]), remote
 
@@ -1779,6 +1924,10 @@ def auto_register_new_slots(slots, listing_price_by_id, cfg, already_registered)
 
     cfg["auth_error"] = None
     cfg["pending_ids"] = []
+    # Czasy strzałów wędrują przez cfg (jak transaction_id), żeby trafiły do dziennika
+    # polowań. Bez nich wpis mówiłby CO się udało, ale nie JAK szybko — a to właśnie
+    # ta liczba rozstrzygała każdą dotychczasową zagadkę.
+    cfg["shots"] = []
     done = 0
     skipped = []
 
@@ -1808,6 +1957,8 @@ def auto_register_new_slots(slots, listing_price_by_id, cfg, already_registered)
         for res in wyniki:
             slot, msg, ms = res["slot"], res["msg"], res["ms"]
             when = fmt_when(slot["start_utc"].astimezone(_log_tz()), short=True)
+            cfg["shots"].append({"when": when, "ok": bool(res["ok"]), "ms": ms,
+                                 "start_ms": res.get("start_ms", 0), "salwa": True})
             results[slot["id"]] = (res["ok"], msg)
             if res["ok"]:
                 wins.append(res)
@@ -1870,6 +2021,8 @@ def auto_register_new_slots(slots, listing_price_by_id, cfg, already_registered)
         attempt_started = time.monotonic()
         ok, msg = register_slot(slot, listing_price_by_id.get(sid), cfg, speculative=speculative)
         took_ms = int((time.monotonic() - attempt_started) * 1000)
+        cfg["shots"].append({"when": when, "ok": bool(ok), "ms": took_ms,
+                             "start_ms": None, "salwa": False})
         results[sid] = (ok, msg)
         if ok:
             done += 1
@@ -2247,7 +2400,17 @@ def run_once(announce_startup=False, skip_light=False, prefetched=None, defer_pu
     if new_ids:
         log(f"NOWE wolne terminy: {len(new_ids)}")
         new_slots = sorted((current[i] for i in new_ids), key=lambda x: x["start_utc"])
-        log_day_grids(new_slots, docs_by_lid, now_utc, tz)
+        grid = log_day_grids(new_slots, docs_by_lid, now_utc, tz)
+        # Dziennik polowań: jeden wpis na dobę z tym, co naprawdę się liczy.
+        # Nie może wywrócić biegu — rezerwacje są już zrobione, historia to dodatek.
+        try:
+            # Strzały mogły paść po OBU stronach: zdalnie w Irlandii i lokalnie
+            # z zapasu. Dziennik ma pokazać jedno i drugie.
+            strzaly = list((remote or {}).get("shots") or []) + list(reg_cfg.get("shots") or [])
+            record_hunt(datetime.now(tz), tz, new_slots, registration_results,
+                        strzaly, grid, bool(remote), topic)
+        except Exception as e:  # noqa: BLE001
+            log(f"! Nie zapisałem polowania do dziennika: {e!r}")
         # grupuj powiadomienia per listing (book_url)
         by_url = {}
         for s in new_slots:

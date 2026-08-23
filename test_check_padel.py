@@ -2910,3 +2910,164 @@ class SalvoStaggerTest(SalvoHelpers, unittest.TestCase):
         start = time.monotonic()
         self.strzel([20, 19], stagger=100000)
         self.assertLess(time.monotonic() - start, 1.0)
+
+
+class HuntJournalTest(unittest.TestCase):
+    """Dziennik polowań: odkłada się sam, alarmuje oszczędnie.
+
+    Powód powstania: 23.08 publikacja przesunęła się o 40 s i zryw jej nie złapał.
+    Zauważyliśmy to tylko dlatego, że użytkownik przysłał log — inaczej wyglądałoby
+    to po prostu jak seria gorszych dni.
+    """
+
+    TZ = ZoneInfo("Europe/Warsaw") if ZoneInfo else timezone.utc
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        patcher = mock.patch.object(cp, "HUNTS_PATH", os.path.join(self.dir, "hunts.json"))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def slot(self, h, dzien=30):
+        return {"id": f"L:d{h}", "listing_id": "L", "date_id": f"d{h}",
+                "start_utc": datetime(2026, 8, dzien, h - 2, 0, tzinfo=timezone.utc),
+                "name": "Rezerwacja godzinna", "count": 0, "limit": 1, "price": None}
+
+    def zapisz(self, godzina="11:00:15", sloty=(20,), wyniki=None, burst="mon-sun:11:00:30",
+               shots=(), grid=("niedz 30.08", 7, 12)):
+        teraz = datetime(2026, 8, 23, *[int(x) for x in godzina.split(":")], tzinfo=self.TZ)
+        sl = [self.slot(h) for h in sloty]
+        wyn = wyniki if wyniki is not None else {s["id"]: (True, "accepted") for s in sl}
+        env = {"BURST": burst, "BURST_SECONDS": "60"}
+        buf = io.StringIO()
+        with mock.patch.dict(os.environ, env), mock.patch("sys.stdout", buf), \
+                mock.patch.object(cp, "ntfy_post", return_value=True) as push:
+            wpis = cp.record_hunt(teraz, self.TZ, sl, wyn, list(shots), grid, False, "temat")
+        return wpis, push, buf.getvalue()
+
+    def test_entry_is_written_and_readable(self):
+        wpis, _, _ = self.zapisz()
+        self.assertEqual(wpis["date"], "2026-08-23")
+        self.assertEqual(wpis["free"], 7)
+        self.assertEqual(cp.load_hunts()[0]["registered"], ["niedz 30.08 20:00"])
+
+    def test_one_entry_per_day_even_with_batched_publication(self):
+        """Publikacja przychodzi partiami — to NADAL jeden dzień, nie trzy."""
+        self.zapisz(sloty=(20,))
+        self.zapisz(godzina="11:00:16", sloty=(19,))
+        self.zapisz(godzina="11:00:17", sloty=(18,))
+        wpisy = cp.load_hunts()
+        self.assertEqual(len(wpisy), 1)
+        self.assertEqual(len(wpisy[0]["registered"]), 3)
+
+    def test_publication_outside_burst_raises_alarm(self):
+        """SEDNO: 23.08 publikacja o 11:00:15, zryw od 11:00:30 — to musi krzyknąć."""
+        wpis, push, out = self.zapisz(godzina="11:00:15", burst="mon-sun:11:00:30")
+        self.assertFalse(wpis["aligned"])
+        self.assertTrue(push.called)
+        self.assertIn("POZA zrywem", out)
+
+    def test_publication_inside_burst_is_quiet(self):
+        wpis, push, _ = self.zapisz(godzina="11:00:40", burst="mon-sun:11:00:30")
+        self.assertTrue(wpis["aligned"])
+        push.assert_not_called()
+
+    def test_alert_fires_once_per_day_not_per_batch(self):
+        """Push przychodzący przy każdej partii przestałby być czytany."""
+        _, push1, _ = self.zapisz(godzina="11:00:15", sloty=(20,))
+        _, push2, _ = self.zapisz(godzina="11:00:16", sloty=(19,))
+        self.assertTrue(push1.called)
+        push2.assert_not_called()
+
+    def test_total_failure_raises_alarm_too(self):
+        wyniki = {"L:d20": (False, 'HTTP 409: {"message":"No available seats"}')}
+        wpis, push, _ = self.zapisz(godzina="11:00:40", sloty=(20,), wyniki=wyniki)
+        self.assertEqual(wpis["failed"], [{"when": "niedz 30.08 20:00", "why": "zajęty (409)"}])
+        self.assertTrue(push.called)
+
+    def test_shots_are_kept_for_later_analysis(self):
+        strzaly = [{"when": "20:00", "ok": True, "ms": 387, "start_ms": 0, "salwa": True}]
+        wpis, _, _ = self.zapisz(shots=strzaly)
+        self.assertEqual(wpis["shots"][0]["ms"], 387)
+
+    def test_history_is_capped(self):
+        cp.save_hunts([{"date": f"2026-06-{d:02d}"} for d in range(1, 29)] * 4)
+        self.assertLessEqual(len(cp.load_hunts()), cp.HUNTS_KEEP)
+
+    def test_corrupt_file_does_not_break_the_hunt(self):
+        with open(cp.HUNTS_PATH, "w", encoding="utf-8") as f:
+            f.write("{to nie jest json")
+        with mock.patch("sys.stdout", io.StringIO()):
+            self.assertEqual(cp.load_hunts(), [])
+        wpis, _, _ = self.zapisz()
+        self.assertEqual(wpis["date"], "2026-08-23")
+
+    def test_no_burst_configured_means_no_false_alarm(self):
+        wpis, push, _ = self.zapisz(burst="")
+        self.assertIsNone(wpis["aligned"])
+        push.assert_not_called()
+
+
+class HuntJournalEndToEndTest(unittest.TestCase):
+    """Czy prawdziwy przebieg odkłada wpis — bez tego cała zakładka jest pusta."""
+
+    LID = "aaaaaaaa-1111-2222-3333-444444444444"
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        for attr, val in (("STATE_PATH", "s.json"), ("HUNTS_PATH", "hunts.json")):
+            patcher = mock.patch.object(cp, attr, os.path.join(self.dir, val))
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.env = mock.patch.dict(os.environ, {
+            "LISTINGS": f"https://go.decathlon.pl/l/{self.LID}",
+            "NTFY_TOPIC": "", "FILTERS": "mon-sun:00:00-24:00", "TIMEZONE": "Europe/Warsaw",
+            "AUTO_REGISTER": "true", "AUTO_REGISTER_NAME": "Jan",
+            "AUTO_REGISTER_DRY_RUN": "false", "AUTO_REGISTER_MAX": "5",
+            "BURST": "mon-sun:11:00:30", "BURST_SECONDS": "60",
+            "CONFIG_PATH": os.path.join(self.dir, "brak.json")})
+        self.env.start()
+        self.addCleanup(self.env.stop)
+
+    def doc(self, *godziny):
+        start = datetime.now(timezone.utc) + timedelta(days=7)
+        return {"data": {"attributes": {"title": "Kort", "price": None,
+                                        "datesStats": {"availableListingDates": len(godziny)}}},
+                "included": [TestFreeSlots.date_item(
+                    start.replace(hour=h, minute=0, second=0, microsecond=0).isoformat(), f"d{h}")
+                    for h in godziny]}
+
+    def bieg(self, doc):
+        with mock.patch.object(cp, "resolve_current_id", side_effect=lambda x: self.LID), \
+                mock.patch.object(cp, "register_slot", return_value=(True, "accepted")), \
+                mock.patch("sys.stdout", io.StringIO()):
+            cp.run_once(skip_light=True, prefetched=(self.LID, doc))
+
+    def test_run_writes_a_hunt_entry_with_shot_times(self):
+        self.bieg(self.doc())                    # baseline
+        self.bieg(self.doc(15, 17))
+        wpisy = cp.load_hunts()
+        self.assertEqual(len(wpisy), 1)
+        self.assertEqual(len(wpisy[0]["registered"]), 2)
+        self.assertTrue(wpisy[0]["shots"], "brak czasów strzałów — dziennik traci sens")
+        self.assertIn("total", wpisy[0])
+
+    def test_panel_serves_the_journal(self):
+        """Zakładka „Polowania" czyta TYLKO plik — nie może zaszkodzić polowaniu."""
+        self.bieg(self.doc())
+        self.bieg(self.doc(15))
+        import importlib, sys as _sys
+        _sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "padel_browser"))
+        try:
+            panel = importlib.import_module("panel")
+        finally:
+            _sys.path.pop(0)
+        with mock.patch.object(panel.check_padel, "HUNTS_PATH", cp.HUNTS_PATH):
+            wpisy = panel.check_padel.load_hunts()
+        self.assertEqual(len(wpisy), 1)
+        self.assertEqual(len(wpisy[0]["registered"]), 1)
+        # Slot budujemy w UTC, a etykieta jest LOKALNA — wyliczamy ją tak samo jak kod,
+        # inaczej test przestałby przechodzić przy zmianie czasu.
+        oczekiwana = (datetime.now(timezone.utc) + timedelta(days=7)).replace(
+            hour=15, minute=0, second=0, microsecond=0).astimezone(cp._log_tz())
+        self.assertEqual(wpisy[0]["registered"][0], cp.fmt_when(oczekiwana, short=True))
