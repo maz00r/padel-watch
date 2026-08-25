@@ -487,15 +487,22 @@ def free_slots(doc, listing_id, now_utc):
 
 
 def day_grid(doc, listing_id, now_utc, day_local, tz):
-    """(wolne, wszystkie) w grafiku danego dnia lokalnego.
+    """(wolne, wszystkie, [godziny już zajęte]) w grafiku danego dnia lokalnego.
 
     W momencie publikacji różnica między tymi liczbami to terminy zajęte, ZANIM
     zdążyliśmy zobaczyć grafik — jedyny sposób, żeby to w ogóle zmierzyć. Bez tego
     „nie było takiej godziny" i „ktoś ją zabrał przed nami" wyglądają identycznie.
+
+    Same liczby jednak nie wystarczą. Żeby odpowiedzieć na pytanie „czy 20:00 w ogóle
+    było do wzięcia", trzeba wiedzieć, KTÓRE godziny są zajęte. Godzina, której nigdy
+    nie zobaczyliśmy jako wolnej, to zupełnie inny problem niż przegrany wyścig —
+    tamtej nie da się wygrać żadną prędkością ani żadnym regionem.
     """
     wszystkie = [s for s in parse_slots(doc, listing_id, now_utc, only_free=False)
                  if s["start_utc"].astimezone(tz).date() == day_local]
-    return sum(1 for s in wszystkie if s["count"] < s["limit"]), len(wszystkie)
+    zajete = sorted(f"{s['start_utc'].astimezone(tz):%H:%M}"
+                    for s in wszystkie if s["count"] >= s["limit"])
+    return len(wszystkie) - len(zajete), len(wszystkie), zajete
 
 
 def record_hunt(now_local, tz, new_slots, wyniki, shots, grid, zdalnie, topic):
@@ -519,7 +526,10 @@ def record_hunt(now_local, tz, new_slots, wyniki, shots, grid, zdalnie, topic):
         wpisy.insert(0, wpis)
 
     if grid:
-        wpis["target_day"], wpis["free"], wpis["total"] = grid
+        wpis["target_day"], wpis["free"], wpis["total"] = grid[:3]
+        # Sumujemy przez wszystkie partie: publikacja przychodzi kawałkami, więc każda
+        # migawka pokazuje inny fragment grafiku.
+        wpis["taken"] = sorted(set(wpis.get("taken") or []) | set(grid[3] if len(grid) > 3 else []))
     wpis["remote"] = wpis["remote"] or bool(zdalnie)
     for s in sorted(new_slots, key=lambda x: x["start_utc"]):
         kiedy = fmt_when(s["start_utc"].astimezone(tz), short=True)
@@ -529,6 +539,13 @@ def record_hunt(now_local, tz, new_slots, wyniki, shots, grid, zdalnie, topic):
         elif ok is False:
             wpis["failed"].append({"when": kiedy, "why": skroc_powod(msg)})
     wpis["shots"].extend(shots or [])
+
+    # SEDNO diagnostyki: godzina zajęta, w którą NIE strzelaliśmy i której NIE zdobyliśmy,
+    # to godzina, której nigdy nie zobaczyliśmy jako wolnej. Takiej nie da się wygrać
+    # żadną prędkością — i to zupełnie inny problem niż przegrany wyścig (`failed`).
+    przegrane = {f["when"].split()[-1] for f in wpis["failed"]}
+    nasze = {w.split()[-1] for w in wpis["registered"]}
+    wpis["never_seen"] = sorted(set(wpis.get("taken") or []) - przegrane - nasze)
 
     powod = hunt_alert_reason(wpis)
     if powod and not wpis["alerted"]:
@@ -597,14 +614,15 @@ def log_day_grids(new_slots, docs_by_lid, now_utc, tz):
         doc = docs_by_lid.get(lid)
         if doc is None:
             continue
-        wolne, wszystkie = day_grid(doc, lid, now_utc, dzien, tz)
+        wolne, wszystkie, zajete_godziny = day_grid(doc, lid, now_utc, dzien, tz)
         if pierwszy is None:
-            pierwszy = (f"{PL_DAYS_SHORT[dzien.weekday()]} {dzien:%d.%m}", wolne, wszystkie)
+            pierwszy = (f"{PL_DAYS_SHORT[dzien.weekday()]} {dzien:%d.%m}", wolne, wszystkie,
+                        zajete_godziny)
         zajete = wszystkie - wolne
         log(f"📋 Grafik na {PL_DAYS_SHORT[dzien.weekday()]} {dzien:%d.%m}: "
             f"{wolne} {plural(wolne, 'wolny', 'wolne', 'wolnych')} z {wszystkie}"
-            + (f" — {zajete} {plural(zajete, 'zajęty', 'zajęte', 'zajętych')}, "
-               f"zanim zobaczyliśmy grafik" if zajete else ""))
+            + (f" — {zajete} {plural(zajete, 'zajęty', 'zajęte', 'zajętych')} "
+               f"({', '.join(zajete_godziny)}), zanim zobaczyliśmy grafik" if zajete else ""))
     return pierwszy
 
 

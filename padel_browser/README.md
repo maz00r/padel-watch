@@ -120,6 +120,14 @@ przyszła publikacja, ile terminów było w grafiku, co zdobyte, co przegrane i 
 poszedł każdy strzał. Powstała po to, żeby **nie trzeba było codziennie przeglądać
 Dziennika** — a te liczby i tak w nim giną wśród tysięcy linii.
 
+Kluczowa linia w każdym wpisie odróżnia dwa problemy, które wcześniej wyglądały
+tak samo:
+
+- **Przegrane: 20:00 (zajęty 409)** — widzieliśmy termin wolny, strzeliliśmy,
+  przegraliśmy zapis. To jest wyścig i da się go optymalizować.
+- **Nigdy nie pokazane jako wolne: 20:00** — termin zniknął, zanim w ogóle spojrzeliśmy.
+  Tego **nie wygra żadna prędkość ani żaden region**.
+
 Push przychodzi **tylko wtedy, gdy dzień wymaga uwagi**:
 
 - publikacja wypadła **poza oknem zrywu** (wtedy zryw i sprint się nie odpalają),

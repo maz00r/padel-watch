@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.14.0 — dziennik mówi, KTÓRE godziny zniknęły przed nami
+
+- **Nowa linia: „Nigdy nie pokazane jako wolne: 20:00".** Dotąd dziennik mówił tylko
+  `7 wolnych z 11` — a to za mało, żeby odpowiedzieć na pytanie „jakim cudem ktoś
+  zawsze zajmuje 20:00". Teraz widać różnicę między dwoma zupełnie różnymi problemami:
+  - **przegrany wyścig** (`Przegrane: 20:00 (zajęty 409)`) — widzieliśmy termin wolny,
+    strzeliliśmy i przegraliśmy zapis. To da się optymalizować.
+  - **godzina, której nigdy nie zobaczyliśmy wolnej** — zniknęła przed naszym pierwszym
+    spojrzeniem. **Tego nie wygra żadna prędkość ani żaden region**, więc nie ma sensu
+    gonić króliczka.
+- **Dziennik dodatku też wymienia godziny**: `📋 Grafik na pon 31.08: 7 wolnych z 11 —
+  4 zajęte (09:00, 10:00, 12:00, 20:00), zanim zobaczyliśmy grafik`.
+- **Nasze własne rezerwacje są odejmowane** — w kolejnej migawce termin zdobyty przez
+  nas też jest „zajęty", więc bez tego dziennik oskarżałby nas o kradzież własnych godzin.
+- Zajęte godziny sumują się przez wszystkie partie publikacji, bo każda migawka pokazuje
+  inny fragment grafiku.
+- `hunts.json` wypadł z repozytorium do `.gitignore` — to plik runtime, jak `state.json`,
+  a trafił tam przez moje `git add -A` przy 0.13.0.
+
+
 ## 0.13.0 — dziennik polowań: zakładka „Polowania" i alert o rozjeździe
 
 - **Nowy plik `hunts.json` i zakładka „Polowania" w panelu.** Jeden wpis na dobę:
