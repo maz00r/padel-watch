@@ -2421,8 +2421,12 @@ class DayGridTest(unittest.TestCase):
         ]}
 
     def test_counts_taken_slots_too(self):
-        wolne, wszystkie = cp.day_grid(self.doc(), "L", self.NOW, date(2026, 8, 17), self.TZ)
+        wolne, wszystkie, zajete = cp.day_grid(self.doc(), "L", self.NOW,
+                                               date(2026, 8, 17), self.TZ)
         self.assertEqual((wolne, wszystkie), (2, 4))
+        # Same liczby nie odpowiadają na pytanie „czy 20:00 było do wzięcia" —
+        # dlatego day_grid oddaje też KTÓRE godziny są zajęte.
+        self.assertEqual(zajete, ["09:00", "10:00"])
 
     def test_free_slots_still_hides_taken(self):
         """Regresja: rozdzielenie parsera nie może zmienić tego, co widzi monitor."""
@@ -2430,7 +2434,7 @@ class DayGridTest(unittest.TestCase):
         self.assertEqual(len(wolne), 3)   # 2 z 17.08 + 1 z 18.08, zajęte pominięte
 
     def test_other_days_do_not_leak_in(self):
-        _, wszystkie = cp.day_grid(self.doc(), "L", self.NOW, date(2026, 8, 18), self.TZ)
+        _, wszystkie, _ = cp.day_grid(self.doc(), "L", self.NOW, date(2026, 8, 18), self.TZ)
         self.assertEqual(wszystkie, 1)
 
     def test_log_names_the_missing_hours(self):
@@ -2442,7 +2446,8 @@ class DayGridTest(unittest.TestCase):
         out = buf.getvalue()
         self.assertIn("pon 17.08", out)
         self.assertIn("2 wolne z 4", out)
-        self.assertIn("2 zajęte, zanim zobaczyliśmy", out)
+        # Godziny w nawiasie to sedno: bez nich nie wiadomo, KTÓRA godzina przepadła.
+        self.assertIn("2 zajęte (09:00, 10:00), zanim zobaczyliśmy", out)
 
     def test_full_grid_says_nothing_about_being_late(self):
         """Gdy nic nie jest zajęte, nie sugerujemy, że ktoś nas ubiegł."""
@@ -3071,3 +3076,45 @@ class HuntJournalEndToEndTest(unittest.TestCase):
         oczekiwana = (datetime.now(timezone.utc) + timedelta(days=7)).replace(
             hour=15, minute=0, second=0, microsecond=0).astimezone(cp._log_tz())
         self.assertEqual(wpisy[0]["registered"][0], cp.fmt_when(oczekiwana, short=True))
+
+
+class NeverSeenTest(HuntJournalTest):
+    """Rozróżnienie, po które powstała ta zmiana: przegrany WYŚCIG vs godzina,
+    której nigdy nie zobaczyliśmy jako wolnej.
+
+    Pytanie użytkownika brzmiało „jakim cudem ktoś zawsze zajmuje 20:00". Bez tego
+    rozróżnienia nie da się odpowiedzieć: 409 znaczy, że widzieliśmy termin wolny
+    i przegraliśmy zapis (to jest do optymalizowania), a brak w ogóle znaczy, że
+    zniknął przed naszym pierwszym spojrzeniem (tego nie wygra żadna prędkość).
+    """
+
+    def test_lost_race_is_not_reported_as_never_seen(self):
+        """20:00 z 409 to przegrany wyścig — widzieliśmy je wolne."""
+        wyniki = {"L:d20": (False, 'HTTP 409: {"message":"No available seats"}')}
+        wpis, _, _ = self.zapisz(godzina="11:00:40", sloty=(20,), wyniki=wyniki,
+                                 grid=("niedz 30.08", 5, 6, ["20:00"]))
+        self.assertEqual([f["when"] for f in wpis["failed"]], ["niedz 30.08 20:00"])
+        self.assertEqual(wpis["never_seen"], [],
+                         "przegrany wyścig NIE jest 'nigdy nie widziane'")
+
+    def test_hour_taken_before_we_looked_is_flagged(self):
+        """SEDNO: 20:00 zajęte, a my nawet w nie nie strzelaliśmy."""
+        wpis, _, _ = self.zapisz(godzina="11:00:40", sloty=(15,),
+                                 grid=("niedz 30.08", 5, 7, ["20:00", "19:00"]))
+        self.assertEqual(wpis["never_seen"], ["19:00", "20:00"])
+
+    def test_our_own_bookings_are_not_flagged(self):
+        """Zarezerwowany przez nas termin też jest 'zajęty' w kolejnej migawce —
+        gdyby go nie odjąć, dziennik oskarżałby nas o kradzież własnych terminów."""
+        wpis, _, _ = self.zapisz(godzina="11:00:40", sloty=(20,),
+                                 grid=("niedz 30.08", 5, 6, ["20:00"]))
+        self.assertEqual(wpis["registered"], ["niedz 30.08 20:00"])
+        self.assertEqual(wpis["never_seen"], [])
+
+    def test_taken_accumulates_across_batches(self):
+        """Publikacja przychodzi partiami — każda migawka pokazuje inny fragment."""
+        self.zapisz(godzina="11:00:40", sloty=(15,), grid=("niedz 30.08", 5, 7, ["20:00"]))
+        wpis, _, _ = self.zapisz(godzina="11:00:41", sloty=(17,),
+                                 grid=("niedz 30.08", 4, 7, ["19:00"]))
+        self.assertEqual(wpis["taken"], ["19:00", "20:00"])
+        self.assertEqual(wpis["never_seen"], ["19:00", "20:00"])

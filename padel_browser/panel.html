@@ -167,6 +167,14 @@ function huntCard(h) {
       return esc(f.when) + " (" + esc(f.why) + ")";
     }).join(", ") + "</div>");
   }
+  if (h.never_seen && h.never_seen.length) {
+    // Najważniejsza linia w całym dzienniku: godzina, której NIGDY nie zobaczyliśmy
+    // jako wolnej, jest nie do wygrania żadną prędkością. To co innego niż przegrany
+    // wyścig — tamte są wyżej, w „Przegrane".
+    linie.push('<div class="sub bad">Nigdy nie pokazane jako wolne: '
+      + esc(h.never_seen.join(", "))
+      + " — te zniknęły przed naszym pierwszym spojrzeniem.</div>");
+  }
   if (h.aligned === false) {
     linie.push('<div class="sub bad">Publikacja poza zrywem (' + esc(h.burst)
       + ") — przesuń okna w konfiguracji.</div>");
