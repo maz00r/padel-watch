@@ -3118,3 +3118,57 @@ class NeverSeenTest(HuntJournalTest):
                                  grid=("niedz 30.08", 4, 7, ["19:00"]))
         self.assertEqual(wpis["taken"], ["19:00", "20:00"])
         self.assertEqual(wpis["never_seen"], ["19:00", "20:00"])
+
+
+class HorizonDayTest(unittest.TestCase):
+    """REGRESJA 26.08: raport opisał zły dzień i zaliczył NASZ termin jako stracony.
+
+    Tego dnia nowe terminy przyszły z DWÓCH dni naraz: publikacja dotyczyła 02.09,
+    a odwołania 01.09. Raport wziął dzień najwcześniejszy, czyli odwołania, i wypisał
+    „nigdy nie pokazane jako wolne: … 18:00", choć 18:00 na 01.09 mieliśmy od 25.08.
+    """
+
+    TZ = ZoneInfo("Europe/Warsaw") if ZoneInfo else timezone.utc
+    NOW = datetime(2026, 8, 26, 9, 0, tzinfo=timezone.utc)
+
+    def doc(self):
+        item = TestFreeSlots.date_item
+        return {"included": [
+            # 01.09 — dzień z odwołań: 15:00 wolne, 18:00 NASZE, 19:00 cudze
+            item("2026-09-01T13:00:00+00:00", "a"),
+            item("2026-09-01T16:00:00+00:00", "nasze18", count=1),
+            item("2026-09-01T17:00:00+00:00", "obce19", count=1),
+            # 02.09 — HORYZONT, świeża publikacja: 15:00 wolne, 20:00 cudze
+            item("2026-09-02T13:00:00+00:00", "c"),
+            item("2026-09-02T18:00:00+00:00", "obce20", count=1),
+        ]}
+
+    def nowe(self):
+        return [{"id": "L:a", "listing_id": "L",
+                 "start_utc": datetime(2026, 9, 1, 13, 0, tzinfo=timezone.utc)},
+                {"id": "L:c", "listing_id": "L",
+                 "start_utc": datetime(2026, 9, 2, 13, 0, tzinfo=timezone.utc)}]
+
+    def uruchom(self, held=()):
+        buf = io.StringIO()
+        with mock.patch("sys.stdout", buf):
+            wynik = cp.log_day_grids(self.nowe(), {"L": self.doc()}, self.NOW, self.TZ, held)
+        return wynik, buf.getvalue()
+
+    def test_reports_the_horizon_day_not_the_earliest(self):
+        wynik, _ = self.uruchom()
+        self.assertEqual(wynik[0], "śr 02.09",
+                         f"raport opisał {wynik[0]} zamiast dnia publikacji")
+
+    def test_our_own_booking_is_not_counted_as_lost(self):
+        wynik, out = self.uruchom(held={"L:nasze18"})
+        self.assertNotIn("18:00", out.split("01.09")[1].split("\n")[0],
+                         "nasz własny termin zgłoszony jako stracony")
+
+    def test_earlier_days_are_not_described_as_a_race(self):
+        """„Zanim zobaczyliśmy grafik" ma sens TYLKO dla dnia publikacji."""
+        _, out = self.uruchom(held={"L:nasze18"})
+        linia_01 = [w for w in out.splitlines() if "01.09" in w][0]
+        linia_02 = [w for w in out.splitlines() if "02.09" in w][0]
+        self.assertIn("przez innych", linia_01)
+        self.assertIn("zanim zobaczyliśmy grafik", linia_02)

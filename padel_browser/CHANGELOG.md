@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.14.1 — naprawa dziennika: zły dzień i własne terminy liczone jako stracone
+
+Pierwszy produkcyjny wpis nowej diagnostyki (26.08) obnażył dwa moje błędy — oba
+sprawiały, że raport **wprowadzał w błąd**, choć same rezerwacje były poprawne.
+
+- **Raport opisywał zły dzień.** Nowe terminy potrafią przyjść z DWÓCH dni naraz:
+  publikacja dotyczy dnia +7, a odwołania dni bliższych. 26.08 tak właśnie było
+  (01.09 z odwołań, 02.09 z publikacji), a `log_day_grids` brało dzień **najwcześniejszy**.
+  Teraz bierze **horyzont**, czyli dzień najdalszy — ten świeżo opublikowany.
+- **Nasze własne rezerwacje liczyły się jako stracone.** 01.09 18:00 mieliśmy od 25.08,
+  a raport wypisał je wśród „nigdy nie pokazane jako wolne". `day_grid` przyjmuje teraz
+  listę terminów, które już trzymamy, i wyłącza je z zajętych.
+- **„Zanim zobaczyliśmy grafik" tylko dla dnia publikacji.** W dniach wcześniejszych
+  zajęte godziny to zwykły ruch z ostatniej doby, a nie przegrany wyścig — teraz
+  opisane jako „przez innych".
+
+
 ## 0.14.0 — dziennik mówi, KTÓRE godziny zniknęły przed nami
 
 - **Nowa linia: „Nigdy nie pokazane jako wolne: 20:00".** Dotąd dziennik mówił tylko

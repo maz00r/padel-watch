@@ -486,7 +486,7 @@ def free_slots(doc, listing_id, now_utc):
     return parse_slots(doc, listing_id, now_utc, only_free=True)
 
 
-def day_grid(doc, listing_id, now_utc, day_local, tz):
+def day_grid(doc, listing_id, now_utc, day_local, tz, held_ids=()):
     """(wolne, wszystkie, [godziny już zajęte]) w grafiku danego dnia lokalnego.
 
     W momencie publikacji różnica między tymi liczbami to terminy zajęte, ZANIM
@@ -500,9 +500,14 @@ def day_grid(doc, listing_id, now_utc, day_local, tz):
     """
     wszystkie = [s for s in parse_slots(doc, listing_id, now_utc, only_free=False)
                  if s["start_utc"].astimezone(tz).date() == day_local]
+    # NASZE rezerwacje też są „zajęte" — ale nie przez konkurencję. Bez tego wyjątku
+    # termin zdobyty wczoraj wracał następnego dnia jako „zniknął przed nami"
+    # (26.08: 01.09 18:00 było nasze od 25.08, a raport pokazywał je jako stracone).
     zajete = sorted(f"{s['start_utc'].astimezone(tz):%H:%M}"
-                    for s in wszystkie if s["count"] >= s["limit"])
-    return len(wszystkie) - len(zajete), len(wszystkie), zajete
+                    for s in wszystkie
+                    if s["count"] >= s["limit"] and s["id"] not in set(held_ids))
+    return len(wszystkie) - sum(1 for s in wszystkie if s["count"] >= s["limit"]), \
+        len(wszystkie), zajete
 
 
 def record_hunt(now_local, tz, new_slots, wyniki, shots, grid, zdalnie, topic):
@@ -600,30 +605,38 @@ def notify_hunt(topic, wpis, powod):
     )
 
 
-def log_day_grids(new_slots, docs_by_lid, now_utc, tz):
+def log_day_grids(new_slots, docs_by_lid, now_utc, tz, held_ids=()):
     """Loguje, ile terminów danego dnia jest wolnych, a ile liczy CAŁY grafik.
 
-    Wołane w chwili wykrycia nowych terminów, czyli — w dniu publikacji — przy
-    pierwszym spojrzeniu na świeży grafik. Różnica to terminy, których nigdy nie
-    zobaczyliśmy jako wolne. Bez tej liczby brakująca godzina wygląda tak samo,
-    niezależnie od tego, czy nikt jej nie wystawił, czy ktoś był szybszy od nas.
+    Zwraca statystykę dla dnia NAJDALSZEGO w przyszłość — bo to on jest świeżo
+    opublikowanym horyzontem. Nowe terminy potrafią przyjść z dwóch dni naraz:
+    publikacja dotyczy dnia +7, a odwołania dotyczą dni bliższych. 26.08 właśnie
+    tak było (01.09 z odwołań, 02.09 z publikacji) i raport opisał zły dzień.
+
+    Tylko dla dnia publikacji ma sens zdanie „zanim zobaczyliśmy grafik" — w dniach
+    wcześniejszych zajęte godziny to zwykły ruch z ostatniej doby, nie wyścig.
     """
     dni = {(s["listing_id"], s["start_utc"].astimezone(tz).date()) for s in new_slots}
-    pierwszy = None
-    for lid, dzien in sorted(dni, key=lambda k: (k[1], k[0])):
+    posortowane = sorted(dni, key=lambda k: (k[1], k[0]))
+    horyzont = posortowane[-1] if posortowane else None
+    wynik = None
+    for lid, dzien in posortowane:
         doc = docs_by_lid.get(lid)
         if doc is None:
             continue
-        wolne, wszystkie, zajete_godziny = day_grid(doc, lid, now_utc, dzien, tz)
-        if pierwszy is None:
-            pierwszy = (f"{PL_DAYS_SHORT[dzien.weekday()]} {dzien:%d.%m}", wolne, wszystkie,
-                        zajete_godziny)
-        zajete = wszystkie - wolne
-        log(f"📋 Grafik na {PL_DAYS_SHORT[dzien.weekday()]} {dzien:%d.%m}: "
+        wolne, wszystkie, zajete_godziny = day_grid(doc, lid, now_utc, dzien, tz, held_ids)
+        etykieta = f"{PL_DAYS_SHORT[dzien.weekday()]} {dzien:%d.%m}"
+        publikacja = (lid, dzien) == horyzont
+        if publikacja:
+            wynik = (etykieta, wolne, wszystkie, zajete_godziny)
+        ile = len(zajete_godziny)
+        log(f"📋 Grafik na {etykieta}: "
             f"{wolne} {plural(wolne, 'wolny', 'wolne', 'wolnych')} z {wszystkie}"
-            + (f" — {zajete} {plural(zajete, 'zajęty', 'zajęte', 'zajętych')} "
-               f"({', '.join(zajete_godziny)}), zanim zobaczyliśmy grafik" if zajete else ""))
-    return pierwszy
+            + (f" — {ile} {plural(ile, 'zajęty', 'zajęte', 'zajętych')} "
+               f"({', '.join(zajete_godziny)})"
+               + (", zanim zobaczyliśmy grafik" if publikacja else " przez innych")
+               if ile else ""))
+    return wynik
 
 
 def passes_filter(slot, filters, tz):
@@ -2418,7 +2431,7 @@ def run_once(announce_startup=False, skip_light=False, prefetched=None, defer_pu
     if new_ids:
         log(f"NOWE wolne terminy: {len(new_ids)}")
         new_slots = sorted((current[i] for i in new_ids), key=lambda x: x["start_utc"])
-        grid = log_day_grids(new_slots, docs_by_lid, now_utc, tz)
+        grid = log_day_grids(new_slots, docs_by_lid, now_utc, tz, registered_ids)
         # Dziennik polowań: jeden wpis na dobę z tym, co naprawdę się liczy.
         # Nie może wywrócić biegu — rezerwacje są już zrobione, historia to dodatek.
         try:
