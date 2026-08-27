@@ -41,6 +41,7 @@ przechodzisz normalne logowanie, łącznie z kodem z maila.
 | `sprint` | **sprint**: wąskie okno pobierania BEZ PRZERW, `DNI:GG:MM:SS`. Puste = wyłączony | `mon-sun:11:00:51` |
 | `sprint_seconds` | ile sekund trwa sprint (1–30) | `4` |
 | `sprint_threads` | ile wątków pobiera równolegle w sprincie (1–4) | `3` |
+| `auto_login` | gdy sesja GO wygaśnie, sam kliknij „ZALOGUJ SIĘ” w przeglądarce dodatku (nie wpisuje żadnych danych) | `true` |
 | `token_check_before` | ile minut przed zrywem sprawdzić sesję i ostrzec pushem, gdy nie żyje (0–240); `0` = wyłączone | `30` |
 | `remote_url` | adres funkcji AWS w eu-west-1, która wykona sprint i salwę. Puste = wszystko lokalnie | `` |
 | `remote_secret` | sekret do tej funkcji (ta sama wartość co `PADEL_SECRET` w Lambdzie) | `` |
@@ -81,7 +82,16 @@ Cię po długim czasie). Wtedy:
   z linku w powiadomieniu,
 - termin, którego nie udało się zająć, jest **zapamiętany i ponawiany**, gdy token wróci.
 
-Naprawa: **otwórz panel i zaloguj się ponownie**. Profil Chromium siedzi w `/data`, więc
+**Najpierw dodatek spróbuje sam.** Sesja u dostawcy tożsamości Decathlona żyje dłużej
+niż sama sesja GO, więc bardzo często wystarczy kliknąć „ZALOGUJ SIĘ" — przeglądarka
+odbija się przez OAuth i wraca zalogowana bez wpisywania czegokolwiek. Dodatek robi
+dokładnie to jedno kliknięcie (opcja `auto_login`, domyślnie włączona).
+
+Nie wpisuje przy tym **żadnych danych** — ani loginu, ani hasła, ani kodu z maila.
+Gdy po kliknięciu pojawi się formularz, poddaje się i prosi Ciebie. Próbuje najwyżej
+trzy razy, z dziesięciominutowymi przerwami.
+
+Naprawa, gdy ciche logowanie nie wystarczy: **otwórz panel i zaloguj się ponownie**. Profil Chromium siedzi w `/data`, więc
 przeżywa restart dodatku — logowanie jest potrzebne tylko po faktycznym wygaśnięciu sesji.
 
 ### Czyszczenie zapisanych terminów (`clear_state`)

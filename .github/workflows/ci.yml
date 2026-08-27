@@ -15,6 +15,8 @@ jobs:
           python-version: "3.12"
       - name: Testy jednostkowe (padel)
         run: python3 -m unittest -v test_check_padel
+      - name: Testy jednostkowe (czytnik tokenu)
+        run: python3 -m unittest -v test_read_token
       - name: Testy jednostkowe (kino)
         run: python3 -m unittest -v test_check_cinema
       - name: Składnia silników

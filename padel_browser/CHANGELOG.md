@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.16.0 — ciche logowanie: dodatek sam klika „ZALOGUJ SIĘ”
+
+- **Gdy sesja Decathlon GO wygaśnie, czytnik tokenu klika przycisk logowania sam.**
+  Bardzo często to wystarcza: sesja u dostawcy tożsamości żyje dłużej, więc przeglądarka
+  odbija się przez OAuth i wraca zalogowana **bez wpisywania czegokolwiek**.
+  Robimy dokładnie to samo kliknięcie, które robiłeś ręcznie.
+- **Czego to NIE robi:** nie wpisuje loginu, hasła ani kodu z maila, nie dotyka
+  formularzy, nie obchodzi żadnego zabezpieczenia. Jeśli po kliknięciu pojawi się
+  formularz — poddajemy się i prosimy o ręczne logowanie. Jest na to osobny test,
+  który sprawdza, że jedyną interakcją ze stroną jest kliknięcie linku.
+- **Bezpieczniki:** najwyżej 3 próby, co najmniej 10 minut przerwy między nimi,
+  wyłącznie gdy tokenu nie ma i nie stoimy na stronie logowania. Po sukcesie licznik
+  prób się zeruje. Opcja `auto_login: false` wyłącza mechanizm całkowicie.
+- **Selektor po `href="/login"`, nie po klasie CSS.** Klasy w tej aplikacji są
+  zahaszowane (`Topbar_navbarLogin__4Hfnb`) i zmieniają się przy każdym wydaniu —
+  selektor po klasie zepsułby się po cichu przy pierwszym deployu Decathlonu.
+- **Usunięty przycisk „Otwórz w Decathlon GO"** z zakładki Rezerwacje (dodany
+  w 0.15.0). Prowadził na stronę kortu, a nie do konkretnego terminu — bo aplikacja
+  GO nie ma takiego adresu — więc nie robił tego, po co powstał.
+- `test_read_token.py` to nowy plik testów; CI uruchamia go razem z pozostałymi.
+
+
 ## 0.15.0 — kontrola sesji przed polowaniem i link do kortu przy rezerwacji
 
 - **Push o martwej sesji przychodzi ZANIM otworzy się okno** (`token_check_before`,

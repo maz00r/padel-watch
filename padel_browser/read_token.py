@@ -39,6 +39,70 @@ RENEW_DELAY = 10
 # retry musi się w niej zmieścić nawet po pojedynczej wpadce.
 ERROR_RETRY = 45
 
+# CICHE ZALOGOWANIE. Gdy sesja w Decathlon GO wygaśnie, ale sesja u dostawcy tożsamości
+# jeszcze żyje, wystarczy kliknąć „ZALOGUJ SIĘ” — przeglądarka odbija się przez OAuth
+# i wraca zalogowana, bez wpisywania czegokolwiek. Robimy dokładnie to samo kliknięcie
+# we WŁASNEJ, wcześniej zalogowanej przeglądarce.
+#
+# CZEGO TO NIE ROBI I ROBIĆ NIE BĘDZIE: nie wpisuje loginu, hasła ani kodu z maila,
+# nie dotyka formularzy, nie obchodzi żadnego zabezpieczenia. Jeśli po kliknięciu
+# pojawi się formularz, poddajemy się i prosimy o ręczne logowanie.
+AUTO_LOGIN = (os.environ.get("AUTO_LOGIN") or "true").strip().lower() not in ("false", "0", "no")
+# Selektor jest po ATRYBUCIE href, nie po klasie: klasy w tej aplikacji są zahaszowane
+# (`Topbar_navbarLogin__4Hfnb`) i zmieniają się przy każdym wydaniu.
+LOGIN_LINK_JS = """
+(() => {
+  const a = document.querySelector('a[href="/login"], a[href$="/login"]');
+  if (!a) return "brak";
+  a.click();
+  return "klik";
+})()
+"""
+# Nie próbujemy w kółko: po serii nieudanych prób sesja u dostawcy też padła
+# i potrzebne jest ręczne logowanie. Dalsze klikanie tylko męczy stronę.
+AUTO_LOGIN_MAX_TRIES = 3
+AUTO_LOGIN_COOLDOWN = 600      # s między próbami
+_auto_login_tries = 0
+_auto_login_last = 0.0
+
+
+def try_silent_login(cdp):
+    """Klika „ZALOGUJ SIĘ” i czeka na powrót. Zwraca (jwt, exp) albo (None, 0).
+
+    Wywoływane WYŁĄCZNIE wtedy, gdy tokenu nie ma i nie stoimy na stronie logowania.
+    """
+    global _auto_login_tries, _auto_login_last
+    if not AUTO_LOGIN:
+        return None, 0
+    if _auto_login_tries >= AUTO_LOGIN_MAX_TRIES:
+        return None, 0
+    if time.time() - _auto_login_last < AUTO_LOGIN_COOLDOWN:
+        return None, 0
+    _auto_login_last = time.time()
+    _auto_login_tries += 1
+
+    wynik = cdp.evaluate(LOGIN_LINK_JS)
+    if wynik != "klik":
+        log('~ Ciche logowanie: nie znalazłem linku „ZALOGUJ SIĘ” na stronie.')
+        return None, 0
+    log(f'~ Ciche logowanie: kliknąłem „ZALOGUJ SIĘ” '
+        f'(próba {_auto_login_tries}/{AUTO_LOGIN_MAX_TRIES}) — czekam na powrót.')
+    # Przekierowanie przez dostawcę tożsamości i z powrotem to kilka skoków.
+    for _ in range(10):
+        time.sleep(2)
+        jwt = cdp.evaluate(f"localStorage.getItem({JWT_KEY!r})")
+        if jwt:
+            _auto_login_tries = 0     # udało się — licznik prób od nowa
+            log("✓ Ciche logowanie zadziałało — sesja odzyskana bez wpisywania czegokolwiek.")
+            return jwt, jwt_expiry(jwt)
+    url = cdp.evaluate("location.href") or ""
+    if any(h in url for h in LOGIN_URL_HINTS):
+        log("✗ Ciche logowanie nie wystarczyło — Decathlon prosi o dane. "
+            "Otwórz panel Padel i zaloguj się ręcznie.")
+    else:
+        log(f"✗ Ciche logowanie bez skutku (URL: {url[:70]}).")
+    return None, 0
+
 
 def fmt_left(seconds):
     seconds = int(seconds)
@@ -151,6 +215,11 @@ def read_jwt_once():
         if not jwt:
             if any(h in url for h in LOGIN_URL_HINTS):
                 return None, 0, f"strona przekierowała na logowanie ({url[:70]}) — zaloguj się w panelu"
+            # Sesja GO wygasła, ale u dostawcy tożsamości może jeszcze żyć — wtedy
+            # samo kliknięcie „ZALOGUJ SIĘ” wystarczy. Nic nie wpisujemy.
+            jwt, exp = try_silent_login(cdp)
+            if jwt:
+                return jwt, exp, None
             return None, 0, f"brak {JWT_KEY} w localStorage (URL: {url[:70]})"
         return jwt, jwt_expiry(jwt), None
     finally:
