@@ -177,6 +177,97 @@ def save_hunts(wpisy):
         log(f"! Nie zapisałem dziennika polowań: {e!r}")
 
 
+# KONTROLA SESJI PRZED POLOWANIEM. 27.08 wszystkie pięć strzałów padło w 0 ms
+# z powodem „token" — sesja przeglądarki nie żyła, a dowiedzieliśmy się o tym PO
+# publikacji, tracąc cztery wolne terminy (15, 17, 19, 20), w tym 20:00, o które
+# walczymy od tygodni. Push o martwej sesji ma przychodzić ZANIM okno się otworzy,
+# żeby był czas się zalogować.
+PREFLIGHT_MIN_BEFORE = 30
+_preflight_done_on = None   # data ostatniej kontroli — jedna na dobę wystarczy
+
+
+def burst_start_today(now_local, tz):
+    """Początek dzisiejszego okna zrywu albo None, gdy zryw wyłączony/błędny."""
+    surowy = (os.environ.get("BURST") or "").strip()
+    if not surowy:
+        return None
+    try:
+        burst = parse_burst_env(surowy)
+        burst["seconds"] = max(1, min(int(os.environ.get("BURST_SECONDS") or 15),
+                                      BURST_MAX_SECONDS))
+    except Exception:  # noqa: BLE001 - zły zryw nie może wywrócić kontroli
+        return None
+    hour, minute, second = burst["at"]
+    dzis = now_local.replace(hour=hour, minute=minute, second=second, microsecond=0)
+    # DAY_NAMES, a nie strftime("%a") — ten drugi zależy od locale kontenera
+    # i przy innym ustawieniu języka cicho przestałby pasować do dni zrywu.
+    return dzis if DAY_NAMES[now_local.weekday()] in burst["days"] else None
+
+
+def preflight_token(now_local, tz, topic, book_url):
+    """Na X minut przed zrywem sprawdza, czy sesja żyje. Raz na dobę.
+
+    Sprawdzenie jest DWUSTOPNIOWE, bo dwa różne uszkodzenia wyglądają tak samo
+    dopiero przy strzale:
+      1) lokalnie — czy w ogóle mamy token i czy nie wygasł (to złapało 27.08),
+      2) na żywo — czy serwer go jeszcze akceptuje (sesja mogła zostać unieważniona,
+         a token nadal ma ważny `exp`).
+
+    To NIE jest powrót do rozgrzewki uwierzytelnionej z 0.9.0, która miała przyspieszać
+    strzał i została obalona. Tu chodzi o jedno zapytanie na dobę, pół godziny przed
+    oknem, wyłącznie po to, żeby zdążyć zareagować.
+    """
+    global _preflight_done_on
+    start = burst_start_today(now_local, tz)
+    if start is None:
+        return None
+    try:
+        ile_wczesniej = max(0, min(int(os.environ.get("TOKEN_CHECK_BEFORE")
+                                       or PREFLIGHT_MIN_BEFORE), 240))
+    except ValueError:
+        ile_wczesniej = PREFLIGHT_MIN_BEFORE
+    if not ile_wczesniej:
+        return None
+    moment = start - timedelta(minutes=ile_wczesniej)
+    # Okno minutowe, a nie punkt: pętla budzi się co kilka sekund i nie trafi w sekundę.
+    if not (moment <= now_local < moment + timedelta(seconds=90)):
+        return None
+    if _preflight_done_on == now_local.date():
+        return None
+    _preflight_done_on = now_local.date()
+
+    cfg = load_config(quiet=True)
+    if not boolish(os.environ.get("AUTO_REGISTER") or cfg.get("auto_register")):
+        return None   # bez auto-rejestracji nie ma czego chronić
+
+    reg_cfg = build_reg_cfg(cfg, load_state_doc())
+    token, blad = ensure_decathlon_token(dict(reg_cfg))
+    if not blad and token:
+        try:
+            decathlon_rpc("users.getMe", token, {})
+        except urllib.error.HTTPError as e:
+            blad = (f"serwer odrzucił token (HTTP {e.code})"
+                    if e.code in (401, 403) else "")
+            try:
+                e.close()
+            except Exception:  # noqa: BLE001
+                pass
+        except Exception:  # noqa: BLE001 - awaria sieci to nie martwa sesja
+            blad = ""
+    if not blad:
+        log(f"🔑 Sesja Decathlon sprawdzona — polowanie o {start:%H:%M:%S} ma czym strzelać.")
+        return True
+
+    log(f"⚠ SESJA NIE ŻYJE ({blad}). Polowanie o {start:%H:%M:%S} nie uda się bez "
+        f"zalogowania w panelu Padel.")
+    if topic:
+        ntfy_post(topic, "⚠️ Zaloguj się — polowanie za %d min" % ile_wczesniej,
+                  f"{blad}\n\nOtwórz panel Padel i zaloguj się na go.decathlon.pl.\n"
+                  f"Bez tego rejestracja o {start:%H:%M} nie wyśle ani jednego żądania.",
+                  click=book_url, priority="urgent", tags="rotating_light")
+    return False
+
+
 def hunt_window(now_local, tz):
     """(czy publikacja trafiła w zryw, opis okna). (None, '') gdy zryw wyłączony.
 
@@ -2629,6 +2720,15 @@ def main():
             set_log_precision(active)  # milisekundy zostają tylko na czas zrywu
             in_burst = active
             last_sleep = None
+        # Kontrola sesji na pół godziny przed zrywem — 27.08 martwa sesja kosztowała
+        # cztery wolne terminy, a dowiedzieliśmy się o tym dopiero po polowaniu.
+        try:
+            preflight_token(now_local, tz, os.environ.get("NTFY_TOPIC") or "",
+                            LISTING_PAGE_URL.format(id=listing_id_from_url(first_listing[0]))
+                            if first_listing else "")
+        except Exception as e:  # noqa: BLE001 - kontrola nie może wywrócić pętli
+            log(f"! Kontrola sesji nieudana: {e!r}")
+
         # SPRINT: przez kilka sekund wokół sekundy publikacji pobieramy BEZ PRZERW
         # kilkoma wątkami. Zwycięzca oddaje gotowe dane, więc rejestracja rusza od razu.
         prefetched = None

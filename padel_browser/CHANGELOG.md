@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.15.0 — kontrola sesji przed polowaniem i link do kortu przy rezerwacji
+
+- **Push o martwej sesji przychodzi ZANIM otworzy się okno** (`token_check_before`,
+  domyślnie 30 minut przed zrywem). 27.08 wszystkie pięć strzałów padło w **0 ms**
+  z powodem `token` — sesja przeglądarki nie żyła. Zero milisekund znaczy, że żadne
+  żądanie nie wyszło. Kosztowało to **cztery wolne terminy (15, 17, 19, 20)**,
+  w tym 20:00, o które walczymy od tygodni, a dowiedzieliśmy się o tym **po** fakcie.
+- **Kontrola jest dwustopniowa**, bo dwa różne uszkodzenia wyglądają identycznie
+  dopiero przy strzale: najpierw lokalnie (czy token istnieje i nie wygasł — to
+  złapałoby 27.08), potem na żywo jednym `users.getMe` (czy serwer go jeszcze
+  akceptuje — sesja bywa unieważniona przy ważnym `exp`).
+- **Awaria sieci NIE jest raportowana jako martwa sesja.** Fałszywy alarm o północy
+  byłby gorszy niż jego brak.
+- To **nie** jest powrót do rozgrzewki uwierzytelnionej z 0.9.0, którą obalił pomiar.
+  Tam chodziło o przyspieszenie strzału; tu o jedno zapytanie na dobę, pół godziny
+  wcześniej, wyłącznie po to, żeby zdążyć się zalogować.
+- **Przycisk „Otwórz w Decathlon GO"** przy każdej rezerwacji w panelu — także przy
+  odwołanej, bo stamtąd rezerwuje się ją z powrotem. Otwiera w nowej karcie, żeby nie
+  wyrzucać Cię z Home Assistanta.
+  > Aplikacja GO nie ma adresu prowadzącego do KONKRETNEGO terminu — strona kortu to
+  > SPA bez parametru daty (sprawdzone w jej HTML-u). Link prowadzi więc na stronę
+  > kortu, gdzie termin widać.
+- Dopasowanie dni zrywu przeszło na `DAY_NAMES` zamiast `strftime("%a")`, który zależy
+  od ustawień językowych kontenera i przy innym locale cicho przestałby pasować.
+
+
 ## 0.14.1 — naprawa dziennika: zły dzień i własne terminy liczone jako stracone
 
 Pierwszy produkcyjny wpis nowej diagnostyki (26.08) obnażył dwa moje błędy — oba

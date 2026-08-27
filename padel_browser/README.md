@@ -41,6 +41,7 @@ przechodzisz normalne logowanie, łącznie z kodem z maila.
 | `sprint` | **sprint**: wąskie okno pobierania BEZ PRZERW, `DNI:GG:MM:SS`. Puste = wyłączony | `mon-sun:11:00:51` |
 | `sprint_seconds` | ile sekund trwa sprint (1–30) | `4` |
 | `sprint_threads` | ile wątków pobiera równolegle w sprincie (1–4) | `3` |
+| `token_check_before` | ile minut przed zrywem sprawdzić sesję i ostrzec pushem, gdy nie żyje (0–240); `0` = wyłączone | `30` |
 | `remote_url` | adres funkcji AWS w eu-west-1, która wykona sprint i salwę. Puste = wszystko lokalnie | `` |
 | `remote_secret` | sekret do tej funkcji (ta sama wartość co `PADEL_SECRET` w Lambdzie) | `` |
 | `listing_url` | link do kortu (Decathlon GO); app sam podąża za zmianą adresu | `https://go.decathlon.pl/l/1c0ec93e-...` |

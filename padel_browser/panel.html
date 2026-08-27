@@ -221,6 +221,16 @@ function badge(res) {
   return '<span class="badge ok">potwierdzona</span>';
 }
 
+// Link do kortu w Decathlon GO. Aplikacja GO nie ma adresu prowadzącego do KONKRETNEGO
+// terminu — strona kortu to SPA bez parametru daty (sprawdzone w jej HTML-u), więc
+// prowadzimy tam, gdzie termin faktycznie widać, i otwieramy w nowej karcie, żeby
+// nie wyrzucać użytkownika z panelu Home Assistanta.
+function otworz(res) {
+  if (!res.book_url) return "";
+  return '<a class="btn" href="' + esc(res.book_url) + '" target="_blank" rel="noopener">'
+    + "Otwórz w Decathlon GO</a>";
+}
+
 function card(res) {
   var sub = [res.title, res.address].filter(Boolean).map(esc).join(" · ");
   var who = res.participants && res.participants.length
@@ -228,12 +238,16 @@ function card(res) {
   var actions = "";
   if (!res.cancelled && !res.past) {
     actions = '<div class="actions">'
+      + otworz(res)
       + '<a class="btn" href="cal/' + encodeURIComponent(res.id) + '.ics">Dodaj do kalendarza</a>'
       + '<button class="btn danger" onclick="cancelRes(\'' + esc(res.id) + '\')">Anuluj rezerwację</button>'
       + "</div>";
   } else if (res.cancelled && !res.past) {
     // Odwołany termin trzeba jeszcze usunąć z kalendarza — sam stamtąd nie zniknie.
+    // Przy odwołanym terminie link do kortu jest wręcz najbardziej potrzebny —
+    // stamtąd rezerwuje się go z powrotem.
     actions = '<div class="actions">'
+      + otworz(res)
       + '<a class="btn" href="cal/' + encodeURIComponent(res.id) + '.ics">Usuń z kalendarza</a>'
       + "</div>";
   }

@@ -3172,3 +3172,98 @@ class HorizonDayTest(unittest.TestCase):
         linia_02 = [w for w in out.splitlines() if "02.09" in w][0]
         self.assertIn("przez innych", linia_01)
         self.assertIn("zanim zobaczyliśmy grafik", linia_02)
+
+
+class PreflightTokenTest(unittest.TestCase):
+    """Kontrola sesji PRZED polowaniem.
+
+    27.08 wszystkie pięć strzałów padło w 0 ms z powodem „token" — sesja nie żyła,
+    a dowiedzieliśmy się o tym PO publikacji, tracąc cztery wolne terminy (15, 17,
+    19, 20). Push ma przychodzić na tyle wcześnie, żeby dało się zalogować.
+    """
+
+    TZ = ZoneInfo("Europe/Warsaw") if ZoneInfo else timezone.utc
+
+    def setUp(self):
+        cp._preflight_done_on = None
+        self.addCleanup(setattr, cp, "_preflight_done_on", None)
+        self.dir = tempfile.mkdtemp()
+        self.env = mock.patch.dict(os.environ, {
+            "BURST": "mon-sun:11:00:05", "BURST_SECONDS": "60",
+            "TOKEN_CHECK_BEFORE": "30", "AUTO_REGISTER": "true",
+            "CONFIG_PATH": os.path.join(self.dir, "brak.json")})
+        self.env.start()
+        self.addCleanup(self.env.stop)
+        patcher = mock.patch.object(cp, "STATE_PATH", os.path.join(self.dir, "s.json"))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def zywy(self):
+        return jwt_with_exp(int(datetime.now(timezone.utc).timestamp()) + 3600)
+
+    def sprawdz(self, o_ktorej="10:30:30", token=None, rpc=None):
+        # 10:30:30 leży w oknie kontroli (zryw 11:00:05 minus 30 min = 10:30:05,
+        # okno trwa 90 s). „10:30:00" byłoby PIĘĆ SEKUND za wcześnie.
+        chwila = datetime(2026, 8, 28, *[int(x) for x in o_ktorej.split(":")], tzinfo=self.TZ)
+        buf = io.StringIO()
+        cfg = {"token": token if token is not None else self.zywy()}
+        with mock.patch.object(cp, "build_reg_cfg", return_value=cfg), \
+                mock.patch.object(cp, "decathlon_rpc",
+                                  side_effect=rpc or (lambda *a, **k: {})) as wywolanie, \
+                mock.patch.object(cp, "ntfy_post", return_value=True) as push, \
+                mock.patch("sys.stdout", buf):
+            wynik = cp.preflight_token(chwila, self.TZ, "temat", "https://kort")
+        return wynik, push, buf.getvalue(), wywolanie
+
+    def test_fires_exactly_thirty_minutes_before_the_burst(self):
+        wynik, _, out, _ = self.sprawdz("10:30:05")
+        self.assertTrue(wynik)
+        self.assertIn("Sesja Decathlon sprawdzona", out)
+
+    def test_silent_at_any_other_time(self):
+        for kiedy in ("09:00:00", "10:25:00", "10:45:00", "11:00:05"):
+            self.assertIsNone(self.sprawdz(kiedy)[0], f"odpaliło się o {kiedy}")
+
+    def test_runs_once_per_day(self):
+        self.assertTrue(self.sprawdz("10:30:05")[0])
+        self.assertIsNone(self.sprawdz("10:30:40")[0], "druga kontrola tego samego dnia")
+
+    def test_missing_token_raises_urgent_push(self):
+        """To jest dokładnie przypadek z 27.08."""
+        wynik, push, out, _ = self.sprawdz(token="")
+        self.assertFalse(wynik)
+        self.assertTrue(push.called)
+        self.assertIn("SESJA NIE ŻYJE", out)
+        self.assertEqual(push.call_args.kwargs.get("priority"), "urgent")
+
+    def test_server_rejecting_a_valid_looking_token_also_alarms(self):
+        """Token z ważnym `exp` może być już unieważniony po stronie serwera."""
+        def odrzuca(*a, **k):
+            raise cp.urllib.error.HTTPError("u", 401, "Unauthorized", {}, io.BytesIO(b"{}"))
+        wynik, push, _, _ = self.sprawdz(rpc=odrzuca)
+        self.assertFalse(wynik)
+        self.assertTrue(push.called)
+
+    def test_network_failure_is_not_reported_as_dead_session(self):
+        """Fałszywy alarm o martwej sesji byłby gorszy niż jego brak."""
+        def pada(*a, **k):
+            raise cp.urllib.error.URLError("sieć padła")
+        wynik, push, _, _ = self.sprawdz(rpc=pada)
+        self.assertTrue(wynik)
+        push.assert_not_called()
+
+    def test_disabled_by_zero(self):
+        with mock.patch.dict(os.environ, {"TOKEN_CHECK_BEFORE": "0"}):
+            self.assertIsNone(self.sprawdz("10:30:05")[0])
+
+    def test_no_check_without_auto_register(self):
+        with mock.patch.dict(os.environ, {"AUTO_REGISTER": "false"}):
+            self.assertIsNone(self.sprawdz("10:30:05")[0])
+
+    def test_day_matching_survives_a_foreign_locale(self):
+        """Dni zrywu muszą pasować niezależnie od ustawień językowych kontenera."""
+        with mock.patch.dict(os.environ, {"BURST": "fri:11:00:05"}):
+            piatek = datetime(2026, 8, 28, 10, 30, 5, tzinfo=self.TZ)   # 28.08.2026 to piątek
+            self.assertIsNotNone(cp.burst_start_today(piatek, self.TZ))
+        with mock.patch.dict(os.environ, {"BURST": "mon:11:00:05"}):
+            self.assertIsNone(cp.burst_start_today(piatek, self.TZ))
