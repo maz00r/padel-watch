@@ -1762,7 +1762,13 @@ def fmt_shot(res):
     problem jest u nas (pula wątków, DNS, TLS) — bez tej liczby to zgadywanka.
     """
     start = res.get("start_ms")
-    return f"{res['ms']} ms" if start is None else f"start +{start} ms, {res['ms']} ms"
+    opis = f"{res['ms']} ms" if start is None else f"start +{start} ms, {res['ms']} ms"
+    # Wiek informacji, na podstawie której strzelamy. 24.08 strzał w 20:00 trwał 74 ms
+    # — podłoga tego, co osiągalne — i wrócił 409. Skoro sam zapis był błyskawiczny,
+    # to znaczy, że miejsce zniknęło ZANIM zapytaliśmy. Bez tej liczby nie da się
+    # odróżnić „byliśmy wolni" od „patrzyliśmy na nieaktualny grafik".
+    wiek = res.get("seen_ms")
+    return opis if wiek is None else f"{opis}, dane sprzed {wiek} ms"
 
 
 # ODSTĘP MIĘDZY STRZAŁAMI SALWY (ms). Zmierzone 14.08 z Irlandii: cztery strzały
@@ -1799,6 +1805,7 @@ def fire_salvo(targets, listing_price_by_id, cfg, speculative, size):
     except (TypeError, ValueError):
         odstep = SALVO_STAGGER_MS / 1000.0
     salwa_start = time.monotonic()
+    zobaczone = cfg.get("seen_at")
 
     def strzal(numer_i_slot):
         numer, slot = numer_i_slot
@@ -1818,6 +1825,11 @@ def fire_salvo(targets, listing_price_by_id, cfg, speculative, size):
             ok, msg = False, f"nieoczekiwany błąd: {e!r}"
         return {"slot": slot, "ok": ok, "msg": msg,
                 "ms": int((time.monotonic() - started) * 1000),
+                # Ile czasu minęło od chwili, gdy zobaczyliśmy ten termin jako wolny,
+                # do chwili, gdy ruszył zapis. To jest opóźnienie, które przegrywa
+                # wieczorne godziny — nie czas samego żądania.
+                "seen_ms": (None if zobaczone is None
+                            else int((started - zobaczone) * 1000)),
                 # Odstęp od startu salwy. To NIE jest ozdobnik: rozstrzyga, czy strzały
                 # ruszyły razem (wtedy „schodek" czasów robi serwer), czy rozjechały się
                 # u nas (wtedy wina jest po naszej stronie — pula, DNS, TLS).
@@ -1911,8 +1923,11 @@ def sprint_pool():
 def run_sprint(deadline, threads, listing_url, baseline_ids, tz, filters=None):
     """Pobiera bez przerw, aż pojawi się termin spoza `baseline_ids`.
 
-    Zwraca (listing_id, dokument) — dane SĄ JUŻ POBRANE, więc rejestracja nie płaci
-    drugi raz za rundę do serwera (~92 ms). None, gdy okno minęło bez zmian.
+    Zwraca (listing_id, dokument, chwila_pobrania) — dane SĄ JUŻ POBRANE, więc
+    rejestracja nie płaci drugi raz za rundę do serwera (~92 ms). Trzeci element to
+    monotoniczny znacznik chwili, w której serwer oddał grafik: bez niego nie da się
+    powiedzieć, jak stara była informacja, na podstawie której strzelaliśmy.
+    None, gdy okno minęło bez zmian.
 
     Punkt odniesienia bierzemy z zapisanego stanu, a nie z pierwszego pobrania:
     inaczej publikacja, która trafi w pierwsze ~90 ms sprintu, wpadłaby do punktu
@@ -1935,6 +1950,9 @@ def run_sprint(deadline, threads, listing_url, baseline_ids, tz, filters=None):
         while not stop.is_set() and time.monotonic() < deadline:
             try:
                 doc = fetch_listing(lid)
+                # Znacznik stawiamy TU, a nie po filtrowaniu: to moment, w którym
+                # serwer oddał nam grafik. Wszystko dalej to już nasze opóźnienie.
+                zobaczone = time.monotonic()
                 swiezy = {s["id"] for s in free_slots(doc, lid, datetime.now(timezone.utc))
                           if passes_filter(s, filters, tz)}
             except Exception:  # noqa: BLE001 - pojedyncza wpadka: próbujemy dalej
@@ -1945,7 +1963,7 @@ def run_sprint(deadline, threads, listing_url, baseline_ids, tz, filters=None):
             if swiezy - baseline_ids:
                 with lock:
                     if not znalezione:
-                        znalezione["hit"] = (lid, doc)
+                        znalezione["hit"] = (lid, doc, zobaczone)
                         stop.set()
                 return
 
@@ -2031,6 +2049,9 @@ def remote_payload(listing_url, baseline_ids, tz_name, seconds, threads, reg_cfg
         "sprint_threads": threads,
         "salvo": reg_cfg.get("salvo") or 0,
         "stagger": reg_cfg.get("stagger", SALVO_STAGGER_MS),
+        # Bez tego wyłącznik strzału czołowego działałby tylko lokalnie, a w sekundzie
+        # publikacji strzela WŁAŚNIE Irlandia — czyli nie działałby wcale.
+        "lead": boolish(reg_cfg.get("lead")),
         "max_per_run": reg_cfg.get("max_per_run") or 1,
         "order": reg_cfg.get("order") or "earliest",
         "name": reg_cfg.get("name") or "",
@@ -2142,10 +2163,31 @@ def auto_register_new_slots(slots, listing_price_by_id, cfg, already_registered)
         fired = queue[:salvo]
         queue = queue[salvo:]
         opis = ", ".join(fmt_when(s["start_utc"].astimezone(_log_tz()), short=True) for s in fired)
-        log(f"⇉ Salwa: {len(fired)} prób równolegle ({opis})" if len(fired) > 1
-            else f"⇉ Strzał z rozgrzanego wątku ({opis})")
+        czolowy = boolish(cfg.get("lead")) and len(fired) > 1
+        if czolowy:
+            log(f"⇉ Strzał czołowy: {fmt_when(fired[0]['start_utc'].astimezone(_log_tz()), short=True)} "
+                f"sam, potem salwa w resztę ({opis})")
+        else:
+            log(f"⇉ Salwa: {len(fired)} prób równolegle ({opis})" if len(fired) > 1
+                else f"⇉ Strzał z rozgrzanego wątku ({opis})")
         wins, auth_error = [], None
-        wyniki = fire_salvo(fired, listing_price_by_id, cfg, speculative, salvo)
+        if czolowy:
+            # HIPOTEZA (28.08): serwer obsługuje zapisy do tego kortu po kolei. W salwie
+            # z 25.08 cztery strzały ruszyły razem (start +0/+0/+8/+16 ms), a wróciły po
+            # 84 / 700 / 800 / 725 ms — równoległe żądania nie różnią się dziesięciokrotnie,
+            # jeśli nic ich nie blokuje. Pierwszy w kolejce dostaje 84 ms i wygrywa; reszta
+            # czeka i przegrywa. Skoro tak, to sami spychaliśmy najcenniejszą godzinę na
+            # koniec własnej kolejki, strzelając w nią razem z pięcioma innymi.
+            #
+            # Test: najpożądańszy termin idzie SAM i PIERWSZY, reszta zaraz po nim.
+            # Obalenie: czołowy wraca po ~700 ms albo przegrywa mimo ~80 ms.
+            # Koszt, gdyby hipoteza padła: reszta salwy startuje o jeden zapis później.
+            wyniki = fire_salvo(fired[:1], listing_price_by_id, cfg, speculative, 1)
+            for res in wyniki:
+                cfg["token"] = newer_decathlon_token(cfg.get("token") or "", res.get("token") or "")
+            wyniki += fire_salvo(fired[1:], listing_price_by_id, cfg, speculative, salvo - 1)
+        else:
+            wyniki = fire_salvo(fired, listing_price_by_id, cfg, speculative, salvo)
         # Któryś wątek mógł odnowić token po HTTP 401 (pracował na kopii cfg).
         # Przejmujemy najświeższy, żeby próby sekwencyjne po salwie nie czekały
         # jeszcze raz na to samo odnowienie.
@@ -2155,7 +2197,8 @@ def auto_register_new_slots(slots, listing_price_by_id, cfg, already_registered)
             slot, msg, ms = res["slot"], res["msg"], res["ms"]
             when = fmt_when(slot["start_utc"].astimezone(_log_tz()), short=True)
             cfg["shots"].append({"when": when, "ok": bool(res["ok"]), "ms": ms,
-                                 "start_ms": res.get("start_ms", 0), "salwa": True})
+                                 "start_ms": res.get("start_ms", 0),
+                                 "seen_ms": res.get("seen_ms"), "salwa": True})
             results[slot["id"]] = (res["ok"], msg)
             if res["ok"]:
                 wins.append(res)
@@ -2218,8 +2261,10 @@ def auto_register_new_slots(slots, listing_price_by_id, cfg, already_registered)
         attempt_started = time.monotonic()
         ok, msg = register_slot(slot, listing_price_by_id.get(sid), cfg, speculative=speculative)
         took_ms = int((time.monotonic() - attempt_started) * 1000)
+        zobaczone = cfg.get("seen_at")
+        wiek = None if zobaczone is None else int((attempt_started - zobaczone) * 1000)
         cfg["shots"].append({"when": when, "ok": bool(ok), "ms": took_ms,
-                             "start_ms": None, "salwa": False})
+                             "start_ms": None, "seen_ms": wiek, "salwa": False})
         results[sid] = (ok, msg)
         if ok:
             done += 1
@@ -2435,6 +2480,7 @@ def build_reg_cfg(cfg, state_doc):
         "max_per_run": os.environ.get("AUTO_REGISTER_MAX") or cfg.get("auto_register_max") or 1,
         "order": os.environ.get("AUTO_REGISTER_ORDER") or cfg.get("auto_register_order") or "earliest",
         "salvo": os.environ.get("AUTO_REGISTER_SALVO") or cfg.get("auto_register_salvo") or 0,
+        "lead": os.environ.get("AUTO_REGISTER_LEAD") or cfg.get("auto_register_lead", True),
         "stagger": os.environ.get("AUTO_REGISTER_STAGGER")
                    or cfg.get("auto_register_stagger", SALVO_STAGGER_MS),
     }
@@ -2471,6 +2517,7 @@ def run_once(announce_startup=False, skip_light=False, prefetched=None, defer_pu
     book_url_by_id = {}
     listing_price_by_id = {}
     docs_by_lid = {}   # do policzenia CAŁEGO grafiku dnia, nie tylko wolnych terminów
+    seen_at_all = None  # chwila, w której zobaczyliśmy grafik — punkt zerowy wieku danych
 
     for url in listings:
         # Podążaj za przekierowaniem -> aktualne ID kortu (do monitoringu i linku).
@@ -2484,12 +2531,18 @@ def run_once(announce_startup=False, skip_light=False, prefetched=None, defer_pu
         # i niosą te same atrybuty kortu, więc nic przez to nie tracimy.
         doc = None
         fetch_started = time.monotonic()
+        seen_at = None
         if prefetched and prefetched[0] == lid:
             # Dane przyniósł sprint — pobieranie ich ponownie kosztowałoby całą
             # rundę do serwera (~92 ms) dokładnie w chwili, gdy liczy się najbardziej.
             doc = prefetched[1]
             attrs = (doc.get("data", {}).get("attributes", {}) or {})
             fetch_ms = 0
+            # Sprint (albo Irlandia) niesie własny znacznik. Gdyby go zabrakło —
+            # starsze wyniki, inna wersja po drugiej stronie — bierzemy chwilę
+            # przejęcia danych; zaniża wiek, ale nigdy go nie zmyśla.
+            seen_at = (prefetched[2] if len(prefetched) > 2 and prefetched[2] is not None
+                       else time.monotonic())
         else:
             try:
                 if skip_light:
@@ -2500,7 +2553,8 @@ def run_once(announce_startup=False, skip_light=False, prefetched=None, defer_pu
             except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as e:
                 log(f"! Błąd pobierania kortu {lid}: {e} — nie zmieniam stanu, kończę.")
                 return 2  # błąd sieci: nie nadpisuj stanu
-            fetch_ms = int((time.monotonic() - fetch_started) * 1000)
+            seen_at = time.monotonic()
+            fetch_ms = int((seen_at - fetch_started) * 1000)
         listing_price = attrs.get("price")
         title = attrs.get("title", lid)
         avail = (attrs.get("datesStats") or {}).get("availableListingDates") or 0
@@ -2516,7 +2570,12 @@ def run_once(announce_startup=False, skip_light=False, prefetched=None, defer_pu
             except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as e:
                 log(f"! Błąd pobierania terminów kortu {lid}: {e} — nie zmieniam stanu, kończę.")
                 return 2  # błąd sieci: nie nadpisuj stanu
+            seen_at = time.monotonic()
         docs_by_lid[lid] = doc
+        # Wiek danych liczymy od NAJSTARSZEJ obserwacji w tym biegu: jeśli któryś kort
+        # pobraliśmy wcześniej, to jego terminy są odpowiednio starsze.
+        if seen_at is not None:
+            seen_at_all = seen_at if seen_at_all is None else min(seen_at_all, seen_at)
         slots = [s for s in free_slots(doc, lid, now_utc) if passes_filter(s, filters, tz)]
         # W zrywie dokładamy czas pobrania — pozwala oddzielić opóźnienie sieci
         # od opóźnienia wykrycia przy analizie logu po polowaniu.
@@ -2579,6 +2638,7 @@ def run_once(announce_startup=False, skip_light=False, prefetched=None, defer_pu
         if retried:
             log(f"↻ Ponawiam auto-rejestrację dla {len(retried)} zapamiętanego(-ych) "
                 f"terminu(-ów) po wcześniejszym błędzie tokenu.")
+        reg_cfg["seen_at"] = seen_at_all
         wyniki_lokalne, registered_ids = auto_register_new_slots(
             [current[i] for i in candidate_ids], listing_price_by_id, reg_cfg, registered_ids
         )

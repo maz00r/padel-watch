@@ -141,7 +141,11 @@ function huntShots(shots) {
   if (!shots || !shots.length) return "";
   var opis = shots.map(function (s) {
     var start = s.start_ms == null ? "" : "+" + s.start_ms + "\u2009ms \u2192 ";
-    return esc(s.when) + " " + (s.ok ? "\u2713" : "\u2717") + " " + start + s.ms + "\u2009ms";
+    // Wiek danych: ile minęło od zobaczenia grafiku do ruszenia zapisu. To on
+    // rozstrzyga, czy przegraliśmy własną wolnością, czy nieaktualną informacją.
+    var wiek = s.seen_ms == null ? "" : " (dane sprzed " + s.seen_ms + "\u2009ms)";
+    return esc(s.when) + " " + (s.ok ? "\u2713" : "\u2717") + " " + start
+      + s.ms + "\u2009ms" + wiek;
   }).join(" · ");
   return '<div class="sub">Strzały: ' + opis + "</div>";
 }

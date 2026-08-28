@@ -1604,11 +1604,16 @@ class SprintTest(unittest.TestCase):
                                  "https://go.decathlon.pl/l/1c0ec93e-ca77-44b9-a3a6-c72a99d050dd", set(baseline), TZ)
 
     def test_returns_the_document_when_a_new_slot_appears(self):
+        przed = time.monotonic()
         hit = self.sprint([{"a"}, {"a"}, {"a", "b"}], baseline={"a"})
         self.assertIsNotNone(hit)
-        lid, doc = hit
+        lid, doc, zobaczone = hit
         self.assertEqual(lid, "kort")
         self.assertIn("b", doc["__ids"])     # dane oddane BEZ ponownego pobierania
+        # Trzeci element to punkt zerowy wieku danych — bez niego rejestracja nie wie,
+        # jak stary był grafik, na podstawie którego strzela.
+        self.assertGreaterEqual(zobaczone, przed)
+        self.assertLessEqual(zobaczone, time.monotonic())
 
     def test_nothing_new_means_no_handoff(self):
         self.assertIsNone(self.sprint([{"a", "b"}], baseline={"a", "b"}, sekundy=0.8))
@@ -3394,3 +3399,127 @@ class LogLevelTest(unittest.TestCase):
 
     def test_leading_whitespace_does_not_hide_the_glyph(self):
         self.assertIn("✗", self.zloguj("   ✗ strzał odrzucony", prog="error"))
+
+
+class LeadShotTest(SalvoHelpers, unittest.TestCase):
+    """STRZAŁ CZOŁOWY — test hipotezy o kolejce po stronie serwera.
+
+    25.08 cztery strzały ruszyły razem (start +0/+0/+8/+16 ms), a wróciły po
+    84 / 700 / 800 / 725 ms. Równoległe żądania nie różnią się dziesięciokrotnie,
+    jeśli nic ich nie blokuje — więc serwer najpewniej obsługuje zapisy do tego kortu
+    po kolei. Jeśli tak, to spychaliśmy 20:00 na koniec WŁASNEJ kolejki, strzelając
+    w nią razem z pięcioma innymi terminami.
+
+    Poprawka: najpożądańszy termin idzie sam i pierwszy. Te testy pilnują, że naprawdę
+    idzie sam — bo inaczej eksperyment nie mierzy tego, co miał mierzyć.
+    """
+
+    def czasy(self, outcomes, cfg=None, slots=None):
+        """Zwraca {godzina: (start, koniec)} — pozwala udowodnić, KTO na kogo czekał."""
+        zapis = {}
+
+        def fake_register(slot, price, local_cfg, speculative=False):
+            h = slot["start_utc"].hour
+            start = time.monotonic()
+            time.sleep(0.05)          # żeby nakładanie się strzałów było widoczne
+            zapis[h] = (start, time.monotonic())
+            ok, msg, tx = outcomes[h]
+            if ok:
+                local_cfg["transaction_id"] = tx
+            return ok, msg
+
+        with mock.patch.object(cp, "register_slot", side_effect=fake_register), \
+                mock.patch.object(cp, "cancel_reservation", return_value=(True, "ok")), \
+                mock.patch("sys.stdout", io.StringIO()):
+            cp.auto_register_new_slots(slots or self.slots(15, 17, 18, 19), {},
+                                       cfg or self.cfg(lead=True), set())
+        return zapis
+
+    PRZEGRANE = {15: (False, "409", ""), 17: (False, "409", ""),
+                 18: (False, "409", ""), 19: (False, "409", "")}
+
+    def test_lead_finishes_before_the_rest_even_start(self):
+        """SEDNO: 19:00 (najpożądańszy przy order=latest) nie dzieli kolejki z nikim."""
+        z = self.czasy(self.PRZEGRANE)
+        koniec_czolowego = z[19][1]
+        for h in (18, 17, 15):
+            self.assertGreaterEqual(
+                z[h][0], koniec_czolowego,
+                f"{h}:00 ruszył, zanim czołowy 19:00 skończył — strzał nie był samotny")
+
+    def test_the_rest_still_fire_in_parallel_with_each_other(self):
+        """Czołowy ma być sam, ale reszta nie może iść gęsiego — to kosztowałoby sekundy."""
+        z = self.czasy(self.PRZEGRANE)
+        starty = sorted(z[h][0] for h in (18, 17, 15))
+        self.assertLess(starty[-1] - starty[0], 0.04,
+                        "reszta salwy poszła po kolei zamiast równolegle")
+
+    def test_disabled_lead_keeps_everything_parallel(self):
+        """Wyłącznik musi realnie wracać do starego zachowania — inaczej nie ma odwrotu."""
+        z = self.czasy(self.PRZEGRANE, cfg=self.cfg(lead=False))
+        starty = sorted(z[h][0] for h in (19, 18, 17, 15))
+        self.assertLess(starty[-1] - starty[0], 0.04)
+
+    def test_single_target_is_not_split(self):
+        z = self.czasy({19: (False, "409", "")}, slots=self.slots(19))
+        self.assertEqual(set(z), {19})
+
+    def test_preference_and_limit_survive_the_split(self):
+        """Podział na dwie fale nie może zmienić TEGO, co zostaje zarezerwowane."""
+        wygrane_wszedzie = {h: (True, "OK", f"tx{h}") for h in (15, 17, 18, 19)}
+        self.cancelled = []
+
+        def fake_cancel(tx, _cfg):
+            self.cancelled.append(tx)
+            return True, "cancelled"
+
+        def fake_register(slot, price, local_cfg, speculative=False):
+            ok, msg, tx = wygrane_wszedzie[slot["start_utc"].hour]
+            local_cfg["transaction_id"] = tx
+            return ok, msg
+
+        with mock.patch.object(cp, "register_slot", side_effect=fake_register), \
+                mock.patch.object(cp, "cancel_reservation", side_effect=fake_cancel), \
+                mock.patch("sys.stdout", io.StringIO()):
+            _res, reg = cp.auto_register_new_slots(self.slots(15, 17, 18, 19), {},
+                                                   self.cfg(lead=True), set())
+        # limit=1, order=latest -> zostaje 19:00, reszta oddana z powrotem
+        self.assertIn("s19", reg)
+        self.assertEqual(sorted(self.cancelled), ["tx15", "tx17", "tx18"])
+
+
+class DataAgeTest(SalvoHelpers, unittest.TestCase):
+    """WIEK DANYCH — liczba, której do tej pory nie mierzyliśmy.
+
+    24.08 strzał w 20:00 trwał 74 ms i wrócił 409. Sam zapis był więc na podłodze
+    tego, co osiągalne — a miejsce i tak zniknęło, ZANIM zapytaliśmy. Bez wieku danych
+    nie da się odróżnić „byliśmy za wolni" od „patrzyliśmy na nieaktualny grafik",
+    a to dwa różne problemy z dwoma różnymi poprawkami.
+    """
+
+    def strzel(self, seen_at):
+        with mock.patch.object(cp, "register_slot", return_value=(False, "409")), \
+                mock.patch("sys.stdout", io.StringIO()):
+            cfg = self.cfg(seen_at=seen_at, salvo=4)
+            cp.auto_register_new_slots(self.slots(18, 19), {}, cfg, set())
+        return cfg["shots"]
+
+    def test_age_is_measured_from_the_moment_we_saw_the_grid(self):
+        strzaly = self.strzel(time.monotonic() - 0.4)
+        self.assertTrue(strzaly)
+        for s in strzaly:
+            self.assertGreaterEqual(s["seen_ms"], 400)
+            self.assertLess(s["seen_ms"], 2000)
+
+    def test_missing_reference_point_reports_nothing_not_zero(self):
+        """Brak punktu odniesienia ma dawać None. Zero kłamałoby, że dane były świeże."""
+        for s in self.strzel(None):
+            self.assertIsNone(s["seen_ms"])
+
+    def test_shot_description_shows_the_age(self):
+        opis = cp.fmt_shot({"ms": 74, "start_ms": 0, "seen_ms": 640})
+        self.assertIn("74 ms", opis)
+        self.assertIn("sprzed 640 ms", opis)
+
+    def test_shot_description_stays_readable_without_the_age(self):
+        self.assertEqual(cp.fmt_shot({"ms": 74, "start_ms": 0}), "start +0 ms, 74 ms")

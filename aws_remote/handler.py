@@ -120,7 +120,7 @@ def poluj(wejscie):
                 "timings": {"sprint_ms": sprint_ms,
                             "total_ms": int((time.monotonic() - started) * 1000)}}
 
-    lid, doc = trafienie
+    lid, doc, zobaczone = trafienie
     teraz = cp.datetime.now(cp.timezone.utc)
     sloty = [s for s in cp.free_slots(doc, lid, teraz) if cp.passes_filter(s, filtry, tz)]
     cp.log(f"Sprint: nowe terminy po {sprint_ms} ms — {len(sloty)} pasujących do filtra")
@@ -152,6 +152,14 @@ def poluj(wejscie):
             # Odstęp musi być IDENTYCZNY po obu stronach — inaczej zapas lokalny
             # strzelałby inaczej niż Irlandia i porównanie logów przestałoby mieć sens.
             "stagger": wejscie.get("stagger", cp.SALVO_STAGGER_MS),
+            # Strzał czołowy musi działać TAK SAMO po obu stronach — inaczej zapas
+            # lokalny testowałby inną hipotezę niż Irlandia i porównanie logów
+            # przestałoby cokolwiek znaczyć.
+            "lead": wejscie.get("lead", True),
+            # Punkt zerowy wieku danych: chwila, w której sprint dostał grafik.
+            # Zegar monotoniczny jest lokalny dla tego procesu, więc różnica
+            # liczona TUTAJ jest poprawna — do domu jedzie już gotowa liczba w ms.
+            "seen_at": zobaczone,
         }
         ceny = {s["id"]: (doc.get("data", {}).get("attributes", {}) or {}).get("price")
                 for s in sloty}

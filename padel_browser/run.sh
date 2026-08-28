@@ -44,6 +44,7 @@ export AUTO_REGISTER_PAID="$(opt auto_register_paid)"
 export AUTO_REGISTER_MAX="$(opt auto_register_max)"
 export AUTO_REGISTER_ORDER="$(opt auto_register_order)"
 export AUTO_REGISTER_SALVO="$(opt auto_register_salvo)"
+export AUTO_REGISTER_LEAD="$(opt auto_register_lead)"
 export CLEAR_STATE="$(opt clear_state)"
 export TEST_TOKEN="$(opt test_token)"
 export DECATHLON_TOKEN="$(opt decathlon_token)"
@@ -51,6 +52,7 @@ export DECATHLON_COOKIE="$(opt decathlon_cookie)"
 # opcja pominięta w UI -> Python zwraca "None"; traktuj jak pustą
 for v in FILTERS INTERVALS BURST SPRINT AUTO_REGISTER AUTO_REGISTER_DRY_RUN AUTO_REGISTER_NAME \
          AUTO_REGISTER_AGE AUTO_REGISTER_PAID AUTO_REGISTER_MAX AUTO_REGISTER_ORDER AUTO_REGISTER_SALVO \
+         AUTO_REGISTER_LEAD \
          CLEAR_STATE TEST_TOKEN DECATHLON_TOKEN DECATHLON_COOKIE; do
   eval "val=\$$v"
   [ "$val" = "None" ] && export "$v="

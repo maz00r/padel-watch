@@ -1,5 +1,52 @@
 # Changelog
 
+## 0.18.0 — strzał czołowy i wiek danych
+
+Wpis powstał z pięciu dni Dziennika (24–28.08), po odrzuceniu hipotezy, że serwer
+pozwala nam wygrać tylko jeden termin: 26.08 i 24.08 padły po **trzy** trafienia
+w jednej salwie. Ta teoria jest martwa.
+
+Dane z samej publikacji układają się w idealny gradient po atrakcyjności godziny:
+
+| godzina | wygrane | przegrane |
+|---------|---------|-----------|
+| 20:00 | 0 | 5 |
+| 19:00 | 0 | 3 |
+| 18:00 | 2 | 1 |
+| 17:00 | 1 | 0 |
+| 15:00 | 4 | 0 |
+
+Czasy strzałów nie przewidują niczego: **74 ms przegrało 20:00, 992 ms wygrało 15:00.**
+
+### Strzał czołowy (`auto_register_lead`, domyślnie włączony)
+
+- 25.08 cztery strzały ruszyły w tej samej chwili (`start +0 / +0 / +8 / +16 ms`)
+  i wróciły po **84 / 700 / 800 / 725 ms**. Równoległe żądania nie różnią się
+  dziesięciokrotnie, jeśli nic ich nie blokuje — **serwer najpewniej obsługuje zapisy
+  do tego kortu po kolei.**
+- Skoro tak, to salwa w sześć terminów spychała najcenniejszą godzinę na koniec
+  **naszej własnej** kolejki. Najpożądańszy termin idzie teraz sam i pierwszy,
+  reszta salwy zaraz po nim.
+- **To jest eksperyment, nie pewnik.** Obalenie: czołowy wraca po ~700 ms albo przegrywa
+  mimo ~80 ms. Wtedy `auto_register_lead: false` przywraca strzelanie wszystkim naraz.
+  Koszt, gdyby hipoteza padła: reszta salwy startuje o jeden zapis później.
+- Ustawienie jedzie też do Irlandii — bez tego wyłącznik nie działałby tam, gdzie
+  w sekundzie publikacji naprawdę się strzela.
+
+### Wiek danych (`dane sprzed N ms`)
+
+- Każdy strzał raportuje, ile czasu minęło od chwili, gdy serwer oddał nam grafik, do
+  chwili, gdy ruszył zapis. Widać to w logu i w Dzienniku.
+- **To rozdziela dwie porażki, które dotąd wyglądały tak samo:** „byliśmy za wolni"
+  (zapis późno, dane świeże) i „patrzyliśmy na nieaktualny grafik" (zapis natychmiast,
+  miejsce zniknęło, zanim zapytaliśmy). Wymagają innych poprawek.
+- 24.08 strzał w 20:00 trwał **74 ms** — podłoga tego, co osiągalne — i wrócił 409.
+  Winna była informacja, nie prędkość. Tej liczby nie mieliśmy, więc przez tygodnie
+  przyspieszaliśmy zapis, który już był szybki.
+- Punkt odniesienia wędruje od sprintu (a w zdalnym strzale — od sprintu w Irlandii)
+  aż do salwy. Brak punktu odniesienia daje `None`, nie zero: zero kłamałoby, że dane
+  były świeże.
+
 ## 0.17.0 — poziomy logowania + naprawa: odwołanie brane za publikację
 
 ### Poziomy logowania i ich filtracja

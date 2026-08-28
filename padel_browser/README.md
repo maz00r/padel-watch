@@ -59,6 +59,7 @@ przechodzisz normalne logowanie, łącznie z kodem z maila.
 | `auto_register_paid` | pozwól tworzyć transakcje także dla płatnych terminów; płatność nadal trzeba dokończyć ręcznie | `false` |
 | `auto_register_max` | ile terminów maksymalnie zapisać w jednym przebiegu (0–10); `0` = nic | `1` |
 | `auto_register_order` | kolejność prób: `earliest` (od najwcześniejszego) lub `latest` (od najpóźniejszego) | `latest` |
+| `auto_register_lead` | najcenniejszy termin leci **sam i pierwszy**, reszta salwy zaraz po nim | `true` |
 | `auto_register_salvo` | ile prób rejestracji wysyłać **równolegle** (0–6); `0`/`1` = po kolei, jak dawniej | `6` |
 | `auto_register_stagger` | odstęp w ms między strzałami salwy (0–100); `0` = wszystkie naraz | `8` |
 | `test_token` | jednorazowy test poświadczeń przy starcie (nic nie rezerwuje) | `false` |
@@ -124,6 +125,53 @@ Np. `mon-fri:15:00-02:00=30; sat-sun:08:00-22:00=30` = co 30 s wieczorami i w we
 dnie, a co `check_interval` (np. 300 s) w pozostałych porach. Puste = zawsze `check_interval`.
 Minimum 2 s (niższa wartość jest podbijana, z wpisem w logu; poniżej 5 s logowane jest
 ostrzeżenie — używaj tylko w wąskich oknach, bo grozi blokadą po IP). Zmiana interwału jest logowana (`⏱ aktualny interwał: ...`).
+
+## Dlaczego strzał czołowy
+
+Dziennik z 25.08 pokazał cztery strzały, które ruszyły **w tej samej chwili**
+(`start +0 / +0 / +8 / +16 ms`) i wróciły po **84 / 700 / 800 / 725 ms**. Równoległe
+żądania nie różnią się dziesięciokrotnie, jeśli nic ich nie blokuje. Najprostsze
+wyjaśnienie: serwer obsługuje zapisy do tego kortu **po kolei**. Pierwszy w kolejce
+dostaje 84 ms i wygrywa, reszta czeka i przegrywa.
+
+Jeśli to prawda, salwa w sześć terminów naraz spychała najcenniejszą godzinę na koniec
+**naszej własnej** kolejki. Dlatego `auto_register_lead` puszcza najpożądańszy termin
+sam i pierwszy, a resztę zaraz po nim.
+
+Dane, na których to stoi (tylko terminy z publikacji, 24–28.08):
+
+| godzina | wygrane | przegrane |
+|---------|---------|-----------|
+| 20:00 | 0 | 5 |
+| 19:00 | 0 | 3 |
+| 18:00 | 2 | 1 |
+| 17:00 | 1 | 0 |
+| 15:00 | 4 | 0 |
+
+Czasy strzałów nie mają tu żadnej mocy przewidywania: **74 ms przegrało 20:00, a 992 ms
+wygrało 15:00.** Przegrywamy nie z prędkością rywala, tylko z liczbą chętnych na daną
+godzinę — a gradient jest idealnie monotoniczny.
+
+**Jak sprawdzić, czy hipoteza się broni:** w Dzienniku, w linii `Strzały:`, czołowy
+termin powinien wracać w ~80–150 ms zamiast ~700 ms. Jeśli wraca po 700 ms albo
+przegrywa mimo 80 ms — hipoteza jest obalona, a `auto_register_lead: false` wraca do
+strzelania wszystkim naraz.
+
+## Wiek danych w Dzienniku
+
+Każdy strzał raportuje teraz `dane sprzed N ms` — ile czasu minęło od chwili, gdy serwer
+oddał nam grafik, do chwili, gdy ruszył zapis.
+
+Bez tej liczby nie dało się odróżnić dwóch zupełnie różnych porażek:
+
+- **byliśmy za wolni** — zapis ruszył późno, choć dane były świeże,
+- **patrzyliśmy na nieaktualny grafik** — zapis ruszył natychmiast, ale miejsce zniknęło,
+  zanim w ogóle zapytaliśmy.
+
+24.08 strzał w 20:00 trwał **74 ms** i wrócił 409. Sam zapis był na podłodze tego, co
+osiągalne — więc winna była informacja, nie prędkość. To drugi rodzaj porażki i wymaga
+zupełnie innej poprawki niż przyspieszanie strzału.
+
 
 ## Poziomy logowania
 
