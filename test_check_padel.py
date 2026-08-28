@@ -3267,3 +3267,38 @@ class PreflightTokenTest(unittest.TestCase):
             self.assertIsNotNone(cp.burst_start_today(piatek, self.TZ))
         with mock.patch.dict(os.environ, {"BURST": "mon:11:00:05"}):
             self.assertIsNone(cp.burst_start_today(piatek, self.TZ))
+
+
+class PublicationWindowTest(HuntJournalTest):
+    """REGRESJA 28.08: „nigdy nie pokazane jako wolne" liczyło CAŁĄ dobę.
+
+    Wpis mówił `8 wolnych z 11` i jednocześnie wymieniał 8 godzin jako zniknięte
+    przed naszym pierwszym spojrzeniem — liczby, które nie mogą być naraz prawdziwe.
+    Przyczyna: zajęte godziny sumowały się przez wszystkie wykrycia w ciągu dnia,
+    więc zwykły ruch z popołudnia lądował w diagnostyce publikacji.
+    """
+
+    def zapisz_z_zajetymi(self, godzina, zajete):
+        return self.zapisz(godzina=godzina, sloty=(20,),
+                           grid=("pt 04.09", 8, 11, list(zajete)))
+
+    def test_batches_within_the_publication_moment_still_add_up(self):
+        """Publikacja sypie partiami — kolejne migawki w tej samej chwili muszą się sumować."""
+        self.zapisz_z_zajetymi("11:00:15", ["09:00"])
+        wpis, _, _ = self.zapisz_z_zajetymi("11:00:16", ["10:00"])
+        self.assertEqual(wpis["taken"], ["09:00", "10:00"])
+
+    def test_bookings_hours_later_are_not_counted_as_lost(self):
+        """SEDNO: ktoś rezerwuje o 14:00 — to zwykły ruch, nie nasza porażka."""
+        self.zapisz_z_zajetymi("11:00:15", ["09:00"])
+        wpis, _, _ = self.zapisz_z_zajetymi("14:30:00", ["10:00", "11:00", "12:00"])
+        self.assertEqual(wpis["taken"], ["09:00"],
+                         "godziny zajęte godziny później trafiły do diagnostyki publikacji")
+        self.assertNotIn("12:00", wpis["never_seen"])
+
+    def test_later_snapshot_still_refreshes_the_grid_numbers(self):
+        """Późniejsze migawki mają aktualizować licznik wolnych — to nadal użyteczne."""
+        self.zapisz_z_zajetymi("11:00:15", ["09:00"])
+        wpis, _, _ = self.zapisz(godzina="15:00:00", sloty=(19,),
+                                 grid=("pt 04.09", 2, 11, ["09:00", "10:00"]))
+        self.assertEqual(wpis["free"], 2)

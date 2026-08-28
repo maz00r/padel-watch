@@ -601,6 +601,24 @@ def day_grid(doc, listing_id, now_utc, day_local, tz, held_ids=()):
         len(wszystkie), zajete
 
 
+# Ile czasu po pierwszym wykryciu jeszcze wierzymy, że „zajęte" znaczy „ktoś nas ubiegł".
+# Publikacja sypie partiami przez ~sekundę, a kolejne przebiegi monitora dzieli kilka
+# sekund — dwie minuty to zapas z naddatkiem, a jednocześnie nic, co można pomylić
+# ze zwykłym ruchem w ciągu dnia.
+OKNO_PUBLIKACJI_S = 120
+
+
+def okno_publikacji(wpis, now_local):
+    """Czy wciąż jesteśmy w chwili publikacji? Bez znacznika — zakładamy, że tak."""
+    zaczeto = wpis.get("first_seen_iso")
+    if not zaczeto:
+        return True
+    try:
+        return (now_local - datetime.fromisoformat(zaczeto)).total_seconds() <= OKNO_PUBLIKACJI_S
+    except ValueError:
+        return True
+
+
 def record_hunt(now_local, tz, new_slots, wyniki, shots, grid, zdalnie, topic):
     """Dopisuje polowanie do dziennika i alarmuje, gdy coś wymaga uwagi.
 
@@ -616,16 +634,23 @@ def record_hunt(now_local, tz, new_slots, wyniki, shots, grid, zdalnie, topic):
     wpis = wpisy[0] if wpisy and wpisy[0].get("date") == dzis else None
     if wpis is None:
         w_oknie, okno = hunt_window(now_local, tz)
-        wpis = {"date": dzis, "first_seen": f"{now_local:%H:%M:%S}", "burst": okno,
+        wpis = {"date": dzis, "first_seen": f"{now_local:%H:%M:%S}",
+                "first_seen_iso": now_local.isoformat(), "burst": okno,
                 "aligned": w_oknie, "alerted": False, "remote": bool(zdalnie),
                 "registered": [], "failed": [], "shots": [], "free": 0, "total": 0}
         wpisy.insert(0, wpis)
 
     if grid:
         wpis["target_day"], wpis["free"], wpis["total"] = grid[:3]
-        # Sumujemy przez wszystkie partie: publikacja przychodzi kawałkami, więc każda
-        # migawka pokazuje inny fragment grafiku.
-        wpis["taken"] = sorted(set(wpis.get("taken") or []) | set(grid[3] if len(grid) > 3 else []))
+        # Zajęte godziny zbieramy TYLKO przez chwilę po pierwszym wykryciu.
+        # Publikacja przychodzi partiami przez ~sekundę, więc jedna migawka nie
+        # pokazuje całego grafiku — ale godzina zarezerwowana przez kogoś sześć godzin
+        # PÓŹNIEJ to zwykły ruch, a nie „zniknęła przed naszym pierwszym spojrzeniem".
+        # 28.08 sumowanie przez całą dobę dało 8 godzin „nigdy nie widzianych" przy
+        # 8 wolnych z 11 — liczby, które nie mogą być jednocześnie prawdziwe.
+        if okno_publikacji(wpis, now_local):
+            wpis["taken"] = sorted(set(wpis.get("taken") or [])
+                                   | set(grid[3] if len(grid) > 3 else []))
     wpis["remote"] = wpis["remote"] or bool(zdalnie)
     for s in sorted(new_slots, key=lambda x: x["start_utc"]):
         kiedy = fmt_when(s["start_utc"].astimezone(tz), short=True)

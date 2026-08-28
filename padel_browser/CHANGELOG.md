@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.16.1 — naprawa: „nigdy nie pokazane jako wolne" liczyło całą dobę
+
+- Wpis z 28.08 mówił `8 wolnych z 11` i **jednocześnie** wymieniał osiem godzin jako
+  zniknięte przed naszym pierwszym spojrzeniem. Te liczby nie mogą być naraz prawdziwe.
+- **Przyczyna:** zajęte godziny sumowały się przez **wszystkie** wykrycia w ciągu doby,
+  więc godzina zarezerwowana przez kogoś sześć godzin po publikacji lądowała
+  w diagnostyce publikacji. To zwykły ruch, a nie przegrany wyścig.
+- **Poprawka:** zajęte godziny zbieramy tylko przez **2 minuty od pierwszego wykrycia**.
+  Publikacja sypie partiami przez ~sekundę, więc jedna migawka nie pokazuje całego
+  grafiku — dwie minuty to zapas z naddatkiem i jednocześnie nic, co dałoby się pomylić
+  ze zwykłym ruchem w ciągu dnia. Późniejsze migawki nadal aktualizują licznik wolnych.
+- To ten sam gatunek błędu co w 0.14.1: **etykieta twierdziła więcej, niż mówiły dane.**
+
+
 ## 0.16.0 — ciche logowanie: dodatek sam klika „ZALOGUJ SIĘ”
 
 - **Gdy sesja Decathlon GO wygaśnie, czytnik tokenu klika przycisk logowania sam.**
