@@ -20,6 +20,7 @@ export START_URL READ_INTERVAL
 # --- opcje monitora (mapowane na ENV, których używa check_padel.py) ---
 export NTFY_TOPIC="$(opt ntfy_topic)"
 export CHECK_INTERVAL="$(opt check_interval)"
+export LOG_LEVEL="$(opt log_level)"
 export FILTERS="$(opt filters)"
 export INTERVALS="$(opt intervals)"
 export BURST="$(opt burst)"
@@ -58,13 +59,15 @@ done
 export STATE_DIR="/data"                       # stan (state.json) trwały między restartami
 export CONFIG_PATH="/data/__none__.json"       # brak pliku -> check_padel bierze wszystko z ENV
 export DECATHLON_TOKEN_FILE="/data/token.json" # wymiana tokenu: przeglądarka -> monitor
+case "$LOG_LEVEL" in "" | None) LOG_LEVEL=info ;; esac
+export LOG_LEVEL
 case "$CHECK_INTERVAL" in "" | None) CHECK_INTERVAL=60 ;; esac
 case "$TIMEZONE" in "" | None) TIMEZONE="Europe/Warsaw" ;; esac
 export CHECK_INTERVAL TIMEZONE
 export TZ="$TIMEZONE"   # spójne znaczniki czasu w CAŁYM logu (czytnik tokenu też)
 
 mkdir -p "$CHROME_PROFILE"
-echo "[padel] start: url=${START_URL} read=${READ_INTERVAL}s check=${CHECK_INTERVAL}s listing=${LISTINGS}"
+echo "[padel] start: url=${START_URL} read=${READ_INTERVAL}s check=${CHECK_INTERVAL}s log=${LOG_LEVEL} listing=${LISTINGS}"
 
 # 1) Wirtualny ekran
 Xvfb :1 -screen 0 1280x900x24 -nolisten tcp &

@@ -1,5 +1,5 @@
 name: Padel (Decathlon) — monitor + logowanie
-version: "0.16.1"
+version: "0.17.0"
 slug: padel_browser
 description: Monitoruje wolne terminy padla i (opcjonalnie) rejestruje automatycznie. Logujesz się raz w panelu, dodatek sam podtrzymuje sesję i token.
 url: https://github.com/maz00r/padel-watch
@@ -16,6 +16,7 @@ panel_title: Padel
 options:
   ntfy_topic: "your-ntfy-topic-here"
   check_interval: 60
+  log_level: "info"
   filters: "mon-fri:15:00-02:00; sat-sun:00:00-24:00"
   intervals: ""
   burst: "mon-sun:11:00:45"
@@ -48,6 +49,7 @@ options:
 schema:
   ntfy_topic: str
   check_interval: int(10,3600)
+  log_level: list(debug|info|warn|error)
   filters: str?
   intervals: str?
   burst: str?

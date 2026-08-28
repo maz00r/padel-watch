@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.17.0 — poziomy logowania + naprawa: odwołanie brane za publikację
+
+### Poziomy logowania i ich filtracja
+
+- Nowa opcja **`log_level`**: `debug` / `info` (domyślnie) / `warn` / `error`. Doba pracy
+  dodatku to ~2000 linii, z czego ~95 % to dwa powtarzalne komunikaty — `= Kort: N
+  dostępnych…` przy każdym pytaniu o grafik i `Brak nowych wolnych terminów.` Na `info`
+  zostaje kilkadziesiąt linii: publikacja, grafik dnia, rezerwacje, salwa, dziennik.
+- **W zrywie rutynowe linie wracają na `info`.** To one są materiałem dowodowym przy
+  analizie polowania — pokazują, o której sekundzie termin pojawił się w API i ile trwało
+  pobranie. Poza zrywem te same linie są szumem, więc idą na `debug`. Wyciszamy pytanie
+  „czy coś się zwolniło?", nie odpowiedzi.
+- **Bicie serca czytnika tokenu (`✓ JWT odczytany` co 5 min, ~290 linii dziennie) jest na
+  `debug`**, ale pierwszy udany odczyt po serii błędów wraca na `info`. Chcemy widzieć
+  moment, w którym sesja wraca do życia, a nie ciągłe potwierdzenia, że jeszcze żyje.
+- **Poziom czytamy z pierwszego znaku komunikatu.** Kod od początku znakuje wagę: `!` i `⚠`
+  to kłopot, `✗` to nieudany strzał albo martwy token. Czytanie tej konwencji było lepsze
+  niż dopisanie `level=` w czterdziestu miejscach — i nowe linie same trafiają na właściwą
+  półkę, bez pamiętania o tym przy każdej zmianie.
+- **Błędna nazwa poziomu nie wycisza dodatku** — nierozpoznana wartość cofa się do `info`.
+  Literówka w konfiguracji nie może oślepić cię w dniu publikacji; jest na to test.
+- Poziom obowiązuje oba procesy dodatku, a zdalna Lambda czyta ten sam `LOG_LEVEL`.
+
+### Naprawa: odwołanie na dziś ogłaszane jako publikacja
+
+- 28.08 o 08:57 ktoś zwolnił termin **na ten sam dzień**. Dziennik wziął pierwsze nowe
+  terminy doby za publikację, zapisał „publikacja 08:57:20" i wysłał alarm „poza zrywem".
+  Prawdziwa publikacja przyszła o **11:00:36** — czyli tak samo jak dzień wcześniej.
+- **Skutek był gorszy niż fałszywy push:** na podstawie tego wpisu doradzałem przebudowę
+  okien zrywu, której nie było potrzeba. Dziennik ma być podstawą decyzji, więc pomyłka
+  w etykiecie kosztuje więcej niż zgubiona linia logu.
+- **Poprawka:** za publikację uznajemy tylko wykrycie, którego horyzont sięga co najmniej
+  **6 dni w przód** (`PUBLIKACJA_MIN_DNI`). Odwołanie dotyczy dnia dzisiejszego albo
+  jutrzejszego i nie ustawia już godziny publikacji ani nie odpala alarmu — ale nadal
+  trafia do dziennika jako wygrany termin. Prawdziwy rozjazd okna wciąż krzyczy.
+- To trzeci raz ten sam gatunek błędu (0.14.1, 0.16.1, teraz): **etykieta twierdziła
+  więcej, niż mówiły dane.**
+
 ## 0.16.1 — naprawa: „nigdy nie pokazane jako wolne" liczyło całą dobę
 
 - Wpis z 28.08 mówił `8 wolnych z 11` i **jednocześnie** wymieniał osiem godzin jako

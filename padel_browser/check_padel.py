@@ -104,7 +104,41 @@ def set_log_precision(millis):
     _LOG_MILLIS = bool(millis)
 
 
-def log(*args):
+# POZIOMY LOGOWANIA. Dzień pracy dodatku to ~2000 linii, z czego ~95% to powtarzalne
+# „= Kort: N dostępnych" i „Brak nowych wolnych terminów" co dwie sekundy. Sygnał —
+# publikacja, rejestracje, alarmy — tonie w tym szumie.
+#
+# Podział jest prosty i wynika z tego, co naprawdę chce się zobaczyć:
+#   debug — rutynowe odpytywanie (każde pobranie, każdy pusty cykl, odczyt tokenu),
+#   info  — zdarzenia: publikacja, rejestracje, dziennik polowań, zryw, powiadomienia,
+#   warn  — coś poszło nie tak, ale polujemy dalej (409, ponowienie, rozjazd okna),
+#   error — polowanie przerwane albo dane utracone.
+POZIOMY = {"debug": 10, "info": 20, "warn": 30, "error": 40}
+
+# Dodatek od początku znakuje wagę komunikatu pierwszym znakiem: „!" i „⚠" to kłopot,
+# „✗" to nieudany strzał albo martwy token. Czytamy tę konwencję zamiast dopisywać
+# level= w czterdziestu miejscach — i nowe linie same trafią na właściwą półkę.
+WAGA_ZNAKU = {"✗": "error", "!": "warn", "⚠": "warn"}
+
+
+def poziom_z_tresci(args):
+    for a in args:
+        s = str(a).strip()
+        if s:
+            return WAGA_ZNAKU.get(s[0], "info")
+    return "info"
+
+
+def _prog_logu():
+    """Najniższy wypisywany poziom. Zła wartość NIE może uciszyć dodatku."""
+    nazwa = (os.environ.get("LOG_LEVEL") or "info").strip().lower()
+    return POZIOMY.get(nazwa, POZIOMY["info"])
+
+
+def log(*args, level=None):
+    waga = POZIOMY.get(level or poziom_z_tresci(args), POZIOMY["info"])
+    if waga < _prog_logu():
+        return
     now = datetime.now(_log_tz())
     ts = (now.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3] if _LOG_MILLIS
           else now.strftime("%Y-%m-%d %H:%M:%S"))
@@ -601,6 +635,14 @@ def day_grid(doc, listing_id, now_utc, day_local, tz, held_ids=()):
         len(wszystkie), zajete
 
 
+# Ile dni naprzód sięga publikacja. Odwołanie dotyczy dnia BLISKIEGO (dziś, jutro),
+# publikacja — horyzontu +7. Bez tego rozróżnienia dziennik bierze pierwsze nowe
+# terminy dnia za publikację: 28.08 o 08:57 ktoś zwolnił termin na TEN SAM dzień,
+# a dodatek ogłosił „publikacja o 08:57 poza zrywem" i wysłał fałszywy alarm.
+# Prawdziwa publikacja przyszła tego dnia o 11:00:36.
+PUBLIKACJA_MIN_DNI = 6
+
+
 # Ile czasu po pierwszym wykryciu jeszcze wierzymy, że „zajęte" znaczy „ktoś nas ubiegł".
 # Publikacja sypie partiami przez ~sekundę, a kolejne przebiegi monitora dzieli kilka
 # sekund — dwie minuty to zapas z naddatkiem, a jednocześnie nic, co można pomylić
@@ -632,13 +674,21 @@ def record_hunt(now_local, tz, new_slots, wyniki, shots, grid, zdalnie, topic):
     dzis = now_local.date().isoformat()
     wpisy = load_hunts()
     wpis = wpisy[0] if wpisy and wpisy[0].get("date") == dzis else None
+    # Publikacja czy odwołanie? Publikacja dotyczy horyzontu +7, odwołanie — dnia
+    # bliskiego. Mylenie ich dawało fałszywy alarm „publikacja poza zrywem" (28.08).
+    horyzont = grid[4] if grid and len(grid) > 4 else None
+    to_publikacja = bool(horyzont) and (horyzont - now_local.date()).days >= PUBLIKACJA_MIN_DNI
     if wpis is None:
-        w_oknie, okno = hunt_window(now_local, tz)
-        wpis = {"date": dzis, "first_seen": f"{now_local:%H:%M:%S}",
-                "first_seen_iso": now_local.isoformat(), "burst": okno,
-                "aligned": w_oknie, "alerted": False, "remote": bool(zdalnie),
-                "registered": [], "failed": [], "shots": [], "free": 0, "total": 0}
+        wpis = {"date": dzis, "alerted": False, "remote": bool(zdalnie),
+                "registered": [], "failed": [], "shots": [], "free": 0, "total": 0,
+                "first_seen": None, "first_seen_iso": None, "burst": "", "aligned": None}
         wpisy.insert(0, wpis)
+    if to_publikacja and not wpis.get("first_seen"):
+        # Godzinę publikacji i ocenę okna zapisujemy TYLKO przy prawdziwej publikacji.
+        w_oknie, okno = hunt_window(now_local, tz)
+        wpis["first_seen"] = f"{now_local:%H:%M:%S}"
+        wpis["first_seen_iso"] = now_local.isoformat()
+        wpis["burst"], wpis["aligned"] = okno, w_oknie
 
     if grid:
         wpis["target_day"], wpis["free"], wpis["total"] = grid[:3]
@@ -696,7 +746,7 @@ def hunt_alert_reason(wpis):
     Alarmujemy oszczędnie. Push, który przychodzi codziennie, przestaje być
     czytany — a wtedy nie ma go po co wysyłać.
     """
-    if wpis.get("aligned") is False:
+    if wpis.get("aligned") is False and wpis.get("first_seen"):
         return (f"Publikacja o {wpis['first_seen']} wypadła POZA zrywem "
                 f"({wpis['burst']}) — przesuń okna w konfiguracji dodatku.")
     if not wpis["registered"] and wpis["failed"]:
@@ -744,7 +794,7 @@ def log_day_grids(new_slots, docs_by_lid, now_utc, tz, held_ids=()):
         etykieta = f"{PL_DAYS_SHORT[dzien.weekday()]} {dzien:%d.%m}"
         publikacja = (lid, dzien) == horyzont
         if publikacja:
-            wynik = (etykieta, wolne, wszystkie, zajete_godziny)
+            wynik = (etykieta, wolne, wszystkie, zajete_godziny, dzien)
         ile = len(zajete_godziny)
         log(f"📋 Grafik na {etykieta}: "
             f"{wolne} {plural(wolne, 'wolny', 'wolne', 'wolnych')} z {wszystkie}"
@@ -2456,7 +2506,8 @@ def run_once(announce_startup=False, skip_light=False, prefetched=None, defer_pu
         avail = (attrs.get("datesStats") or {}).get("availableListingDates") or 0
         if avail <= 0 and doc is None:
             # Brak jakichkolwiek wolnych terminów -> nie ma czego filtrować ani pobierać.
-            log(f"= {title}: 0 dostępnych (lekki ping ~1 KB), pomijam pełne pobranie")
+            log(f"= {title}: 0 dostępnych (lekki ping ~1 KB), pomijam pełne pobranie",
+                level="info" if skip_light else "debug")
             continue
         # Krok 2: coś jest wolne -> dopiero teraz ciężki payload (~21 KB gzip) i filtr.
         if doc is None:
@@ -2470,13 +2521,15 @@ def run_once(announce_startup=False, skip_light=False, prefetched=None, defer_pu
         # W zrywie dokładamy czas pobrania — pozwala oddzielić opóźnienie sieci
         # od opóźnienia wykrycia przy analizie logu po polowaniu.
         log(f"= {title}: {avail} dostępnych, {len(slots)} pasujących do filtra"
-            + (f" (pobranie {fetch_ms} ms)" if skip_light else ""))
+            + (f" (pobranie {fetch_ms} ms)" if skip_light else ""),
+            level="info" if skip_light else "debug")
         for s in slots:
             current[s["id"]] = s
             book_url_by_id[s["id"]] = canon_url
             listing_price_by_id[s["id"]] = listing_price
         for s in sorted(slots, key=lambda x: x["start_utc"]):
-            log(f"   - {fmt_when(s['start_utc'].astimezone(tz), short=True)}  {s['name']}  {s['count']}/{s['limit']}")
+            log(f"   - {fmt_when(s['start_utc'].astimezone(tz), short=True)}  {s['name']}  {s['count']}/{s['limit']}",
+                level="info" if skip_light else "debug")
 
     current_ids = set(current.keys())
     prev = None if state_doc is None else set(state_doc.get("free_ids", []))
@@ -2578,7 +2631,7 @@ def run_once(announce_startup=False, skip_light=False, prefetched=None, defer_pu
         if failed_ids:
             log(f"! Nie wysłano {len(failed_ids)} powiadomień — ponowię w następnej iteracji.")
     else:
-        log("Brak nowych wolnych terminów.")
+        log("Brak nowych wolnych terminów.", level="debug")
 
     # Sloty z nieudaną wysyłką NIE trafiają do stanu -> następna iteracja
     # potraktuje je znów jako nowe i ponowi powiadomienie.
@@ -2842,7 +2895,7 @@ def main():
         if not active and windows:
             shown = current_interval(interval, windows, tz)
             if shown != last_sleep:
-                log(f"⏱ aktualny interwał: {shown}s")
+                log(f"⏱ aktualny interwał: {shown}s", level="debug")
                 last_sleep = shown
         time.sleep(sleep_s)
 

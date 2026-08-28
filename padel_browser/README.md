@@ -33,6 +33,7 @@ przechodzisz normalne logowanie, łącznie z kodem z maila.
 |-------|-----------|----------|
 | `ntfy_topic` | temat ntfy (ten sam, co subskrybujesz w apce) | `your-ntfy-topic-here` |
 | `check_interval` | bazowa częstotliwość sprawdzania w sekundach (10–3600) | `60` |
+| `log_level` | ile ma być w logu: `debug` / `info` / `warn` / `error` | `info` |
 | `filters` | godziny powiadomień; okna `;`, każde `DNI:HH:MM-HH:MM` | `mon-fri:15:00-02:00; sat-sun:00:00-24:00` |
 | `intervals` | inna częstotliwość w zadanych godzinach: `DNI:HH:MM-HH:MM=SEKUNDY` | `mon-fri:15:00-02:00=30` |
 | `burst` | **zryw**: krótkie, gęste sprawdzanie wycelowane w sekundę publikacji grafiku, `DNI:GG:MM:SS`. Puste = wyłączony | `mon-sun:11:00:45` |
@@ -123,6 +124,33 @@ Np. `mon-fri:15:00-02:00=30; sat-sun:08:00-22:00=30` = co 30 s wieczorami i w we
 dnie, a co `check_interval` (np. 300 s) w pozostałych porach. Puste = zawsze `check_interval`.
 Minimum 2 s (niższa wartość jest podbijana, z wpisem w logu; poniżej 5 s logowane jest
 ostrzeżenie — używaj tylko w wąskich oknach, bo grozi blokadą po IP). Zmiana interwału jest logowana (`⏱ aktualny interwał: ...`).
+
+## Poziomy logowania
+
+Doba pracy dodatku to ~2000 linii, a ~95 % z nich to dwa powtarzalne komunikaty:
+`= Kort: N dostępnych…` przy każdym pytaniu o grafik i `Brak nowych wolnych terminów.`
+Szukanie w tym publikacji albo nieudanego strzału to praca, której nie trzeba wykonywać.
+
+| Poziom | Co widać |
+|--------|----------|
+| `debug` | wszystko — każde odpytanie, każdy pusty cykl, bicie serca czytnika tokenu |
+| `info` (domyślnie) | zdarzenia: publikacja, grafik dnia, rezerwacje, salwa, zryw, dziennik polowań, powrót tokenu po awarii — **oraz pełny zapis z sekund zrywu** |
+| `warn` | tylko kłopoty: `!` i `⚠` — nieudane powiadomienia, wygasły JWT, rozjazd okna publikacji |
+| `error` | wyłącznie `✗` — martwy token, odrzucony strzał |
+
+Dwie rzeczy warte uwagi:
+
+- **W zrywie rutynowe linie wracają na `info`.** To one są materiałem dowodowym przy
+  analizie polowania — bez nich nie widać, o której sekundzie termin pojawił się w API
+  ani ile trwało pobranie. Poza zrywem te same linie są czystym szumem i idą na `debug`.
+- **Bicie serca czytnika tokenu (`✓ JWT odczytany`) jest na `debug`**, ale odczyt po
+  serii błędów wraca na `info`. Interesuje nas moment, w którym sesja wraca do życia,
+  a nie 290 dziennych potwierdzeń, że nadal żyje.
+
+Poziom obowiązuje oba procesy dodatku (monitor i czytnik tokenu). Zdalna Lambda czyta
+ten sam `LOG_LEVEL` — ustaw go w zmiennych środowiskowych funkcji, jeśli chcesz ciszej
+w CloudWatch. Błędna nazwa poziomu nie wycisza dodatku: nierozpoznana wartość cofa się
+do `info`, żeby literówka w konfiguracji nie oślepiła cię w dniu publikacji.
 
 ## Panel: dziennik polowań
 

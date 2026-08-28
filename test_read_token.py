@@ -104,3 +104,43 @@ class SilentLoginTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReaderLogLevelTest(unittest.TestCase):
+    """Czytnik pisze do tego samego logu co monitor, więc filtr musi działać tak samo.
+    Jego bicie serca co 5 minut to ~290 linii dziennie i zero informacji."""
+
+    def zloguj(self, *args, prog="info"):
+        buf = io.StringIO()
+        with mock.patch.dict(os.environ, {"LOG_LEVEL": prog}):
+            stary, sys.stdout = sys.stdout, buf
+            try:
+                rt.log(*args)
+            finally:
+                sys.stdout = stary
+        return buf.getvalue()
+
+    def test_glyph_convention_matches_the_monitor(self):
+        self.assertIn("✗", self.zloguj("✗ Ciche logowanie nie wystarczyło", prog="error"))
+        self.assertIn("⚠", self.zloguj("⚠ JWT WYGASŁ", prog="warn"))
+        self.assertEqual("", self.zloguj("✓ JWT odczytany", prog="warn"))
+
+    def test_broken_level_name_does_not_silence_the_reader(self):
+        self.assertIn("✓", self.zloguj("✓ JWT odczytany", prog="bzdura"))
+
+    def test_heartbeat_is_quiet_but_recovery_is_loud(self):
+        """SEDNO: chcemy zobaczyć POWRÓT tokenu po awarii, nie 290 potwierdzeń, że żyje.
+
+        Pętla główna nadaje udanemu odczytowi „info" tylko wtedy, gdy poprzedni się nie
+        udał; kolejne dostają „debug". Tu sprawdzamy oba końce tej decyzji.
+        """
+        buf = io.StringIO()
+        with mock.patch.dict(os.environ, {"LOG_LEVEL": "info"}):
+            stary, sys.stdout = sys.stdout, buf
+            try:
+                rt.log("✓ JWT odczytany — powrót po awarii", level="info")
+                rt.log("✓ JWT odczytany — rutynowe bicie serca", level="debug")
+            finally:
+                sys.stdout = stary
+        self.assertIn("powrót po awarii", buf.getvalue())
+        self.assertNotIn("bicie serca", buf.getvalue())

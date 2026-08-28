@@ -109,7 +109,23 @@ def fmt_left(seconds):
     return f"~{seconds} s" if seconds < 90 else f"~{seconds // 60} min"
 
 
-def log(*args):
+# Te same poziomy i ta sama konwencja znaków co w check_padel.py — czytnik pisze do
+# tego samego logu dodatku, więc filtr musi działać na obu procesach tak samo.
+POZIOMY = {"debug": 10, "info": 20, "warn": 30, "error": 40}
+WAGA_ZNAKU = {"✗": "error", "!": "warn", "⚠": "warn"}
+
+
+def _prog_logu():
+    nazwa = (os.environ.get("LOG_LEVEL") or "info").strip().lower()
+    return POZIOMY.get(nazwa, POZIOMY["info"])
+
+
+def log(*args, level=None):
+    if level is None:
+        pierwszy = next((str(a).strip() for a in args if str(a).strip()), "")
+        level = WAGA_ZNAKU.get(pierwszy[:1], "info")
+    if POZIOMY.get(level, POZIOMY["info"]) < _prog_logu():
+        return
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{ts}]", *args, flush=True)
 
@@ -242,6 +258,7 @@ def next_sleep(exp):
 def main():
     log(f"Czytnik tokenu wystartował. Strona: {START_URL}, max co {READ_INTERVAL}s.")
     log("Zaloguj się w panelu — profil Chromium zostaje w /data (przeżywa restarty).")
+    ostatni_blad = True  # start traktujemy jak „nie mieliśmy tokenu" -> pierwszy odczyt widoczny
     while True:
         # Domyślnie szybki retry — pełny READ_INTERVAL tylko po UDANYM odczycie.
         sleep_s = ERROR_RETRY
@@ -249,22 +266,27 @@ def main():
             jwt, exp, err = read_jwt_once()
             if err:
                 log(f"✗ {err}")
+                ostatni_blad = True
             elif exp and exp <= time.time():
                 # Nie nadpisujemy pliku wygasłym tokenem — monitor mógłby zgubić lepszy.
                 log(f"⚠ JWT w localStorage WYGASŁ {fmt_left(time.time() - exp)} temu — sesja "
                     f"mogła paść; sprawdź panel i zaloguj się ponownie.")
+                ostatni_blad = True
             else:
                 write_token_file(jwt, exp)  # udostępnij monitorowi w tym samym kontenerze
                 sleep_s = next_sleep(exp)
+                poziom, ostatni_blad = ("info" if ostatni_blad else "debug"), False
                 if exp:
                     when = datetime.fromtimestamp(exp, timezone.utc).astimezone()
                     log(f"✓ JWT odczytany, ważny do {when:%Y-%m-%d %H:%M:%S} "
                         f"(jeszcze {fmt_left(exp - time.time())}). "
-                        f"Kolejny odczyt za {fmt_left(sleep_s)}.")
+                        f"Kolejny odczyt za {fmt_left(sleep_s)}.", level=poziom)
                 else:
-                    log(f"✓ JWT odczytany, ale nie odczytałem exp. Długość: {len(jwt)} zn.")
+                    log(f"✓ JWT odczytany, ale nie odczytałem exp. Długość: {len(jwt)} zn.",
+                        level=poziom)
         except Exception as e:  # noqa: BLE001 - czytnik ma przetrwać każdy błąd
             log(f"! Błąd odczytu: {e!r}")
+            ostatni_blad = True
         time.sleep(sleep_s)
 
 

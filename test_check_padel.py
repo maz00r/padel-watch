@@ -5,6 +5,7 @@ import io
 import gzip
 import base64
 import json
+import contextlib
 import os
 import sys
 import tempfile
@@ -2939,7 +2940,9 @@ class HuntJournalTest(unittest.TestCase):
                 "name": "Rezerwacja godzinna", "count": 0, "limit": 1, "price": None}
 
     def zapisz(self, godzina="11:00:15", sloty=(20,), wyniki=None, burst="mon-sun:11:00:30",
-               shots=(), grid=("niedz 30.08", 7, 12)):
+               shots=(), grid=("niedz 30.08", 7, 12, [], date(2026, 8, 30))):
+        # Piąty element to DATA horyzontu. 30.08 wobec 23.08 to +7 dni, czyli publikacja.
+        # Bez niej wpis potraktowałby zdarzenie jak odwołanie i nie zapisał godziny.
         teraz = datetime(2026, 8, 23, *[int(x) for x in godzina.split(":")], tzinfo=self.TZ)
         sl = [self.slot(h) for h in sloty]
         wyn = wyniki if wyniki is not None else {s["id"]: (True, "accepted") for s in sl}
@@ -3280,7 +3283,7 @@ class PublicationWindowTest(HuntJournalTest):
 
     def zapisz_z_zajetymi(self, godzina, zajete):
         return self.zapisz(godzina=godzina, sloty=(20,),
-                           grid=("pt 04.09", 8, 11, list(zajete)))
+                           grid=("pt 04.09", 8, 11, list(zajete), date(2026, 8, 30)))
 
     def test_batches_within_the_publication_moment_still_add_up(self):
         """Publikacja sypie partiami — kolejne migawki w tej samej chwili muszą się sumować."""
@@ -3300,5 +3303,94 @@ class PublicationWindowTest(HuntJournalTest):
         """Późniejsze migawki mają aktualizować licznik wolnych — to nadal użyteczne."""
         self.zapisz_z_zajetymi("11:00:15", ["09:00"])
         wpis, _, _ = self.zapisz(godzina="15:00:00", sloty=(19,),
-                                 grid=("pt 04.09", 2, 11, ["09:00", "10:00"]))
+                                 grid=("pt 04.09", 2, 11, ["09:00", "10:00"], date(2026, 8, 30)))
         self.assertEqual(wpis["free"], 2)
+
+
+class CancellationIsNotPublicationTest(HuntJournalTest):
+    """REGRESJA 28.08: odwołanie na DZIŚ zostało ogłoszone jako publikacja.
+
+    O 08:57 ktoś zwolnił termin na ten sam dzień. Dziennik wziął pierwsze nowe
+    terminy doby za publikację, zapisał „publikacja 08:57:20" i wysłał fałszywy
+    alarm „poza zrywem". Prawdziwa publikacja przyszła o 11:00:36 — czyli tak samo
+    jak dzień wcześniej. Na tej podstawie doradzałem przebudowę okien, której
+    nie było potrzeba.
+    """
+
+    def odwolanie(self, godzina):
+        """Nowy wolny termin na DZIŚ — tak wygląda odwołanie."""
+        return self.zapisz(godzina=godzina,
+                           grid=("pt 28.08", 1, 11, ["09:00"], date(2026, 8, 23)))
+
+    def publikacja(self, godzina):
+        return self.zapisz(godzina=godzina,
+                           grid=("pt 04.09", 8, 11, ["17:00"], date(2026, 8, 30)))
+
+    def test_cancellation_is_not_recorded_as_publication(self):
+        wpis, push, out = self.odwolanie("08:57:20")
+        self.assertIsNone(wpis["first_seen"], "odwołanie zapisane jako godzina publikacji")
+        self.assertNotIn("POZA zrywem", out)
+        push.assert_not_called()
+
+    def test_cancellation_still_records_what_we_won(self):
+        """Odwołanie ma trafić do dziennika — tylko nie jako publikacja."""
+        wpis, _, _ = self.odwolanie("08:57:20")
+        self.assertEqual(len(wpis["registered"]), 1)
+
+    def test_real_publication_later_the_same_day_is_recorded(self):
+        self.odwolanie("08:57:20")
+        wpis, _, _ = self.publikacja("11:00:36")
+        self.assertEqual(wpis["first_seen"], "11:00:36")
+        self.assertTrue(wpis["aligned"], "publikacja o 11:00:36 mieści się w zrywie 11:00:30+60s")
+
+    def test_alarm_fires_for_a_real_publication_outside_the_burst(self):
+        """Prawdziwy rozjazd nadal ma krzyczeć — nie stępiamy alarmu."""
+        wpis, push, out = self.publikacja("08:57:20")
+        self.assertEqual(wpis["first_seen"], "08:57:20")
+        self.assertFalse(wpis["aligned"])
+        self.assertTrue(push.called)
+        self.assertIn("POZA zrywem", out)
+
+
+class LogLevelTest(unittest.TestCase):
+    """Dzień pracy dodatku to ~2000 linii, z czego prawie wszystko to rutynowe pytanie
+    „czy coś się zwolniło?". Poziomy mają wyciszyć to pytanie, nie odpowiedzi."""
+
+    def zloguj(self, *args, level=None, prog="info"):
+        buf = io.StringIO()
+        with mock.patch.dict(os.environ, {"LOG_LEVEL": prog}), \
+             contextlib.redirect_stdout(buf):
+            if level is None:
+                cp.log(*args)
+            else:
+                cp.log(*args, level=level)
+        return buf.getvalue()
+
+    def test_default_threshold_hides_debug_and_shows_info(self):
+        self.assertEqual("", self.zloguj("Brak nowych wolnych terminów.", level="debug"))
+        self.assertIn("Grafik", self.zloguj("📋 Grafik na pt 04.09"))
+
+    def test_debug_threshold_shows_everything(self):
+        self.assertIn("Brak", self.zloguj("Brak nowych", level="debug", prog="debug"))
+
+    def test_bang_and_warning_glyphs_are_warnings(self):
+        """Konwencja znaków istnieje w kodzie od początku — czytamy ją, zamiast
+        dopisywać level= w czterdziestu miejscach."""
+        self.assertIn("!", self.zloguj("! Nie wysłano 2 powiadomień", prog="warn"))
+        self.assertIn("⚠", self.zloguj("⚠ JWT wygasł", prog="warn"))
+        self.assertEqual("", self.zloguj("📋 Grafik na pt 04.09", prog="warn"))
+
+    def test_failed_shot_is_an_error(self):
+        self.assertIn("✗", self.zloguj("✗ Token martwy", prog="error"))
+        self.assertEqual("", self.zloguj("! Ponowię", prog="error"))
+
+    def test_broken_level_name_does_not_silence_the_addon(self):
+        """SEDNO: literówka w konfiguracji nie może oślepić dodatku w dniu publikacji."""
+        self.assertIn("Grafik", self.zloguj("📋 Grafik", prog="infoo"))
+        self.assertIn("Grafik", self.zloguj("📋 Grafik", prog=""))
+
+    def test_explicit_level_wins_over_the_glyph(self):
+        self.assertEqual("", self.zloguj("= Kort: 11 dostępnych", level="debug"))
+
+    def test_leading_whitespace_does_not_hide_the_glyph(self):
+        self.assertIn("✗", self.zloguj("   ✗ strzał odrzucony", prog="error"))
