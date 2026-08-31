@@ -156,6 +156,7 @@ def poluj(wejscie):
             # lokalny testowałby inną hipotezę niż Irlandia i porównanie logów
             # przestałoby cokolwiek znaczyć.
             "lead": wejscie.get("lead", False),
+            "hedge": wejscie.get("hedge") or 1,
             # Punkt zerowy wieku danych: chwila, w której sprint dostał grafik.
             # Zegar monotoniczny jest lokalny dla tego procesu, więc różnica
             # liczona TUTAJ jest poprawna — do domu jedzie już gotowa liczba w ms.

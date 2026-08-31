@@ -3556,3 +3556,103 @@ class LeadShotDisabledByDefaultTest(SalvoHelpers, unittest.TestCase):
     def test_the_switch_still_works_for_a_repeat_experiment(self):
         """Wyłącznik zostaje: gdyby kiedyś trzeba było powtórzyć pomiar."""
         self.assertTrue(cp.boolish(cp.build_reg_cfg({"auto_register_lead": True}, None)["lead"]))
+
+
+class HedgedShotTest(SalvoHelpers, unittest.TestCase):
+    """STRZAŁ REDUNDANTNY: kilka równoległych zapisów w najcenniejszy termin.
+
+    Czas przetwarzania zapisu przez serwer to loteria — 61, 62, 63, 71, 115, 150, 157,
+    178, 188, 236, 251, 730 ms — bez związku z czymkolwiek, co robimy. Jedno losowanie
+    zamieniamy więc na minimum z kilku. Ten sam termin trafiony dwukrotnie dawał już
+    62 i 251 ms (30.08) oraz 700 i 68 ms (25.08).
+    """
+
+    def odpal(self, outcomes, hedge=2, limit=1, slots=None):
+        """outcomes: {godzina: [(ok, msg, tx), ...]} — kolejne wywołania po kolei."""
+        self.cancelled, self.proby = [], []
+        kolejki = {h: list(v) for h, v in outcomes.items()}
+        lock = threading.Lock()
+
+        def fake_register(slot, price, local_cfg, speculative=False):
+            h = slot["start_utc"].hour
+            with lock:
+                ok, msg, tx = kolejki[h].pop(0) if kolejki[h] else (False, "409", "")
+                self.proby.append(h)
+            if ok:
+                local_cfg["transaction_id"] = tx
+            return ok, msg
+
+        def fake_cancel(tx, _cfg):
+            self.cancelled.append(tx)
+            return True, "cancelled"
+
+        buf = io.StringIO()
+        with mock.patch.object(cp, "register_slot", side_effect=fake_register), \
+                mock.patch.object(cp, "cancel_reservation", side_effect=fake_cancel), \
+                mock.patch("sys.stdout", buf):
+            cfg = self.cfg(hedge=hedge, max_per_run=limit, salvo=4)
+            res, reg = cp.auto_register_new_slots(slots or self.slots(15, 17, 18, 19),
+                                                 {}, cfg, set())
+        return res, reg, cfg, buf.getvalue()
+
+    def test_top_target_is_fired_twice(self):
+        """order=latest -> 19:00 jest czołowe i to ono dostaje kopię."""
+        _res, _reg, _cfg, _out = self.odpal({h: [(False, "409", "")] * 3
+                                             for h in (15, 17, 18, 19)})
+        self.assertEqual(self.proby.count(19), 2, "czołowy termin nie dostał drugiego zapisu")
+        for h in (15, 17, 18):
+            self.assertEqual(self.proby.count(h), 1, f"{h}:00 nie miało być powielone")
+
+    def test_a_slow_loss_does_not_bury_a_fast_win(self):
+        """SEDNO EKSPERYMENTU: jedna kopia dostaje 409, druga wygrywa — liczy się wygrana."""
+        res, reg, _cfg, _out = self.odpal({
+            19: [(False, "409", ""), (True, "OK", "tx19")],
+            18: [(False, "409", "")], 17: [(False, "409", "")], 15: [(False, "409", "")],
+        })
+        self.assertIn("s19", reg)
+        self.assertTrue(res["s19"][0], "porażka wolniejszej kopii nadpisała zwycięstwo szybszej")
+
+    def test_hedge_off_changes_nothing(self):
+        _res, _reg, _cfg, _out = self.odpal({h: [(False, "409", "")] * 3
+                                             for h in (15, 17, 18, 19)}, hedge=1)
+        self.assertEqual(sorted(self.proby), [15, 17, 18, 19])
+
+    def test_copies_start_together_not_staggered(self):
+        """Kopie mają być RÓWNOCZESNYMI losowaniami — odstęp rozsunąłby je bez sensu."""
+        starty = []
+
+        def fake_register(slot, price, local_cfg, speculative=False):
+            if slot["start_utc"].hour == 19:
+                starty.append(time.monotonic())
+            time.sleep(0.03)
+            return False, "409"
+
+        with mock.patch.object(cp, "register_slot", side_effect=fake_register), \
+                mock.patch("sys.stdout", io.StringIO()):
+            cp.auto_register_new_slots(self.slots(15, 17, 18, 19), {},
+                                       self.cfg(hedge=3, salvo=4, stagger=40), set())
+        self.assertEqual(len(starty), 3)
+        self.assertLess(max(starty) - min(starty), 0.02,
+                        "kopie dostały odstęp, choć mają startować razem")
+
+    def test_the_second_copy_simply_loses_the_seat(self):
+        """Dlaczego nie ma obrony przed podwójną rezerwacją: limit miejsc wynosi 1.
+
+        Gdy jedna kopia zapisze się skutecznie, druga z definicji dostaje 409 — serwer
+        nie ma czego jej przydzielić. Zostaje tylko poprawne scalenie dwóch odpowiedzi
+        na ten sam identyfikator (lepki sukces), co pilnuje osobny test.
+        """
+        res, reg, cfg, _out = self.odpal({
+            19: [(True, "OK", "tx19"), (False, "No available seats", "")],
+            18: [(False, "409", "")], 17: [(False, "409", "")], 15: [(False, "409", "")],
+        })
+        self.assertEqual(reg, {"s19"})
+        self.assertTrue(res["s19"][0])
+        self.assertEqual(self.cancelled, [], "nic nie powinno być anulowane")
+        # Obie kopie zostają w dzienniku — to one są pomiarem rozrzutu.
+        # (Etykieta `when` jest w czasie LOKALNYM, więc porównujemy po znaczniku kopii,
+        # a nie po godzinie — inaczej test zależałby od strefy maszyny.)
+        kopie = [s for s in cfg["shots"] if s["hedge"]]
+        self.assertEqual(len(kopie), 2, "obie kopie muszą zostać w dzienniku")
+        self.assertEqual(len({s["when"] for s in kopie}), 1, "kopie dotyczą jednej godziny")
+        self.assertEqual(sorted(s["ok"] for s in kopie), [False, True])

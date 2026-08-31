@@ -14,6 +14,7 @@ Tylko biblioteka standardowa — brak zależności (działa w GitHub Actions bez
 
 import gzip
 import base64
+import collections
 import concurrent.futures
 import http.client
 import io
@@ -1704,6 +1705,19 @@ AGGRESSIVE_INTERVAL_SECONDS = 5  # poniżej tego logujemy ostrzeżenie
 # dziś jako czwarty, czyli ~350 ms po pierwszym — i w tym oknie ginęły wieczorne
 # godziny. Salwa wysyła najbardziej pożądane terminy naraz.
 SALVO_MAX = 6
+
+# STRZAŁ REDUNDANTNY: ile równoległych zapisów w NAJCENNIEJSZY termin.
+#
+# Czas przetwarzania zapisu przez serwer skacze losowo: 61, 62, 63, 71, 115, 150, 157,
+# 178, 188, 236, 251, 730 ms — bez związku z czymkolwiek, co robimy (31.08 samotny
+# strzał na danych sprzed 1 ms trwał 730 ms). Skoro to loteria, jedno losowanie można
+# zamienić na minimum z kilku: dwa równoległe zapisy w ten sam termin, liczy się ten,
+# który wróci pierwszy. Ten sam termin trafiony dwukrotnie dawał już 62 i 251 ms
+# (30.08, 12:00) oraz 700 i 68 ms (25.08, 20:00) — rozrzut jest ogromny.
+#
+# Dotyczy WYŁĄCZNIE czołowego celu. Rozciąganie tego na całą salwę mnożyłoby ryzyko
+# podwójnej rezerwacji bez żadnych danych, że pomaga — to osobny eksperyment.
+HEDGE_MAX = 3
 _salvo_pool = None
 
 
@@ -1715,8 +1729,11 @@ def salvo_pool(size):
     """
     global _salvo_pool
     if _salvo_pool is None:
+        # Miejsce także na kopie czołowego strzału. Gdyby pula była mniejsza,
+        # kopie czekałyby w KOLEJCE PULI zamiast lecieć równolegle — czyli dokładnie
+        # odwrotnie, niż wymaga eksperyment.
         _salvo_pool = concurrent.futures.ThreadPoolExecutor(
-            max_workers=SALVO_MAX, thread_name_prefix="salwa")
+            max_workers=SALVO_MAX + HEDGE_MAX - 1, thread_name_prefix="salwa")
     return _salvo_pool
 
 
@@ -1790,7 +1807,7 @@ def fmt_shot(res):
 SALVO_STAGGER_MS = 8
 
 
-def fire_salvo(targets, listing_price_by_id, cfg, speculative, size):
+def fire_salvo(targets, listing_price_by_id, cfg, speculative, size, ranks=None):
     """Wysyła próby rejestracji równolegle, w kolejności preferencji.
 
     Każdy wątek dostaje własną kopię cfg — inaczej odświeżenie tokenu w jednym
@@ -1798,6 +1815,10 @@ def fire_salvo(targets, listing_price_by_id, cfg, speculative, size):
 
     `targets` są już posortowane wg `auto_register_order`, więc indeks 0 to termin
     najbardziej pożądany — i to on dostaje przewagę, gdy odstęp jest włączony.
+
+    `ranks` pozwala rozdzielić POZYCJĘ W KOLEJCE od pozycji na liście: kopie tego samego
+    terminu (strzał redundantny) mają tę samą rangę, więc startują razem, a nie
+    schodkowo. Bez tego odstęp rozsuwałby losowania, które mają być równoczesne.
     """
     fired = targets[:size]
     try:
@@ -1840,7 +1861,8 @@ def fire_salvo(targets, listing_price_by_id, cfg, speculative, size):
                 "token": local.get("token") or ""}
 
     pool = salvo_pool(size)
-    return list(pool.map(strzal, enumerate(fired)))
+    pary = list(zip(ranks, fired)) if ranks else list(enumerate(fired))
+    return list(pool.map(strzal, pary))
 
 
 # --------------------------------------------------------- pomiar opóźnienia
@@ -2052,6 +2074,9 @@ def remote_payload(listing_url, baseline_ids, tz_name, seconds, threads, reg_cfg
         # Bez tego wyłącznik strzału czołowego działałby tylko lokalnie, a w sekundzie
         # publikacji strzela WŁAŚNIE Irlandia — czyli nie działałby wcale.
         "lead": boolish(reg_cfg.get("lead")),
+        # Strzał redundantny musi działać po TEJ stronie, która naprawdę strzela
+        # w sekundzie publikacji — czyli w Irlandii.
+        "hedge": reg_cfg.get("hedge") or 1,
         "max_per_run": reg_cfg.get("max_per_run") or 1,
         "order": reg_cfg.get("order") or "earliest",
         "name": reg_cfg.get("name") or "",
@@ -2164,13 +2189,23 @@ def auto_register_new_slots(slots, listing_price_by_id, cfg, already_registered)
         queue = queue[salvo:]
         opis = ", ".join(fmt_when(s["start_utc"].astimezone(_log_tz()), short=True) for s in fired)
         czolowy = boolish(cfg.get("lead")) and len(fired) > 1
+        try:
+            kopie = max(1, min(int(cfg.get("hedge") or 1), HEDGE_MAX))
+        except (TypeError, ValueError):
+            kopie = 1
         if czolowy:
             log(f"⇉ Strzał czołowy: {fmt_when(fired[0]['start_utc'].astimezone(_log_tz()), short=True)} "
                 f"sam, potem salwa w resztę ({opis})")
+        elif kopie > 1:
+            log(f"⇉ Salwa: {len(fired)} prób równolegle, w tym "
+                f"{fmt_when(fired[0]['start_utc'].astimezone(_log_tz()), short=True)} "
+                f"×{kopie} równolegle ({opis})")
         else:
             log(f"⇉ Salwa: {len(fired)} prób równolegle ({opis})" if len(fired) > 1
                 else f"⇉ Strzał z rozgrzanego wątku ({opis})")
         wins, auth_error = [], None
+        ile_kopii = collections.Counter(s["id"] for s in fired) if kopie == 1 else \
+            collections.Counter([fired[0]["id"]] * kopie + [s["id"] for s in fired[1:]])
         if czolowy:
             # HIPOTEZA OBALONA 31.08 — zostawione wyłącznie jako wyłączony wyłącznik.
             #
@@ -2192,6 +2227,13 @@ def auto_register_new_slots(slots, listing_price_by_id, cfg, already_registered)
             for res in wyniki:
                 cfg["token"] = newer_decathlon_token(cfg.get("token") or "", res.get("token") or "")
             wyniki += fire_salvo(fired[1:], listing_price_by_id, cfg, speculative, salvo - 1)
+        elif kopie > 1:
+            # Czołowy cel dostaje `kopie` równoległych zapisów o TEJ SAMEJ randze,
+            # więc wszystkie ruszają razem; reszta salwy leci obok bez zmian.
+            strzaly = [fired[0]] * kopie + fired[1:]
+            rangi = [0] * kopie + list(range(1, len(fired)))
+            wyniki = fire_salvo(strzaly, listing_price_by_id, cfg, speculative,
+                                len(strzaly), ranks=rangi)
         else:
             wyniki = fire_salvo(fired, listing_price_by_id, cfg, speculative, salvo)
         # Któryś wątek mógł odnowić token po HTTP 401 (pracował na kopii cfg).
@@ -2204,8 +2246,17 @@ def auto_register_new_slots(slots, listing_price_by_id, cfg, already_registered)
             when = fmt_when(slot["start_utc"].astimezone(_log_tz()), short=True)
             cfg["shots"].append({"when": when, "ok": bool(res["ok"]), "ms": ms,
                                  "start_ms": res.get("start_ms", 0),
-                                 "seen_ms": res.get("seen_ms"), "salwa": True})
-            results[slot["id"]] = (res["ok"], msg)
+                                 "seen_ms": res.get("seen_ms"), "salwa": True,
+                                 "hedge": ile_kopii.get(slot["id"], 1) > 1})
+            # Przy strzale redundantnym dwie odpowiedzi dotyczą tego samego terminu:
+            # jedna kopia dostaje 409, druga wygrywa. Sukces MUSI być lepki, inaczej
+            # wolniejsza porażka nadpisałaby zwycięstwo i powiadomienie skłamałoby,
+            # że termin przepadł.
+            #
+            # Podwójnej rezerwacji NIE bronimy — limit miejsc w terminie wynosi 1, więc
+            # gdy jedna kopia zapisze się skutecznie, druga z definicji dostaje 409.
+            if not (results.get(slot["id"]) or (False,))[0]:
+                results[slot["id"]] = (res["ok"], msg)
             if res["ok"]:
                 wins.append(res)
             elif any(m in msg for m in AUTH_FAILURE_MARKERS):
@@ -2486,6 +2537,7 @@ def build_reg_cfg(cfg, state_doc):
         "max_per_run": os.environ.get("AUTO_REGISTER_MAX") or cfg.get("auto_register_max") or 1,
         "order": os.environ.get("AUTO_REGISTER_ORDER") or cfg.get("auto_register_order") or "earliest",
         "salvo": os.environ.get("AUTO_REGISTER_SALVO") or cfg.get("auto_register_salvo") or 0,
+        "hedge": os.environ.get("AUTO_REGISTER_HEDGE") or cfg.get("auto_register_hedge") or 1,
         # DOMYŚLNIE WYŁĄCZONY — hipoteza obalona 31.08, patrz komentarz przy strzale
         # czołowym w `auto_register_new_slots`.
         "lead": os.environ.get("AUTO_REGISTER_LEAD") or cfg.get("auto_register_lead", False),
@@ -2773,6 +2825,12 @@ def main():
     # Salwa: ile prób rejestracji wysyłać naraz i pod jakim adresem rozgrzewać połączenia.
     try:
         salvo_size = max(0, min(int(os.environ.get("AUTO_REGISTER_SALVO") or 0), SALVO_MAX))
+        try:
+            hedge_size = max(1, min(int(os.environ.get("AUTO_REGISTER_HEDGE") or 1), HEDGE_MAX))
+        except (TypeError, ValueError):
+            hedge_size = 1
+        # Ile gniazd musi być ciepłych: cała salwa plus dodatkowe kopie czołowego celu.
+        warm_size = min(salvo_size + hedge_size - 1, SALVO_MAX + HEDGE_MAX - 1)
     except ValueError:
         salvo_size = 0
     warm_url = ""
@@ -2838,8 +2896,7 @@ def main():
                 if warm_url and (salvo_size > 1 or sprint):
                     warmed = time.monotonic()
                     if salvo_size > 1:
-                        warm_connections(salvo_pool(salvo_size),
-                                         min(salvo_size, SALVO_MAX), warm_url)
+                        warm_connections(salvo_pool(warm_size), warm_size, warm_url)
                     # Sprint ma WŁASNĄ pulę, więc jej połączenia trzeba rozgrzać osobno —
                     # inaczej pierwsze sekundy sprintu zjadłoby uzgadnianie TLS.
                     if sprint:
@@ -2901,8 +2958,7 @@ def main():
                 # Sprint swojej puli nie potrzebuje: zaraz zacznie pobierać bez przerw.
                 if salvo_size > 1:
                     odswiezone = time.monotonic()
-                    warm_connections(salvo_pool(salvo_size),
-                                     min(salvo_size, SALVO_MAX), warm_url)
+                    warm_connections(salvo_pool(warm_size), warm_size, warm_url)
                     log(f"⇉ Salwa odświeżona przed sprintem "
                         f"[{int((time.monotonic() - odswiezone) * 1000)} ms]")
             szukanie = time.monotonic()

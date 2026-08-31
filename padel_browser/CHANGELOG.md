@@ -1,5 +1,48 @@
 # Changelog
 
+## 0.19.0 — strzał redundantny w najcenniejszy termin
+
+Wniosek z pomiaru wieku danych (0.18.0) był taki, że wykrywanie i wysyłka są już na
+podłodze: strzał rusza 1–2 ms po zobaczeniu grafiku. Cała zmienność siedzi w czasie,
+w jakim serwer przetwarza nasz zapis — i jest to **loteria**:
+
+```
+61, 62, 63, 71, 115, 150, 157, 178, 188, 236, 251, 730 ms
+```
+
+Ten sam termin trafiony dwukrotnie dawał 62 i 251 ms (30.08, 12:00) oraz 700 i 68 ms
+(25.08, 20:00). Jednego losowania nie da się przyspieszyć — ale można wziąć **minimum
+z kilku**.
+
+- **`auto_register_hedge` (domyślnie 2, maks. 3)** — tyle równoległych zapisów leci
+  w najcenniejszy termin; liczy się ten, który wróci pierwszy.
+- Kopie mają tę samą **rangę**, więc odstęp salwy ich nie rozsuwa. Muszą być
+  równoczesnymi losowaniami, inaczej pomiar nie znaczy nic.
+- Pula wątków urosła do `SALVO_MAX + HEDGE_MAX - 1` (8). Przy starych sześciu kopie
+  czekałyby w **kolejce puli** zamiast lecieć równolegle — czyli dokładnie odwrotnie,
+  niż wymaga eksperyment. Rozgrzewanie połączeń obejmuje teraz też te dodatkowe gniazda.
+- Dotyczy **wyłącznie czołowego celu.** Rozciąganie na całą salwę mnożyłoby ryzyko
+  podwójnej rezerwacji bez danych, że pomaga.
+- Ustawienie jedzie do Irlandii — to ona strzela w sekundzie publikacji.
+
+### Dlaczego nie ma obrony przed podwójną rezerwacją
+
+Bo podwójna rezerwacja nie jest możliwa: **limit miejsc w terminie wynosi 1**, więc gdy
+jedna kopia zapisze się skutecznie, druga z definicji dostaje 409. Zbudowałem najpierw
+anulowanie dubletu — niepotrzebnie, a był to najbardziej ryzykowny fragment całej zmiany,
+bo przy pomyłce anulowałby prawdziwą rezerwację. Został usunięty.
+
+Zostaje jedna rzecz, i nie dotyczy ona dubletów tylko scalania dwóch odpowiedzi na ten
+sam identyfikator: **sukces jest lepki.** Porażka wolniejszej kopii nie nadpisuje
+zwycięstwa szybszej — inaczej powiadomienie skłamałoby, że termin przepadł.
+
+### Drobne
+
+- Dziennik oznacza kopie znacznikiem `⧉` przy godzinie. Bez tego identyczne wpisy
+  wyglądałyby na błąd zamiast na celowy strzał.
+- Potwierdzone z logu 31.08 (`8 dostępnych, 2 pasujących do filtra`): dobór celów działa
+  poprawnie — w poniedziałek tylko dwa terminy przeszły przez filtr `16:00+`.
+
 ## 0.18.1 — strzał czołowy obalony po jednym dniu, domyślnie wyłączony
 
 Eksperyment z 0.18.0 dostał odpowiedź przy pierwszej publikacji i jest to odpowiedź
