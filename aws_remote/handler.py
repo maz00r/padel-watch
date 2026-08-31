@@ -155,7 +155,7 @@ def poluj(wejscie):
             # Strzał czołowy musi działać TAK SAMO po obu stronach — inaczej zapas
             # lokalny testowałby inną hipotezę niż Irlandia i porównanie logów
             # przestałoby cokolwiek znaczyć.
-            "lead": wejscie.get("lead", True),
+            "lead": wejscie.get("lead", False),
             # Punkt zerowy wieku danych: chwila, w której sprint dostał grafik.
             # Zegar monotoniczny jest lokalny dla tego procesu, więc różnica
             # liczona TUTAJ jest poprawna — do domu jedzie już gotowa liczba w ms.

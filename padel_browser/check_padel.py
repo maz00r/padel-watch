@@ -2172,16 +2172,22 @@ def auto_register_new_slots(slots, listing_price_by_id, cfg, already_registered)
                 else f"⇉ Strzał z rozgrzanego wątku ({opis})")
         wins, auth_error = [], None
         if czolowy:
-            # HIPOTEZA (28.08): serwer obsługuje zapisy do tego kortu po kolei. W salwie
-            # z 25.08 cztery strzały ruszyły razem (start +0/+0/+8/+16 ms), a wróciły po
-            # 84 / 700 / 800 / 725 ms — równoległe żądania nie różnią się dziesięciokrotnie,
-            # jeśli nic ich nie blokuje. Pierwszy w kolejce dostaje 84 ms i wygrywa; reszta
-            # czeka i przegrywa. Skoro tak, to sami spychaliśmy najcenniejszą godzinę na
-            # koniec własnej kolejki, strzelając w nią razem z pięcioma innymi.
+            # HIPOTEZA OBALONA 31.08 — zostawione wyłącznie jako wyłączony wyłącznik.
             #
-            # Test: najpożądańszy termin idzie SAM i PIERWSZY, reszta zaraz po nim.
-            # Obalenie: czołowy wraca po ~700 ms albo przegrywa mimo ~80 ms.
-            # Koszt, gdyby hipoteza padła: reszta salwy startuje o jeden zapis później.
+            # Zakładaliśmy (28.08), że serwer kolejkuje zapisy do kortu, a my sami
+            # spychamy najcenniejszą godzinę na koniec WŁASNEJ kolejki, strzelając w nią
+            # razem z pięcioma innymi. Podstawą była salwa z 25.08: start +0/+0/+8/+16 ms,
+            # powrót po 84 / 700 / 800 / 725 ms.
+            #
+            # Test 31.08 rozstrzygnął przeciwnie. Czołowy strzał w 19:00 poszedł SAM,
+            # na danych sprzed 1 ms — i trwał 730 ms. Przy zerowej konkurencji z naszej
+            # strony. Kolejka nie jest więc nasza, tylko serwera, i dostajemy ją tak samo
+            # przy jednym strzale jak przy sześciu.
+            #
+            # Co gorsza, kosztowało to drugi strzał: 17:00 ruszyło na danych sprzed
+            # 732 ms, bo czekało na czołowego. Mediany po dwóch dniach: strzał samotny
+            # 251 ms, strzał z salwy 157 ms — samotność NIE skraca zapisu, tylko psuje
+            # świeżość informacji dla reszty.
             wyniki = fire_salvo(fired[:1], listing_price_by_id, cfg, speculative, 1)
             for res in wyniki:
                 cfg["token"] = newer_decathlon_token(cfg.get("token") or "", res.get("token") or "")
@@ -2480,7 +2486,9 @@ def build_reg_cfg(cfg, state_doc):
         "max_per_run": os.environ.get("AUTO_REGISTER_MAX") or cfg.get("auto_register_max") or 1,
         "order": os.environ.get("AUTO_REGISTER_ORDER") or cfg.get("auto_register_order") or "earliest",
         "salvo": os.environ.get("AUTO_REGISTER_SALVO") or cfg.get("auto_register_salvo") or 0,
-        "lead": os.environ.get("AUTO_REGISTER_LEAD") or cfg.get("auto_register_lead", True),
+        # DOMYŚLNIE WYŁĄCZONY — hipoteza obalona 31.08, patrz komentarz przy strzale
+        # czołowym w `auto_register_new_slots`.
+        "lead": os.environ.get("AUTO_REGISTER_LEAD") or cfg.get("auto_register_lead", False),
         "stagger": os.environ.get("AUTO_REGISTER_STAGGER")
                    or cfg.get("auto_register_stagger", SALVO_STAGGER_MS),
     }

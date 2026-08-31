@@ -59,7 +59,7 @@ przechodzisz normalne logowanie, łącznie z kodem z maila.
 | `auto_register_paid` | pozwól tworzyć transakcje także dla płatnych terminów; płatność nadal trzeba dokończyć ręcznie | `false` |
 | `auto_register_max` | ile terminów maksymalnie zapisać w jednym przebiegu (0–10); `0` = nic | `1` |
 | `auto_register_order` | kolejność prób: `earliest` (od najwcześniejszego) lub `latest` (od najpóźniejszego) | `latest` |
-| `auto_register_lead` | najcenniejszy termin leci **sam i pierwszy**, reszta salwy zaraz po nim | `true` |
+| `auto_register_lead` | najcenniejszy termin leci sam i pierwszy (**hipoteza obalona 31.08 — trzymaj wyłączone**) | `false` |
 | `auto_register_salvo` | ile prób rejestracji wysyłać **równolegle** (0–6); `0`/`1` = po kolei, jak dawniej | `6` |
 | `auto_register_stagger` | odstęp w ms między strzałami salwy (0–100); `0` = wszystkie naraz | `8` |
 | `test_token` | jednorazowy test poświadczeń przy starcie (nic nie rezerwuje) | `false` |
@@ -126,36 +126,28 @@ dnie, a co `check_interval` (np. 300 s) w pozostałych porach. Puste = zawsze `c
 Minimum 2 s (niższa wartość jest podbijana, z wpisem w logu; poniżej 5 s logowane jest
 ostrzeżenie — używaj tylko w wąskich oknach, bo grozi blokadą po IP). Zmiana interwału jest logowana (`⏱ aktualny interwał: ...`).
 
-## Dlaczego strzał czołowy
+## Strzał czołowy — hipoteza obalona
 
-Dziennik z 25.08 pokazał cztery strzały, które ruszyły **w tej samej chwili**
-(`start +0 / +0 / +8 / +16 ms`) i wróciły po **84 / 700 / 800 / 725 ms**. Równoległe
-żądania nie różnią się dziesięciokrotnie, jeśli nic ich nie blokuje. Najprostsze
-wyjaśnienie: serwer obsługuje zapisy do tego kortu **po kolei**. Pierwszy w kolejce
-dostaje 84 ms i wygrywa, reszta czeka i przegrywa.
+Dziennik z 25.08 pokazał cztery strzały, które ruszyły w tej samej chwili
+(`start +0 / +0 / +8 / +16 ms`) i wróciły po **84 / 700 / 800 / 725 ms**. Wyglądało to
+na kolejkę po stronie serwera, w której sami spychamy najcenniejszą godzinę na koniec —
+strzelając w nią razem z pięcioma innymi terminami. Stąd `auto_register_lead`:
+najpożądańszy termin miał iść sam i pierwszy.
 
-Jeśli to prawda, salwa w sześć terminów naraz spychała najcenniejszą godzinę na koniec
-**naszej własnej** kolejki. Dlatego `auto_register_lead` puszcza najpożądańszy termin
-sam i pierwszy, a resztę zaraz po nim.
+**Pierwsza publikacja po włączeniu (31.08) obaliła to jednoznacznie:**
 
-Dane, na których to stoi (tylko terminy z publikacji, 24–28.08):
+```
+pon 07.09 19:00 ✗ +0 ms → 730 ms (dane sprzed 1 ms)
+pon 07.09 17:00 ✗ +0 ms → 188 ms (dane sprzed 732 ms)
+```
 
-| godzina | wygrane | przegrane |
-|---------|---------|-----------|
-| 20:00 | 0 | 5 |
-| 19:00 | 0 | 3 |
-| 18:00 | 2 | 1 |
-| 17:00 | 1 | 0 |
-| 15:00 | 4 | 0 |
+Czołowy strzał poszedł sam, na danych sprzed 1 ms — i trwał 730 ms. Przy zerowej
+konkurencji z naszej strony. Kolejka nie jest nasza. A drugi strzał zapłacił za
+czekanie: ruszył na informacji starszej o 732 ms.
 
-Czasy strzałów nie mają tu żadnej mocy przewidywania: **74 ms przegrało 20:00, a 992 ms
-wygrało 15:00.** Przegrywamy nie z prędkością rywala, tylko z liczbą chętnych na daną
-godzinę — a gradient jest idealnie monotoniczny.
+Mediany: strzał samotny **251 ms** (n=4), strzał z salwy **157 ms** (n=8).
+Opcja jest **domyślnie wyłączona** i taka ma zostać.
 
-**Jak sprawdzić, czy hipoteza się broni:** w Dzienniku, w linii `Strzały:`, czołowy
-termin powinien wracać w ~80–150 ms zamiast ~700 ms. Jeśli wraca po 700 ms albo
-przegrywa mimo 80 ms — hipoteza jest obalona, a `auto_register_lead: false` wraca do
-strzelania wszystkim naraz.
 
 ## Wiek danych w Dzienniku
 

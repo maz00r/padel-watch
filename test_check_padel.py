@@ -3523,3 +3523,36 @@ class DataAgeTest(SalvoHelpers, unittest.TestCase):
 
     def test_shot_description_stays_readable_without_the_age(self):
         self.assertEqual(cp.fmt_shot({"ms": 74, "start_ms": 0}), "start +0 ms, 74 ms")
+
+
+class LeadShotDisabledByDefaultTest(SalvoHelpers, unittest.TestCase):
+    """31.08 obaliło hipotezę o kolejce po naszej stronie — strzał czołowy ma być WYŁĄCZONY.
+
+    Czołowy strzał w 19:00 poszedł sam, na danych sprzed 1 ms, i trwał 730 ms. Skoro
+    samotność nie skróciła zapisu, kolejka nie jest nasza. A drugi strzał zapłacił za
+    czekanie: 17:00 ruszyło na danych sprzed 732 ms zamiast ~1 ms.
+    """
+
+    def test_default_is_off(self):
+        self.assertFalse(cp.boolish(cp.build_reg_cfg({}, None)["lead"]))
+
+    def test_default_config_really_fires_everything_at_once(self):
+        """Sam domyślny wpis to za mało — liczy się, czy strzały naprawdę lecą razem."""
+        starty = {}
+
+        def fake_register(slot, price, local_cfg, speculative=False):
+            starty[slot["start_utc"].hour] = time.monotonic()
+            time.sleep(0.05)
+            return False, "409"
+
+        cfg = self.cfg()
+        cfg.pop("lead", None)          # dokładnie to, co daje domyślna konfiguracja
+        with mock.patch.object(cp, "register_slot", side_effect=fake_register), \
+                mock.patch("sys.stdout", io.StringIO()):
+            cp.auto_register_new_slots(self.slots(15, 17, 18, 19), {}, cfg, set())
+        rozrzut = max(starty.values()) - min(starty.values())
+        self.assertLess(rozrzut, 0.04, "strzały rozjechały się w czasie — czołowy wciąż działa")
+
+    def test_the_switch_still_works_for_a_repeat_experiment(self):
+        """Wyłącznik zostaje: gdyby kiedyś trzeba było powtórzyć pomiar."""
+        self.assertTrue(cp.boolish(cp.build_reg_cfg({"auto_register_lead": True}, None)["lead"]))

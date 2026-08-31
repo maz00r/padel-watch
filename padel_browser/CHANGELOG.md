@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.18.1 — strzał czołowy obalony po jednym dniu, domyślnie wyłączony
+
+Eksperyment z 0.18.0 dostał odpowiedź przy pierwszej publikacji i jest to odpowiedź
+przecząca. **Wpis z 31.08:**
+
+```
+pon 07.09 19:00 ✗ +0 ms → 730 ms (dane sprzed 1 ms)
+pon 07.09 17:00 ✗ +0 ms → 188 ms (dane sprzed 732 ms)
+```
+
+- **Czołowy strzał poszedł SAM, na danych sprzed 1 ms — i trwał 730 ms.** Przy zerowej
+  konkurencji z naszej strony. Gdyby kolejka była nasza, samotny zapis musiał wrócić
+  w ~100 ms. Kolejkowanie jest po stronie serwera i dostajemy je tak samo przy jednym
+  strzale, jak przy sześciu. Hipoteza z 0.18.0 upadła.
+- **Co gorsza, kosztowało to drugi strzał.** 17:00 czekało na czołowego i ruszyło na
+  danych sprzed **732 ms** zamiast ~1 ms. Sami zestarzyliśmy sobie informację o 731 ms.
+- **Mediany po dwóch dniach:** strzał samotny **251 ms** (n=4), strzał z salwy
+  **157 ms** (n=8). Samotność nie skraca zapisu — pogarsza świeżość danych dla reszty.
+- `auto_register_lead` jest teraz **domyślnie wyłączony**. Wyłącznik zostaje, gdyby
+  kiedyś trzeba było powtórzyć pomiar.
+
+**UWAGA przy aktualizacji:** Home Assistant NIE nadpisuje zapisanych opcji nowymi
+wartościami domyślnymi. Jeśli masz w konfiguracji dodatku `auto_register_lead: true`,
+**musisz przestawić to ręcznie na `false`** — sama aktualizacja tego nie zrobi.
+
+### Co zostaje z tego eksperymentu
+
+Pomiar wieku danych, i to on jest tu prawdziwym zyskiem. Pokazał coś, czego nie
+wiedzieliśmy: **nasza informacja jest praktycznie idealna.** Czołowy strzał miał dane
+sprzed 1 ms. Nie przegrywamy dlatego, że patrzymy na stary grafik, ani dlatego, że
+zwlekamy z zapisem. Przegrywamy w środku przetwarzania naszego zapisu przez serwer,
+które trwa od 61 do 730 ms bez związku z czymkolwiek, co robimy.
+
+To zamyka całą klasę „przyspieszmy się" — wykrywanie i wysyłka są już na podłodze.
+
 ## 0.18.0 — strzał czołowy i wiek danych
 
 Wpis powstał z pięciu dni Dziennika (24–28.08), po odrzuceniu hipotezy, że serwer
