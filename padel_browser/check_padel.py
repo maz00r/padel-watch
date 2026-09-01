@@ -733,6 +733,11 @@ def record_hunt(now_local, tz, new_slots, wyniki, shots, grid, zdalnie, topic):
 
 def skroc_powod(msg):
     """Powód porażki w jednym słowie — dziennik ma być czytelny, nie kompletny."""
+    # KOLEJNOŚĆ MA ZNACZENIE: własny dublet też niesie „409", więc musi być sprawdzony
+    # PRZED ogólnym warunkiem. Inaczej dzień, w którym termin jest nasz, trafiałby do
+    # dziennika jako przegrany wyścig — i odpalał alarm „żadna rezerwacja się nie udała".
+    if WLASNA_REZERWACJA in msg:
+        return POWOD_JUZ_NASZE
     if "No available seats" in msg or "409" in msg:
         return "zajęty (409)"
     for marker in AUTH_FAILURE_MARKERS:
@@ -750,8 +755,11 @@ def hunt_alert_reason(wpis):
     if wpis.get("aligned") is False and wpis.get("first_seen"):
         return (f"Publikacja o {wpis['first_seen']} wypadła POZA zrywem "
                 f"({wpis['burst']}) — przesuń okna w konfiguracji dodatku.")
-    if not wpis["registered"] and wpis["failed"]:
-        return (f"Żadna rezerwacja się nie udała ({len(wpis['failed'])} prób) — "
+    # „Miejsce już nasze" NIE jest porażką — to odbita kopia strzału redundantnego albo
+    # ponowienie na termin, który już mamy. Alarm ma krzyczeć o przegranych wyścigach.
+    realne = [f for f in wpis["failed"] if f.get("why") != POWOD_JUZ_NASZE]
+    if not wpis["registered"] and realne:
+        return (f"Żadna rezerwacja się nie udała ({len(realne)} prób) — "
                 f"sprawdź Dziennik.")
     return ""
 
@@ -1683,6 +1691,16 @@ def reservations_ics(reservations, calname="Padel", alarm_minutes=60, method="PU
     return "\r\n".join(_ics_fold(l) for l in lines) + "\r\n"
 
 
+# Odpowiedź serwera, gdy miejsce jest JUŻ NASZE. Przy strzale redundantnym dostaje ją
+# każda kopia poza zwycięską — to nie jest przegrany wyścig, tylko oczekiwany koniec
+# drugiego losowania. Rywal zajmujący termin daje inny komunikat („No available seats").
+# Mylenie tych dwóch zamieniałoby każdy hedgowany dzień w fałszywy alarm.
+WLASNA_REZERWACJA = "Booking is already exists"
+# Etykieta w dzienniku. Wydzielona, bo `hunt_alert_reason` musi umieć odróżnić ją od
+# prawdziwej porażki — inaczej alarm „żadna rezerwacja się nie udała" odpalałby w dniu,
+# w którym termin trzymamy w kieszeni.
+POWOD_JUZ_NASZE = "miejsce już nasze"
+
 AUTH_FAILURE_MARKERS = ("token odrzucony", "brak tokenu", "nie udało się odświeżyć tokenu",
                         "w panelu Padel")  # komunikaty trybu przeglądarki (scalony dodatek)
 # Odśwież JWT, gdy zostało mniej niż tyle sekund ważności. Musi być WYRAŹNIE większe
@@ -2259,6 +2277,9 @@ def auto_register_new_slots(slots, listing_price_by_id, cfg, already_registered)
                 results[slot["id"]] = (res["ok"], msg)
             if res["ok"]:
                 wins.append(res)
+            elif WLASNA_REZERWACJA in msg:
+                # Oczekiwany koniec drugiego losowania — bez „!", bo to nie jest kłopot.
+                log(f"= Kopia strzału w {when} odbita: miejsce już nasze [{fmt_shot(res)}]")
             elif any(m in msg for m in AUTH_FAILURE_MARKERS):
                 auth_error = auth_error or msg
                 log(f"! Salwa: {when} — {msg} [{fmt_shot(res)}]")
@@ -2341,7 +2362,10 @@ def auto_register_new_slots(slots, listing_price_by_id, cfg, already_registered)
             log(f"! Auto-rejestracja przerwana ({msg}). "
                 f"Zapamiętano do ponowienia: {', '.join(waiting)}.")
             return results, registered
-        log(f"! Auto-rejestracja nieudana dla {when}: {msg} [{took_ms} ms]")
+        if WLASNA_REZERWACJA in msg:
+            log(f"= Strzał w {when} odbity: miejsce już nasze [{took_ms} ms]")
+        else:
+            log(f"! Auto-rejestracja nieudana dla {when}: {msg} [{took_ms} ms]")
 
     if skipped:
         log(f"= Auto-rejestracja: limit {limit}/przebieg wykorzystany; "

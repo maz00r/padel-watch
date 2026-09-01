@@ -3656,3 +3656,53 @@ class HedgedShotTest(SalvoHelpers, unittest.TestCase):
         self.assertEqual(len(kopie), 2, "obie kopie muszą zostać w dzienniku")
         self.assertEqual(len({s["when"] for s in kopie}), 1, "kopie dotyczą jednej godziny")
         self.assertEqual(sorted(s["ok"] for s in kopie), [False, True])
+
+
+class OwnDuplicateIsNotALostRaceTest(SalvoHelpers, unittest.TestCase):
+    """Odbita kopia to nie przegrana. Log z 01.09:
+
+        ! Auto-rejestracja nieudana dla wt 08.09 19:00: HTTP 409 "Booking is already exists"
+
+    Termin był NASZ — to nasza druga kopia odbiła się od naszej własnej rezerwacji.
+    Serwer używa innego komunikatu, gdy zajmuje go ktoś inny („No available seats"),
+    więc te dwie sytuacje da się rozróżnić. Mylenie ich zamieniłoby każdy hedgowany
+    dzień w fałszywy alarm „żadna rezerwacja się nie udała".
+    """
+
+    DUBLET = 'Decathlon HTTP 409: {"error":"Error","message":"Booking is already exists"}'
+    RYWAL = 'Decathlon HTTP 409: {"error":"Error","message":"No available seats"}'
+
+    def test_own_duplicate_is_labelled_as_ours(self):
+        self.assertEqual(cp.skroc_powod(self.DUBLET), "miejsce już nasze")
+
+    def test_a_real_lost_race_is_still_a_lost_race(self):
+        self.assertEqual(cp.skroc_powod(self.RYWAL), "zajęty (409)")
+
+    def test_own_duplicate_is_not_shouted_about(self):
+        """Ostrzeżenie, które przychodzi codziennie, przestaje być czytane."""
+        with mock.patch.object(cp, "register_slot",
+                               side_effect=[(True, "accepted"), (False, self.DUBLET)]), \
+                mock.patch("sys.stdout", io.StringIO()) as buf:
+            cp.auto_register_new_slots(self.slots(19), {}, self.cfg(hedge=2, salvo=4), set())
+            out = buf.getvalue()
+        self.assertIn("miejsce już nasze", out)
+        self.assertNotIn("Auto-rejestracja nieudana", out)
+
+    def test_a_day_we_actually_hold_does_not_raise_the_alarm(self):
+        """SEDNO: gdyby dublet liczył się jako przegrana, dziennik krzyczałby o dniu,
+        w którym termin mamy w kieszeni."""
+        cichy = cp.hunt_alert_reason({"registered": [], "failed": [
+            {"when": "wt 08.09 19:00", "why": cp.skroc_powod(self.DUBLET)}],
+            "aligned": True, "first_seen": "11:00:37"})
+        self.assertEqual(cichy, "", "alarm o dniu, w którym termin jest nasz")
+        # Prawdziwa przegrana nadal ma krzyczeć — nie stępiamy alarmu.
+        glosny = cp.hunt_alert_reason({"registered": [], "failed": [
+            {"when": "wt 08.09 19:00", "why": cp.skroc_powod(self.RYWAL)}],
+            "aligned": True, "first_seen": "11:00:37"})
+        self.assertIn("Żadna rezerwacja się nie udała", glosny)
+        # Mieszanka: liczymy tylko realne porażki, nie odbite kopie.
+        mieszane = cp.hunt_alert_reason({"registered": [], "failed": [
+            {"when": "a", "why": cp.skroc_powod(self.DUBLET)},
+            {"when": "b", "why": cp.skroc_powod(self.RYWAL)}],
+            "aligned": True, "first_seen": "11:00:37"})
+        self.assertIn("(1 prób)", mieszane)

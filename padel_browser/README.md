@@ -142,6 +142,11 @@ równoczesnymi losowaniami.
 Dotyczy **wyłącznie czołowego celu**. Rozciąganie tego na całą salwę mnożyłoby ryzyko
 podwójnej rezerwacji bez żadnych danych, że pomaga.
 
+**Jak czytać `✗` przy kopii.** Serwer odpowiada `Booking is already exists`, gdy miejsce
+jest już nasze, i `No available seats`, gdy wziął je ktoś inny. Krzyżyk przy drugiej
+kopii to prawie zawsze to pierwsze — nasz własny zapis odbijający się od naszej własnej
+rezerwacji. W Dzienniku ma etykietę `miejsce już nasze` i nie liczy się do przegranych.
+
 **Podwójna rezerwacja nie jest możliwa** — limit miejsc w terminie wynosi 1, więc gdy
 jedna kopia zapisze się skutecznie, druga z definicji dostaje 409. Nie ma tu żadnego
 anulowania i nie ma czego pilnować. Jedyne, co dodatek musi zrobić z dwiema odpowiedziami

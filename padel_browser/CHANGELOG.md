@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.19.1 — odbita kopia to nie przegrana
+
+Log z 01.09 pokazał, że serwer rozróżnia dwie sytuacje, które dodatek zlewał w jedną:
+
+```
+HTTP 409 {"message":"Booking is already exists"}   <- miejsce jest JUŻ NASZE
+HTTP 409 {"message":"No available seats"}          <- wziął je ktoś inny
+```
+
+Pierwszy komunikat dostaje **każda kopia strzału redundantnego poza zwycięską** — to
+oczekiwany koniec drugiego losowania, a nie przegrany wyścig. Dodatek pokazywał go jako
+`! Auto-rejestracja nieudana` i zapisywał w dzienniku jako `zajęty (409)`.
+
+- **Rozróżnienie w `skroc_powod`:** własny dublet dostaje etykietę `miejsce już nasze`.
+  Kolejność warunków ma znaczenie — dublet też niesie „409", więc musi być sprawdzony
+  przed warunkiem ogólnym.
+- **Log przestał krzyczeć:** `= Kopia strzału w 19:00 odbita: miejsce już nasze`.
+  Ostrzeżenie, które przychodzi codziennie, przestaje być czytane — a przy włączonym
+  `auto_register_hedge` przychodziłoby po każdej wygranej.
+- **Alarm nie odpala na dniu, który wygraliśmy.** `hunt_alert_reason` liczy teraz tylko
+  realne porażki. Bez tego dzień, w którym termin trzymamy w kieszeni (ponowienie na
+  już zarezerwowany termin), wysyłałby push „żadna rezerwacja się nie udała".
+
+To czwarty raz ten sam gatunek błędu (0.14.1, 0.16.1, 0.18.0, teraz): **etykieta
+twierdziła więcej, niż mówiły dane.**
+
 ## 0.19.0 — strzał redundantny w najcenniejszy termin
 
 Wniosek z pomiaru wieku danych (0.18.0) był taki, że wykrywanie i wysyłka są już na
