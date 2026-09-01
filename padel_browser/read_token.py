@@ -62,8 +62,25 @@ LOGIN_LINK_JS = """
 # i potrzebne jest ręczne logowanie. Dalsze klikanie tylko męczy stronę.
 AUTO_LOGIN_MAX_TRIES = 3
 AUTO_LOGIN_COOLDOWN = 600      # s między próbami
+# Po jakim czasie ciszy limit prób się przedawnia. Bez tego jedna awaria dostawcy
+# tożsamości wyłączałaby ciche logowanie aż do restartu dodatku — a wystarczy, że
+# minie pół dnia i warto spróbować jeszcze raz. Jedno kliknięcie nic nie kosztuje.
+AUTO_LOGIN_RESET_AFTER = 6 * 3600
 _auto_login_tries = 0
 _auto_login_last = 0.0
+
+
+def zapomnij_nieudane_logowania():
+    """Kasuje licznik prób — sesja znów działa, incydent zamknięty.
+
+    KLUCZOWE: wołane przy KAŻDYM udanym odczycie tokenu, także po logowaniu RĘCZNYM.
+    Wcześniej licznik zerowało wyłącznie udane logowanie CICHE, więc po trzech
+    nieudanych próbach funkcja milkła na zawsze: użytkownik logował się ręcznie,
+    dodatek działał tygodniami, a przy następnym wygaśnięciu sesji nie próbował już
+    kliknąć — bo licznik nadal stał na trzech.
+    """
+    global _auto_login_tries
+    _auto_login_tries = 0
 
 
 def try_silent_login(cdp):
@@ -75,7 +92,10 @@ def try_silent_login(cdp):
     if not AUTO_LOGIN:
         return None, 0
     if _auto_login_tries >= AUTO_LOGIN_MAX_TRIES:
-        return None, 0
+        if time.time() - _auto_login_last < AUTO_LOGIN_RESET_AFTER:
+            return None, 0
+        log("~ Ciche logowanie: limit prób przedawnił się — próbuję jeszcze raz.")
+        _auto_login_tries = 0
     if time.time() - _auto_login_last < AUTO_LOGIN_COOLDOWN:
         return None, 0
     _auto_login_last = time.time()
@@ -92,7 +112,7 @@ def try_silent_login(cdp):
         time.sleep(2)
         jwt = cdp.evaluate(f"localStorage.getItem({JWT_KEY!r})")
         if jwt:
-            _auto_login_tries = 0     # udało się — licznik prób od nowa
+            zapomnij_nieudane_logowania()
             log("✓ Ciche logowanie zadziałało — sesja odzyskana bez wpisywania czegokolwiek.")
             return jwt, jwt_expiry(jwt)
     url = cdp.evaluate("location.href") or ""
@@ -221,7 +241,10 @@ def read_jwt_once():
         jwt = cdp.evaluate(f"localStorage.getItem({JWT_KEY!r})")
         exp = jwt_expiry(jwt)
         if jwt and exp > time.time():
-            return jwt, exp, None  # ważny token — bez przeładowania (nie przeszkadzamy)
+            # Ważny token = sesja żyje, niezależnie od tego, KTO ją przywrócił.
+            # To jedyne miejsce, które wyłapuje logowanie ręczne.
+            zapomnij_nieudane_logowania()
+            return jwt, exp, None  # bez przeładowania (nie przeszkadzamy)
         # Brak/wygasły -> wczytaj stronę: zalogowana sesja odnowi token przy ładowaniu.
         cdp.call("Page.enable")
         cdp.call("Page.navigate", url=START_URL)
@@ -237,6 +260,7 @@ def read_jwt_once():
             if jwt:
                 return jwt, exp, None
             return None, 0, f"brak {JWT_KEY} w localStorage (URL: {url[:70]})"
+        zapomnij_nieudane_logowania()
         return jwt, jwt_expiry(jwt), None
     finally:
         cdp.close()

@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.20.1 — ciche logowanie milkło na zawsze po jednej nieudanej nocy
+
+Zgłoszone: „czemu zdarza się, że konto się wyloguje, a aplikacja nie próbuje ponownie
+kliknąć zaloguj? Robię to manualnie i jest to wystarczające."
+
+**Przyczyna:** licznik `_auto_login_tries` zerował się WYŁĄCZNIE po udanym logowaniu
+**cichym**. Logowanie ręczne go nie dotykało. Sekwencja, która wyłączała funkcję na stałe:
+
+1. sesja pada w nocy — trzy ciche próby w 20 minut, wszystkie nieudane, bo sesja
+   u dostawcy tożsamości też już nie żyje,
+2. licznik stoi na 3, ciche logowanie milknie,
+3. logujesz się ręcznie, dodatek działa tygodniami,
+4. sesja pada znowu — i **nic się nie dzieje**, bo licznik nadal stoi na 3.
+
+Od tego momentu ręczne logowanie było jedynym wyjściem aż do restartu dodatku.
+
+**Poprawka:**
+
+- **Każdy udany odczyt ważnego tokenu kasuje licznik prób**, niezależnie od tego, kto
+  przywrócił sesję. To jedyne miejsce, które wyłapuje logowanie ręczne.
+- **Limit przedawnia się po 6 godzinach ciszy** (`AUTO_LOGIN_RESET_AFTER`). Awaria
+  dostawcy tożsamości nie może wyłączać funkcji aż do restartu — jedno kliknięcie po
+  pół dnia nic nie kosztuje.
+- Limit **nadal chroni** przed młóceniem strony w obrębie okna; jest na to osobny test.
+
+Przy okazji: istniejący test omijał karencję ustawiając „ostatnia próba: 1970", co po
+tej zmianie przedawniałoby również sam limit — mierzyłby więc co innego, niż deklarował.
+Cofa teraz czas dokładnie o karencję.
+
 ## 0.20.0 — Irlandia nie przestaje patrzeć po pierwszej partii
 
 Log z 01.09 pokazał, gdzie naprawdę traciliśmy wieczorne godziny. Nie w wyścigu:

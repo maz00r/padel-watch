@@ -22,6 +22,14 @@ class FakeCdp:
             return self.url
         return self.jwty.pop(0) if self.jwty else None
 
+    def call(self, metoda, **kw):
+        """`read_jwt_once` steruje stroną przez Page.enable / Page.navigate."""
+        self.wykonane.append((metoda, kw))
+        return {}
+
+    def close(self):
+        self.zamkniete = True
+
 
 class SilentLoginTest(unittest.TestCase):
     """Klikamy WYŁĄCZNIE link „ZALOGUJ SIĘ" we własnej przeglądarce.
@@ -71,7 +79,9 @@ class SilentLoginTest(unittest.TestCase):
         buf = io.StringIO()
         with mock.patch("sys.stdout", buf):
             for _ in range(rt.AUTO_LOGIN_MAX_TRIES + 2):
-                rt._auto_login_last = 0.0        # omijamy karencję, testujemy sam limit
+                # Cofamy tylko o karencję. Cofnięcie „do zera" przedawniłoby też sam
+                # limit (AUTO_LOGIN_RESET_AFTER) i test mierzyłby co innego, niż mówi.
+                rt._auto_login_last = time.time() - rt.AUTO_LOGIN_COOLDOWN - 1
                 rt.try_silent_login(FakeCdp(jwty=[None] * 12))
         self.assertEqual(rt._auto_login_tries, rt.AUTO_LOGIN_MAX_TRIES)
 
@@ -144,3 +154,81 @@ class ReaderLogLevelTest(unittest.TestCase):
                 sys.stdout = stary
         self.assertIn("powrót po awarii", buf.getvalue())
         self.assertNotIn("bicie serca", buf.getvalue())
+
+
+def jwt_wazny(sekund=3600):
+    """JWT z odległym `exp` — czytnik ma go uznać za żywy."""
+    import base64 as b64, json as js
+    naglowek = b64.urlsafe_b64encode(b'{"alg":"HS256"}').rstrip(b"=").decode()
+    tresc = b64.urlsafe_b64encode(
+        js.dumps({"exp": int(time.time()) + sekund}).encode()).rstrip(b"=").decode()
+    return f"{naglowek}.{tresc}.podpis"
+
+
+class SilentLoginRecoversAfterManualLoginTest(unittest.TestCase):
+    """SEDNO: po ręcznym zalogowaniu ciche logowanie MUSI znów działać.
+
+    Zgłoszone 01.09: „czemu zdarza się, że konto się wyloguje, a aplikacja nie próbuje
+    ponownie kliknąć zaloguj? Robię to manualnie i jest to wystarczające."
+
+    Przyczyna: `_auto_login_tries` zerowało się WYŁĄCZNIE po udanym logowaniu CICHYM.
+    Sekwencja, która wyłączała funkcję na zawsze:
+      1. sesja pada w nocy, trzy ciche próby w 20 min — wszystkie nieudane,
+      2. licznik stoi na 3, funkcja milknie,
+      3. użytkownik loguje się ręcznie, dodatek działa tygodniami,
+      4. sesja pada znowu — i NIC się nie dzieje, bo licznik nadal stoi na 3.
+    """
+
+    def setUp(self):
+        rt.zapomnij_nieudane_logowania()
+        rt._auto_login_last = 0.0
+        self.addCleanup(rt.zapomnij_nieudane_logowania)
+
+    def wyczerp_proby(self):
+        """Trzy nieudane próby — dokładnie to, co robi noc z martwą sesją."""
+        for _ in range(rt.AUTO_LOGIN_MAX_TRIES):
+            rt._auto_login_last = time.time() - rt.AUTO_LOGIN_COOLDOWN - 1
+            cdp = FakeCdp(klik="klik", jwty=[None] * 12, url="https://account.decathlon.com/login")
+            with mock.patch("sys.stdout", io.StringIO()), \
+                    mock.patch.object(rt.time, "sleep"):
+                rt.try_silent_login(cdp)
+        self.assertEqual(rt._auto_login_tries, rt.AUTO_LOGIN_MAX_TRIES)
+
+    def test_manual_login_re_arms_silent_login(self):
+        self.wyczerp_proby()
+        rt.zapomnij_nieudane_logowania()   # tak wygląda skutek ręcznego zalogowania
+        rt._auto_login_last = time.time() - rt.AUTO_LOGIN_COOLDOWN - 1
+        cdp = FakeCdp(klik="klik", jwty=["swiezy-jwt"])
+        with mock.patch("sys.stdout", io.StringIO()), mock.patch.object(rt.time, "sleep"):
+            jwt, _exp = rt.try_silent_login(cdp)
+        self.assertEqual(jwt, "swiezy-jwt", "po ręcznym logowaniu cicha próba nadal milczy")
+
+    def test_a_valid_token_read_is_what_re_arms_it(self):
+        """To odczyt ważnego tokenu ma zerować licznik — bez względu na to, kto zalogował."""
+        self.wyczerp_proby()
+        cdp = FakeCdp(jwty=[jwt_wazny()], url="https://go.decathlon.pl/")
+        with mock.patch.object(rt, "cdp_page_target", return_value="ws://x"), \
+                mock.patch.object(rt, "Cdp", return_value=cdp), \
+                mock.patch("sys.stdout", io.StringIO()):
+            jwt, _exp, blad = rt.read_jwt_once()
+        self.assertIsNone(blad)
+        self.assertIsNotNone(jwt)
+        self.assertEqual(rt._auto_login_tries, 0, "ważny token nie skasował licznika prób")
+
+    def test_the_limit_expires_on_its_own_after_a_long_silence(self):
+        """Awaria dostawcy tożsamości nie może wyłączyć funkcji aż do restartu dodatku."""
+        self.wyczerp_proby()
+        rt._auto_login_last = time.time() - rt.AUTO_LOGIN_RESET_AFTER - 1
+        cdp = FakeCdp(klik="klik", jwty=["swiezy-jwt"])
+        with mock.patch("sys.stdout", io.StringIO()), mock.patch.object(rt.time, "sleep"):
+            jwt, _exp = rt.try_silent_login(cdp)
+        self.assertEqual(jwt, "swiezy-jwt")
+
+    def test_the_limit_still_holds_inside_the_window(self):
+        """Nie znosimy limitu — ma nadal chronić przed młóceniem strony."""
+        self.wyczerp_proby()
+        rt._auto_login_last = time.time()
+        cdp = FakeCdp(klik="klik", jwty=["swiezy-jwt"])
+        with mock.patch("sys.stdout", io.StringIO()), mock.patch.object(rt.time, "sleep"):
+            jwt, _exp = rt.try_silent_login(cdp)
+        self.assertIsNone(jwt, "limit prób przestał chronić")

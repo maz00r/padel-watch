@@ -199,6 +199,23 @@ osiągalne — więc winna była informacja, nie prędkość. To drugi rodzaj po
 zupełnie innej poprawki niż przyspieszanie strzału.
 
 
+## Ciche logowanie
+
+Gdy sesja w Decathlon GO wygaśnie, a sesja u dostawcy tożsamości jeszcze żyje, samo
+kliknięcie „ZALOGUJ SIĘ" wystarcza — przeglądarka odbija się przez OAuth i wraca
+zalogowana. Dodatek robi dokładnie to jedno kliknięcie we własnej przeglądarce.
+Nie wpisuje loginu, hasła ani kodu z maila; jeśli pojawi się formularz, prosi Cię
+o ręczne zalogowanie.
+
+Bezpieczniki: najwyżej 3 próby, co najmniej 10 minut przerwy między nimi.
+
+**Licznik prób kasuje każdy udany odczyt tokenu** — także po logowaniu ręcznym. Bez tego
+jedna nieudana noc wyłączała ciche logowanie aż do restartu dodatku (naprawione w 0.20.1).
+Niezależnie od tego limit przedawnia się po 6 godzinach ciszy, żeby awaria po stronie
+Decathlona nie zabierała funkcji na stałe.
+
+`auto_login: false` wyłącza mechanizm całkowicie.
+
 ## Poziomy logowania
 
 Doba pracy dodatku to ~2000 linii, a ~95 % z nich to dwa powtarzalne komunikaty:
