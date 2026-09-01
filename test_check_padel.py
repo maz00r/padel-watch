@@ -3706,3 +3706,85 @@ class OwnDuplicateIsNotALostRaceTest(SalvoHelpers, unittest.TestCase):
             {"when": "b", "why": cp.skroc_powod(self.RYWAL)}],
             "aligned": True, "first_seen": "11:00:37"})
         self.assertIn("(1 prób)", mieszane)
+
+
+class RemoteBatchesTest(RemoteHandlerTest):
+    """PĘTLA PARTII — sedno straty z 01.09.
+
+    Publikacja nie przychodzi naraz. Tego dnia grafik sypnął dwiema partiami w odstępie
+    ~450 ms, a stara wersja kończyła się na PIERWSZEJ: sprint przestawał obserwować,
+    rejestrował, wracał do domu, dodatek przetwarzał wynik i dopiero wtedy wołał
+    Irlandię ponownie. Powstawało ~620 ms ślepoty dokładnie w kaskadzie publikacji —
+    i w tym oknie 18:00 oraz 20:00 pojawiły się i zniknęły. Nie przegraliśmy ich
+    w wyścigu; nie oddaliśmy w nie ANI JEDNEGO strzału.
+    """
+
+    def odpal_partie(self, partie, **nadpisz):
+        """`partie`: lista dokumentów oddawanych przez kolejne rundy sprintu.
+
+        `run_sprint` podstawiamy wprost — jego własne zachowanie ma osobne testy,
+        a tutaj sprawdzamy JEDYNIE, czy handler zbiera kolejne partie.
+        """
+        self.zarejestrowane = []
+        kolejka = list(partie)
+
+        def fake_sprint(deadline, threads, url, baseline, tz, filters=None):
+            while kolejka:
+                doc = kolejka.pop(0)
+                swiezy = {s["id"] for s in cp.free_slots(doc, self.LID,
+                                                         datetime.now(timezone.utc))}
+                if swiezy - set(baseline):
+                    return (self.LID, doc, time.monotonic())
+            return None
+
+        def fake_register(slot, price, cfg, speculative=False):
+            self.zarejestrowane.append(slot["date_id"])
+            cfg["transaction_id"] = "tx-" + slot["date_id"]
+            return True, "accepted"
+
+        with mock.patch.object(cp, "resolve_current_id", side_effect=lambda x: self.LID), \
+                mock.patch.object(cp, "run_sprint", side_effect=fake_sprint), \
+                mock.patch.object(cp, "register_slot", side_effect=fake_register), \
+                mock.patch("sys.stdout", io.StringIO()):
+            odp = self.handler.lambda_handler(
+                self.zadanie(self.tresc(**nadpisz)), None)
+        return self.rozpakuj(odp)
+
+    def test_a_second_batch_is_caught_without_going_home(self):
+        """SEDNO: 17:00 z drugiej partii ma zostać zdobyte w TYM SAMYM wywołaniu."""
+        wynik = self.odpal_partie([self.doc(19), self.doc(19, 17)])
+        self.assertEqual(sorted(self.zarejestrowane), ["d17", "d19"])
+        self.assertEqual(wynik["timings"]["batches"], 2)
+        self.assertEqual(len(wynik["registered"]), 2)
+
+    def test_results_and_shots_from_every_batch_come_home(self):
+        """Dziennik pokazujący tylko ostatnią partię kłamałby o całym polowaniu."""
+        wynik = self.odpal_partie([self.doc(19), self.doc(19, 17), self.doc(19, 17, 20)])
+        self.assertEqual(wynik["timings"]["batches"], 3)
+        self.assertEqual(len(wynik["results"]), 3)
+        self.assertEqual(len(wynik["shots"]), 3, "strzały z wcześniejszych partii zginęły")
+
+    def test_the_freshest_document_travels_home(self):
+        """Strona lokalna liczy z niego grafik dnia — musi dostać najpełniejszy obraz."""
+        wynik = self.odpal_partie([self.doc(19), self.doc(19, 17, 20)])
+        ids = {s["id"] for s in cp.free_slots(wynik["doc"], self.LID,
+                                              datetime.now(timezone.utc))}
+        self.assertEqual(len(ids), 3)
+
+    def test_the_limit_covers_the_whole_call_not_each_batch(self):
+        """NAJWAŻNIEJSZY BEZPIECZNIK: trzy partie przy limicie 2 to nadal 2 rezerwacje."""
+        wynik = self.odpal_partie(
+            [self.doc(19), self.doc(19, 17), self.doc(19, 17, 20)], max_per_run=2)
+        self.assertEqual(len(self.zarejestrowane), 2, "limit liczony na partię, nie na wywołanie")
+        self.assertEqual(len(wynik["registered"]), 2)
+
+    def test_nothing_published_is_still_a_clean_answer(self):
+        wynik = self.odpal_partie([])
+        self.assertTrue(wynik["ok"])
+        self.assertIsNone(wynik["doc"])
+        self.assertEqual(wynik["timings"]["batches"], 0)
+
+    def test_a_repeated_batch_does_not_book_twice(self):
+        """Ten sam termin w kolejnej partii nie może dostać drugiego zapisu."""
+        self.odpal_partie([self.doc(19), self.doc(19), self.doc(19, 17)])
+        self.assertEqual(sorted(self.zarejestrowane), ["d17", "d19"])

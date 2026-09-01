@@ -111,63 +111,112 @@ def poluj(wejscie):
                             cp.LISTING_URL.format(id=cp.listing_id_from_url(wejscie["listing_url"])))
         cp.log(f"Salwa rozgrzana [{int((time.monotonic() - rozgrzane) * 1000)} ms]")
 
+    # KONFIGURACJA REJESTRACJI — budowana RAZ, przed pętlą partii. Musi przeżyć
+    # wszystkie rundy, bo niesie token (odświeżony przez którykolwiek strzał)
+    # i licznik zdobyczy.
+    reg_cfg = {
+        "enabled": True,
+        "speculative": bool(wejscie.get("speculative")),
+        "token": wejscie.get("token") or "",
+        # browser_mode=True, mimo że tu ŻADNEJ przeglądarki nie ma. Chodzi
+        # o semantykę wygaśnięcia, nie o przeglądarkę:
+        #   False -> token uznany za wygasły już na TOKEN_EXPIRY_MARGIN (300 s)
+        #            przed czasem i próba serwerowego /auth/refresh, która
+        #            w Decathlon GO ZAWSZE kończy się 401,
+        #   True  -> wygasły znaczy exp w przeszłości, bez żadnego refreshu.
+        # Przy tokenie żyjącym ~15 min ustawienie False wywracało rejestrację
+        # przez ostatnią 1/3 jego życia. Tak przepadło 17:00 w dniu 12.08.
+        # Czekania na świeższy token z pliku nie ma się co bać: bez TOKEN_FILE
+        # `wait_for_fresher_token` wraca natychmiast.
+        "browser_mode": True,
+        "refresh_cookie": "", "refresh_token": "",
+        "name": wejscie.get("name") or "",
+        "age": wejscie.get("age"),
+        "free_only": bool(wejscie.get("free_only", True)),
+        "max_per_run": wejscie.get("max_per_run") or 1,
+        "order": wejscie.get("order") or "earliest",
+        "salvo": wejscie.get("salvo") or 0,
+        # Odstęp musi być IDENTYCZNY po obu stronach — inaczej zapas lokalny
+        # strzelałby inaczej niż Irlandia i porównanie logów przestałoby mieć sens.
+        "stagger": wejscie.get("stagger", cp.SALVO_STAGGER_MS),
+        # Strzał czołowy musi działać TAK SAMO po obu stronach — inaczej zapas
+        # lokalny testowałby inną hipotezę niż Irlandia i porównanie logów
+        # przestałoby cokolwiek znaczyć.
+        "lead": wejscie.get("lead", False),
+        "hedge": wejscie.get("hedge") or 1,
+    }
+    limit = reg_cfg["max_per_run"]
+    try:
+        limit = max(0, int(limit))
+    except (TypeError, ValueError):
+        limit = 1
+
+    # PĘTLA PARTII. Publikacja nie przychodzi naraz — 01.09 grafik sypnął dwiema partiami
+    # w odstępie ~450 ms. Stara wersja kończyła się na PIERWSZYM trafieniu: sprint
+    # przestawał obserwować, rejestrował, wracał do domu, dodatek przetwarzał wynik
+    # i dopiero wtedy wołał Irlandię ponownie. Powstawało ~620 ms ślepoty dokładnie
+    # w kaskadzie publikacji — i w tym oknie 18:00 oraz 20:00 pojawiły się i zniknęły.
+    # Nie przegraliśmy ich w wyścigu; nie oddaliśmy w nie ANI JEDNEGO strzału.
+    #
+    # Teraz jedno wywołanie obserwuje do końca okna i rejestruje każdą partię, jaka
+    # się pojawi. Powrót do domu następuje raz, po wszystkim.
     szukanie = time.monotonic()
-    trafienie = cp.run_sprint(szukanie + sekundy, watki, wejscie["listing_url"],
-                              baseline, tz, filters=filtry)
-    sprint_ms = int((time.monotonic() - szukanie) * 1000)
-    if not trafienie:
-        return {"ok": True, "doc": None, "listing_id": None,
-                "timings": {"sprint_ms": sprint_ms,
-                            "total_ms": int((time.monotonic() - started) * 1000)}}
-
-    lid, doc, zobaczone = trafienie
-    teraz = cp.datetime.now(cp.timezone.utc)
-    sloty = [s for s in cp.free_slots(doc, lid, teraz) if cp.passes_filter(s, filtry, tz)]
-    cp.log(f"Sprint: nowe terminy po {sprint_ms} ms — {len(sloty)} pasujących do filtra")
-
+    koniec = szukanie + sekundy
+    widziane = set(baseline)
     wyniki, zapisane, czasy_strzalow = {}, set(), []
-    if sloty and wejscie.get("enabled"):
-        reg_cfg = {
-            "enabled": True,
-            "speculative": bool(wejscie.get("speculative")),
-            "token": wejscie.get("token") or "",
-            # browser_mode=True, mimo że tu ŻADNEJ przeglądarki nie ma. Chodzi
-            # o semantykę wygaśnięcia, nie o przeglądarkę:
-            #   False -> token uznany za wygasły już na TOKEN_EXPIRY_MARGIN (300 s)
-            #            przed czasem i próba serwerowego /auth/refresh, która
-            #            w Decathlon GO ZAWSZE kończy się 401,
-            #   True  -> wygasły znaczy exp w przeszłości, bez żadnego refreshu.
-            # Przy tokenie żyjącym ~15 min ustawienie False wywracało rejestrację
-            # przez ostatnią 1/3 jego życia. Tak przepadło 17:00 w dniu 12.08.
-            # Czekania na świeższy token z pliku nie ma się co bać: bez TOKEN_FILE
-            # `wait_for_fresher_token` wraca natychmiast.
-            "browser_mode": True,
-            "refresh_cookie": "", "refresh_token": "",
-            "name": wejscie.get("name") or "",
-            "age": wejscie.get("age"),
-            "free_only": bool(wejscie.get("free_only", True)),
-            "max_per_run": wejscie.get("max_per_run") or 1,
-            "order": wejscie.get("order") or "earliest",
-            "salvo": wejscie.get("salvo") or 0,
-            # Odstęp musi być IDENTYCZNY po obu stronach — inaczej zapas lokalny
-            # strzelałby inaczej niż Irlandia i porównanie logów przestałoby mieć sens.
-            "stagger": wejscie.get("stagger", cp.SALVO_STAGGER_MS),
-            # Strzał czołowy musi działać TAK SAMO po obu stronach — inaczej zapas
-            # lokalny testowałby inną hipotezę niż Irlandia i porównanie logów
-            # przestałoby cokolwiek znaczyć.
-            "lead": wejscie.get("lead", False),
-            "hedge": wejscie.get("hedge") or 1,
-            # Punkt zerowy wieku danych: chwila, w której sprint dostał grafik.
-            # Zegar monotoniczny jest lokalny dla tego procesu, więc różnica
-            # liczona TUTAJ jest poprawna — do domu jedzie już gotowa liczba w ms.
-            "seen_at": zobaczone,
-        }
+    lid, doc, partie = None, None, 0
+
+    while time.monotonic() < koniec:
+        runda = time.monotonic()
+        trafienie = cp.run_sprint(koniec, watki, wejscie["listing_url"],
+                                  widziane, tz, filters=filtry)
+        if not trafienie:
+            break                      # okno minęło bez nowych terminów
+        lid, doc, zobaczone = trafienie
+        partie += 1
+        teraz = cp.datetime.now(cp.timezone.utc)
+        wszystkie = cp.free_slots(doc, lid, teraz)
+        sloty = [s for s in wszystkie if cp.passes_filter(s, filtry, tz)]
+        nowe = [s for s in sloty if s["id"] not in widziane]
+        # GWARANCJA POSTĘPU: do punktu odniesienia trafia KAŻDY wolny termin z tego
+        # dokumentu, także odfiltrowany. `run_sprint` wyzwala się na podzbiorze tego
+        # zbioru, więc po tej aktualizacji nie może trafić drugi raz w to samo.
+        # Bez tego runda, w której wszystko odpadło na filtrze, wracałaby w kółko
+        # do końca okna i paliła procesor zamiast obserwować.
+        widziane |= {s["id"] for s in wszystkie}
+        cp.log(f"Sprint: partia {partie} po {int((time.monotonic() - runda) * 1000)} ms "
+               f"— {len(nowe)} nowych pasujących do filtra")
+        if not nowe or not wejscie.get("enabled"):
+            continue
+        # Limit obowiązuje CAŁE wywołanie, nie pojedynczą partię. Bez odejmowania
+        # zdobyczy trzy partie przy max_per_run=2 dałyby sześć rezerwacji.
+        reg_cfg["max_per_run"] = max(0, limit - len(zapisane))
+        if reg_cfg["max_per_run"] == 0:
+            # Nie ma po co dalej patrzeć: i tak nic więcej nie zapiszemy, a dobijanie
+            # do końca okna kosztuje czas Lambdy. Dalszą obserwację przejmuje zryw
+            # w domu, który i tak leci co 0,2 s.
+            cp.log(f"Limit {limit} wykorzystany — wracam do domu")
+            break
+        # Wiek danych liczymy od chwili, w której TA partia przyszła.
+        reg_cfg["seen_at"] = zobaczone
         ceny = {s["id"]: (doc.get("data", {}).get("attributes", {}) or {}).get("price")
-                for s in sloty}
-        wyniki, zapisane = cp.auto_register_new_slots(sloty, ceny, reg_cfg, set())
-        # Czasy strzałów odsyłamy do domu — bez nich dziennik polowań wiedziałby,
-        # CO się udało, ale nie JAK szybko, a przy zdalnym strzale to jedyne źródło.
-        czasy_strzalow = reg_cfg.get("shots") or []
+                for s in nowe}
+        wyniki_partii, zapisane_partii = cp.auto_register_new_slots(
+            nowe, ceny, reg_cfg, set(zapisane))
+        wyniki.update(wyniki_partii)
+        zapisane |= zapisane_partii
+        # `shots` jest zerowane przy każdym wywołaniu, więc zbieramy je po każdej partii —
+        # bez tego dziennik pokazałby wyłącznie ostatnią.
+        czasy_strzalow.extend(reg_cfg.get("shots") or [])
+        if reg_cfg.get("auth_error"):
+            cp.log(f"Przerywam partie: {reg_cfg['auth_error']}")
+            break
+
+    sprint_ms = int((time.monotonic() - szukanie) * 1000)
+    if doc is None:
+        return {"ok": True, "doc": None, "listing_id": None,
+                "timings": {"sprint_ms": sprint_ms, "batches": 0,
+                            "total_ms": int((time.monotonic() - started) * 1000)}}
 
     return {
         "ok": True,
@@ -176,7 +225,7 @@ def poluj(wejscie):
         "results": {k: [bool(v[0]), v[1]] for k, v in wyniki.items()},
         "registered": sorted(zapisane),
         "shots": czasy_strzalow,
-        "timings": {"sprint_ms": sprint_ms,
+        "timings": {"sprint_ms": sprint_ms, "batches": partie,
                     "total_ms": int((time.monotonic() - started) * 1000)},
     }
 

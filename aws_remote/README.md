@@ -184,3 +184,20 @@ z listy wolnych, więc kolejny bieg nie ma czego rezerwować. Realne ryzyko to
 
 Wyczyść `remote_url` w konfiguracji dodatku i uruchom ponownie. Wszystko wraca
 do polowania lokalnego. Funkcję w AWS możesz zostawić — nieużywana nic nie kosztuje.
+
+## Partie publikacji
+
+Jedno wywołanie obserwuje do końca okna sprintu i rejestruje **każdą partię**, jaka się
+pojawi — nie kończy się na pierwszym trafieniu.
+
+Powód jest zmierzony. 01.09 publikacja przyszła dwiema partiami w odstępie ~450 ms.
+Stara wersja rejestrowała pierwszą i wracała do domu; zanim dodatek przetworzył wynik
+i zawołał Irlandię ponownie, mijało ~620 ms bez jednego spojrzenia. W tym oknie dwie
+najlepsze godziny pojawiły się i zniknęły — bez jednego strzału z naszej strony.
+
+Skutki dla działania funkcji:
+
+- wywołanie trwa zwykle **pełne okno sprintu** (`sprint_seconds`), a nie do pierwszego
+  trafienia; wyjątkiem jest wyczerpanie limitu rezerwacji, które kończy je od razu,
+- `timings.batches` w odpowiedzi mówi, ile partii złapano,
+- `max_per_run` obowiązuje **całe wywołanie**, nie pojedynczą partię.

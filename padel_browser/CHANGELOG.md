@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.20.0 — Irlandia nie przestaje patrzeć po pierwszej partii
+
+Log z 01.09 pokazał, gdzie naprawdę traciliśmy wieczorne godziny. Nie w wyścigu:
+
+```
+11:00:36.79  Irlandia znajduje 1. partię (19:00) i PRZESTAJE PATRZEĆ
+11:00:37.08  wraca do domu z gotową rezerwacją
+11:00:37.35  dopiero teraz wywołanie 2   <- 271 ms lokalnej obróbki
+11:00:37.41  widzi 2. partię: 17:00 wolne, 18:00 i 20:00 JUŻ ZAJĘTE
+```
+
+**~620 ms bez jednego spojrzenia, dokładnie w kaskadzie publikacji.** W tym oknie 18:00
+i 20:00 pojawiły się i zniknęły. Nie oddaliśmy w nie ani jednego strzału. Drugie
+wywołanie znalazło nowe terminy po **56 ms** — one już tam czekały.
+
+Przyczyna była w konstrukcji: `run_sprint` zatrzymuje się na PIERWSZYM trafieniu.
+Irlandia rejestrowała jedną partię i wracała do domu, a publikacja sypała dalej.
+
+- **Jedno wywołanie obserwuje teraz do końca okna** i rejestruje każdą partię, jaka się
+  pojawi. Powrót do domu następuje raz, po wszystkim.
+- **Limit obowiązuje całe wywołanie, nie partię.** Bez odejmowania zdobyczy trzy partie
+  przy `auto_register_max: 2` dałyby sześć rezerwacji. Jest na to osobny test.
+- **Gwarancja postępu:** do punktu odniesienia trafia każdy wolny termin z dokumentu,
+  także odfiltrowany. Bez tego runda, w której wszystko odpadło na filtrze, wracałaby
+  w kółko do końca okna i paliła procesor zamiast obserwować.
+- **Wyniki i czasy strzałów ze WSZYSTKICH partii wracają do domu.** `shots` jest zerowane
+  przy każdej rejestracji, więc zbieramy je po każdej partii — inaczej Dziennik
+  pokazywałby wyłącznie ostatnią i kłamał o całym polowaniu.
+- **Do domu jedzie najświeższy dokument** — strona lokalna liczy z niego grafik dnia.
+- **Wyczerpany limit kończy wywołanie**, zamiast dobijać do końca okna. Dalszą
+  obserwację i tak przejmuje zryw w domu, który leci co 0,2 s.
+- Dziennik podaje teraz liczbę partii: `☁ Irlandia: sprint 6498 ms, całość 6785 ms, 2 partie`.
+
+**Koszt:** wywołanie trwa teraz zwykle pełne okno sprintu zamiast kończyć się na
+pierwszym trafieniu. Przy jednym wywołaniu dziennie to nadal ułamek darmowego limitu.
+
+**Czego to nie rozstrzyga:** jeśli po tej zmianie 18:00 i 20:00 nadal ani razu nie
+pokażą się jako wolne, znaczy to, że nigdy nie trafiają do puli — i nie ma tam czego
+wygrywać. To jest właśnie eksperyment, który tę odpowiedź da.
+
 ## 0.19.1 — odbita kopia to nie przegrana
 
 Log z 01.09 pokazał, że serwer rozróżnia dwie sytuacje, które dodatek zlewał w jedną:

@@ -2118,8 +2118,11 @@ def adopt_remote(wynik):
         log(f"   ☁ {re.sub(r'^\[[^]]+\]\s*', '', linia)}")
     czasy = wynik.get("timings") or {}
     if czasy:
+        partie = czasy.get("batches")
         log(f"☁ Irlandia: sprint {czasy.get('sprint_ms', '?')} ms, "
-            f"całość {czasy.get('total_ms', '?')} ms")
+            f"całość {czasy.get('total_ms', '?')} ms"
+            + (f", {partie} {plural(partie, 'partia', 'partie', 'partii')}"
+               if partie else ""))
     if not wynik.get("doc"):
         return None, None
     remote = {
