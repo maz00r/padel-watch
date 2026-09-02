@@ -712,12 +712,28 @@ def record_hunt(now_local, tz, new_slots, wyniki, shots, grid, zdalnie, topic):
             wpis["failed"].append({"when": kiedy, "why": skroc_powod(msg)})
     wpis["shots"].extend(shots or [])
 
+    # Przegrana ZDALNEGO strzału nie trafiała tu wcale. `failed` powstaje z `new_slots`,
+    # czyli z terminów, które strona lokalna NADAL widzi jako wolne — a termin przegrany
+    # w Irlandii jest już zajęty, gdy dokument wraca do domu. 02.09 dało to wpis, który
+    # twierdził „nigdy nie pokazane jako wolne: 17:00", choć strzelaliśmy w 17:00 DWA razy.
+    wygrane_strzalem = {s["when"] for s in wpis["shots"] if s.get("ok")}
+    znane = ({f["when"] for f in wpis["failed"]} | set(wpis["registered"])
+             | wygrane_strzalem)
+    for s in wpis["shots"]:
+        if s.get("ok") or s["when"] in znane:
+            continue
+        wpis["failed"].append({"when": s["when"], "why": s.get("why") or "zajęty (409)"})
+        znane.add(s["when"])
+
     # SEDNO diagnostyki: godzina zajęta, w którą NIE strzelaliśmy i której NIE zdobyliśmy,
     # to godzina, której nigdy nie zobaczyliśmy jako wolnej. Takiej nie da się wygrać
     # żadną prędkością — i to zupełnie inny problem niż przegrany wyścig (`failed`).
+    # Oddany strzał jest dowodem, że godzinę widzieliśmy — nawet jeśli zniknęła zaraz potem.
     przegrane = {f["when"].split()[-1] for f in wpis["failed"]}
     nasze = {w.split()[-1] for w in wpis["registered"]}
-    wpis["never_seen"] = sorted(set(wpis.get("taken") or []) - przegrane - nasze)
+    strzelane = {s["when"].split()[-1] for s in wpis["shots"]}
+    wpis["never_seen"] = sorted(set(wpis.get("taken") or [])
+                                - przegrane - nasze - strzelane)
 
     powod = hunt_alert_reason(wpis)
     if powod and not wpis["alerted"]:
@@ -2268,7 +2284,10 @@ def auto_register_new_slots(slots, listing_price_by_id, cfg, already_registered)
             cfg["shots"].append({"when": when, "ok": bool(res["ok"]), "ms": ms,
                                  "start_ms": res.get("start_ms", 0),
                                  "seen_ms": res.get("seen_ms"), "salwa": True,
-                                 "hedge": ile_kopii.get(slot["id"], 1) > 1})
+                                 "hedge": ile_kopii.get(slot["id"], 1) > 1,
+                                 # Powód wędruje ze strzałem, bo tylko on dociera do
+                                 # dziennika, gdy termin zdążył zniknąć z grafiku.
+                                 "why": "" if res["ok"] else skroc_powod(msg)})
             # Przy strzale redundantnym dwie odpowiedzi dotyczą tego samego terminu:
             # jedna kopia dostaje 409, druga wygrywa. Sukces MUSI być lepki, inaczej
             # wolniejsza porażka nadpisałaby zwycięstwo i powiadomienie skłamałoby,
@@ -2345,7 +2364,8 @@ def auto_register_new_slots(slots, listing_price_by_id, cfg, already_registered)
         zobaczone = cfg.get("seen_at")
         wiek = None if zobaczone is None else int((attempt_started - zobaczone) * 1000)
         cfg["shots"].append({"when": when, "ok": bool(ok), "ms": took_ms,
-                             "start_ms": None, "seen_ms": wiek, "salwa": False})
+                             "start_ms": None, "seen_ms": wiek, "salwa": False,
+                             "why": "" if ok else skroc_powod(msg)})
         results[sid] = (ok, msg)
         if ok:
             done += 1

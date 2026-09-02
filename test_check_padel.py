@@ -3788,3 +3788,57 @@ class RemoteBatchesTest(RemoteHandlerTest):
         """Ten sam termin w kolejnej partii nie może dostać drugiego zapisu."""
         self.odpal_partie([self.doc(19), self.doc(19), self.doc(19, 17)])
         self.assertEqual(sorted(self.zarejestrowane), ["d17", "d19"])
+
+
+class RemoteLossReachesTheJournalTest(HuntJournalTest):
+    """REGRESJA 02.09: wpis twierdził „nigdy nie pokazane jako wolne: 17:00",
+    a tego samego dnia oddaliśmy w 17:00 DWA strzały.
+
+    `failed` powstawało wyłącznie z `new_slots` — z terminów, które strona lokalna
+    NADAL widzi jako wolne. Termin przegrany w Irlandii jest już zajęty, gdy dokument
+    wraca do domu, więc wypadał z `failed` i lądował w `never_seen`. A to jest dokładnie
+    ta liczba, na podstawie której decydujemy, czy o daną godzinę w ogóle warto walczyć:
+    „przegraliśmy wyścig" i „ta godzina nigdy nie jest publikowana" to dwa różne światy.
+    """
+
+    def strzal(self, godzina, ok=False, why="zajęty (409)"):
+        return {"when": f"śr 09.09 {godzina}", "ok": ok, "ms": 178, "start_ms": 0,
+                "seen_ms": 1, "salwa": True, "hedge": True, "why": "" if ok else why}
+
+    def polowanie(self, shots, zajete):
+        """Strzały są, ale `new_slots` puste — dokument wrócił bez tych terminów."""
+        with mock.patch.object(cp, "notify_hunt"), mock.patch("sys.stdout", io.StringIO()):
+            return cp.record_hunt(
+                datetime(2026, 9, 2, 11, 0, 42, tzinfo=TZ), TZ,
+                new_slots=[], wyniki={}, shots=shots,
+                grid=("śr 09.09", 8, 11, zajete, date(2026, 9, 9)),
+                zdalnie=True, topic="temat")
+
+    def test_a_shot_proves_we_saw_the_hour(self):
+        wpis = self.polowanie([self.strzal("17:00"), self.strzal("17:00")],
+                              ["17:00", "18:00", "19:00"])
+        self.assertNotIn("17:00", wpis["never_seen"],
+                         "godzina, w którą strzelaliśmy, opisana jako nigdy nie widziana")
+        self.assertEqual(wpis["never_seen"], ["18:00", "19:00"])
+
+    def test_the_remote_loss_shows_up_as_a_loss(self):
+        wpis = self.polowanie([self.strzal("17:00")], ["17:00"])
+        self.assertEqual([f["when"] for f in wpis["failed"]], ["śr 09.09 17:00"])
+        self.assertEqual(wpis["failed"][0]["why"], "zajęty (409)")
+
+    def test_copies_of_one_shot_are_one_loss(self):
+        """Cztery kopie w 20:00 to jedna przegrana godzina, nie cztery."""
+        wpis = self.polowanie([self.strzal("20:00") for _ in range(4)], ["20:00"])
+        self.assertEqual(len(wpis["failed"]), 1)
+
+    def test_a_won_hour_is_never_reported_as_lost(self):
+        """Jedna kopia przegrywa, druga wygrywa — to zdobycz, nie porażka."""
+        wpis = self.polowanie(
+            [self.strzal("19:00"), self.strzal("19:00", ok=True)], ["19:00"])
+        self.assertEqual(wpis["failed"], [])
+        self.assertNotIn("19:00", wpis["never_seen"])
+
+    def test_hours_we_never_shot_at_are_still_flagged(self):
+        """Nie stępiamy diagnostyki: godzina bez strzału nadal ma krzyczeć."""
+        wpis = self.polowanie([self.strzal("20:00")], ["18:00", "19:00", "20:00"])
+        self.assertEqual(wpis["never_seen"], ["18:00", "19:00"])

@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.20.2 — przegrana zdalnego strzału nie docierała do Dziennika
+
+Wpis z 02.09 twierdził „nigdy nie pokazane jako wolne: **17:00**, 18:00, 19:00", a tego
+samego dnia oddaliśmy w 17:00 **dwa strzały**. Obie rzeczy nie mogą być prawdziwe.
+
+**Przyczyna:** `failed` powstawało wyłącznie z `new_slots` — z terminów, które strona
+lokalna NADAL widzi jako wolne. Termin przegrany w Irlandii jest już zajęty, gdy dokument
+wraca do domu, więc wypadał z listy przegranych i lądował w „nigdy nie pokazane jako
+wolne".
+
+**Dlaczego to bolało bardziej niż zwykła literówka:** `never_seen` to dokładnie ta liczba,
+na podstawie której decydujemy, czy o daną godzinę w ogóle warto walczyć. „Przegraliśmy
+wyścig" i „ta godzina nigdy nie jest publikowana" to dwa różne światy z dwoma różnymi
+wnioskami — a od wprowadzenia zdalnego strzału wpis mieszał je ze sobą.
+
+**Poprawka:**
+
+- **Oddany strzał jest dowodem, że godzinę widzieliśmy** — nawet jeśli zniknęła zaraz
+  potem. Takie godziny nie trafiają już do `never_seen`.
+- **Przegrana zdalnego strzału pojawia się jako przegrana**, z prawdziwym powodem.
+  Powód wędruje teraz razem ze strzałem (`why`), bo tylko strzał dociera do Dziennika,
+  gdy termin zdążył zniknąć z grafiku.
+- Kopie strzału redundantnego liczą się jako **jedna** przegrana godzina, nie cztery.
+- Godzina wygrana przez którąkolwiek kopię nigdy nie jest raportowana jako przegrana.
+- Godzina, w którą **nie** strzelaliśmy, nadal trafia do `never_seen` — diagnostyka
+  nie została stępiona.
+
+To piąty raz ten sam gatunek błędu (0.14.1, 0.16.1, 0.18.0, 0.19.1, teraz): **etykieta
+twierdziła więcej, niż mówiły dane.** Za każdym razem wychodziło to dopiero wtedy, gdy
+dwie liczby w jednym wpisie zaczęły sobie przeczyć.
+
 ## 0.20.1 — ciche logowanie milkło na zawsze po jednej nieudanej nocy
 
 Zgłoszone: „czemu zdarza się, że konto się wyloguje, a aplikacja nie próbuje ponownie
