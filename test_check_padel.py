@@ -3871,3 +3871,28 @@ class SprintWindowCoversPublicationDriftTest(unittest.TestCase):
         import handler
         self.assertGreaterEqual(handler.MAX_SPRINT_SEKUND, 40,
                                 "Lambda przycięłaby okno i znów gubiła publikacje")
+
+
+class BatchCountAlwaysVisibleTest(unittest.TestCase):
+    """Brak licznika partii to JEDYNY sygnał, że Lambda chodzi na kodzie sprzed 0.20.0.
+
+    Ukrywanie zera odbierało możliwość odróżnienia „stara wersja funkcji" od „nowa
+    wersja, nic nie znalazła" — a dokładnie tego nie dało się odczytać z logu z 03.09.
+    """
+
+    def linia(self, timings):
+        with mock.patch("sys.stdout", io.StringIO()) as buf:
+            cp.adopt_remote({"timings": timings, "doc": None})
+            return buf.getvalue()
+
+    def test_zero_batches_is_reported_not_hidden(self):
+        self.assertIn("0 partii", self.linia({"sprint_ms": 9956, "total_ms": 10394,
+                                              "batches": 0}))
+
+    def test_old_function_is_named_as_such(self):
+        out = self.linia({"sprint_ms": 9956, "total_ms": 10394})
+        self.assertIn("stara wersja funkcji", out)
+
+    def test_batches_are_counted_in_polish(self):
+        self.assertIn("2 partie", self.linia({"sprint_ms": 1, "total_ms": 2, "batches": 2}))
+        self.assertIn("1 partia", self.linia({"sprint_ms": 1, "total_ms": 2, "batches": 1}))

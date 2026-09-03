@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.21.1 — po logu nie dało się poznać, czy Lambda jest zaktualizowana
+
+Licznik partii pojawiał się w Dzienniku tylko wtedy, gdy był niezerowy. W logu z 03.09
+Irlandia nie znalazła nic, więc linia wyglądała identycznie jak przy kodzie sprzed
+0.20.0 — a właśnie ten licznik miał być sygnałem, że nowa paczka jest wgrana.
+
+- Zero partii jest teraz wypisywane wprost: `..., 0 partii`.
+- Brak pola `batches` w odpowiedzi daje jednoznaczne
+  `(stara wersja funkcji — wgraj paczkę)`.
+
 ## 0.21.0 — okno sprintu nie nadążało za publikacją
 
 Wpis z 03.09 nie miał odznaki „Irlandia", a strzały trwały **1303 ms i 448 ms** zamiast

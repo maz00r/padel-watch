@@ -2134,11 +2134,14 @@ def adopt_remote(wynik):
         log(f"   ☁ {re.sub(r'^\[[^]]+\]\s*', '', linia)}")
     czasy = wynik.get("timings") or {}
     if czasy:
+        # Licznik partii pokazujemy TAKŻE przy zerze. Jego brak jest jedynym sygnałem,
+        # że Lambda chodzi na kodzie sprzed 0.20.0 — a ukrywanie zera odbierało
+        # możliwość odróżnienia „stary kod" od „nowy kod, nic nie znalazł".
         partie = czasy.get("batches")
         log(f"☁ Irlandia: sprint {czasy.get('sprint_ms', '?')} ms, "
             f"całość {czasy.get('total_ms', '?')} ms"
             + (f", {partie} {plural(partie, 'partia', 'partie', 'partii')}"
-               if partie else ""))
+               if partie is not None else " (stara wersja funkcji — wgraj paczkę)"))
     if not wynik.get("doc"):
         return None, None
     remote = {
