@@ -412,7 +412,7 @@ def write_state_doc(doc):
 
 
 def save_state(free_ids, registered_ids=None, decathlon_jwt=None, pending_ids=None,
-               auth_alert_sent=None, decathlon_rt=None):
+               auth_alert_sent=None, decathlon_rt=None, auth_error_since=""):
     old = load_state_doc() or {}
     if registered_ids is None:
         registered_ids = set(old.get("registered_ids", []))
@@ -433,6 +433,10 @@ def save_state(free_ids, registered_ids=None, decathlon_jwt=None, pending_ids=No
         doc["pending_ids"] = sorted(pending_ids)  # terminy do ponowienia po naprawie tokenu
     if auth_alert_sent:
         doc["auth_alert_sent"] = True            # nie spamuj alertem o tokenie co iterację
+    if auth_error_since:
+        # Odkąd token nie działa. Bez tego karencja liczyłaby się od nowa przy KAŻDEJ
+        # iteracji i powiadomienie nie przyszłoby nigdy.
+        doc["auth_error_since"] = auth_error_since
     if old.get("clear_state_applied"):
         doc["clear_state_applied"] = old["clear_state_applied"]  # znacznik musi przetrwać zapis
     write_state_doc(doc)
@@ -1340,7 +1344,11 @@ def verify_decathlon_token(token):
         return None, f"sieć niedostępna: {e!r}"
 
 
-def check_decathlon_credentials(cfg, topic=None, book_url=None):
+def check_decathlon_credentials(cfg, topic=None, book_url=None):   # noqa: ARG001
+    # `topic`/`book_url` zostają w sygnaturze dla zgodności wywołań, ale ta funkcja
+    # świadomie NIE wysyła już powiadomień. Robiła to obok `run_once`, który zaraz
+    # potem wysyłał drugie z tego samego powodu — przy martwym tokenie dostawało się
+    # więc dwa identyczne pushe. Jeden punkt powiadamiania jest w `run_once`.
     """Test poświadczeń — NIE wymaga wolnego terminu i nic nie rezerwuje.
 
     Uruchamiany przy starcie (gdy auto_register jest włączone) albo opcją `test_token`.
@@ -1358,8 +1366,6 @@ def check_decathlon_credentials(cfg, topic=None, book_url=None):
     if err:
         log(f"✗ Test poświadczeń: {err}")
         cfg["auth_error"] = err
-        if topic:
-            notify_auth_problem(topic, err, book_url)
         return False
 
     ok, detail = verify_decathlon_token(token)
@@ -1376,8 +1382,6 @@ def check_decathlon_credentials(cfg, topic=None, book_url=None):
         msg = f"serwer ODRZUCIŁ token ({detail}) — {hint}"
         log(f"✗ Test poświadczeń: {msg}.{left_txt}")
         cfg["auth_error"] = msg
-        if topic:
-            notify_auth_problem(topic, msg, book_url)
         return False
     if ok is None:
         # Nie wiadomo — nie traktujemy jak błędu auth, żeby awaria sieci nie wywołała alertu.
@@ -1392,6 +1396,21 @@ def check_decathlon_credentials(cfg, topic=None, book_url=None):
 # Ile czekać na token odnowiony przez przeglądarkę po HTTP 401. Czytnik budzi się ~10 s
 # po wygaśnięciu i potrzebuje jeszcze chwili na nawigację i zapis, więc ~24 s pokrywa
 # cały cykl budzik -> nawigacja -> zapis pliku.
+# Ile czekamy z powiadomieniem o problemie z tokenem. Czytnik ponawia odczyt po 45 s,
+# a ciche logowanie (kliknięcie „ZALOGUJ SIĘ" i odbicie przez OAuth) trwa do ~20 s.
+# Krótsza karencja znaczy push wysłany, zanim aplikacja spróbowała się naprawić.
+AUTH_ALERT_GRACE = 120
+
+
+def _starszy_niz(iso, sekund):
+    """True, gdy znacznik ISO jest starszy niż `sekund`. Zepsuty znacznik = tak."""
+    try:
+        return (datetime.now(timezone.utc)
+                - datetime.fromisoformat(iso)).total_seconds() >= sekund
+    except (TypeError, ValueError):
+        return True
+
+
 TOKEN_WAIT_ATTEMPTS = 8
 TOKEN_WAIT_DELAY = 3
 
@@ -3090,12 +3109,24 @@ def run_once(announce_startup=False, skip_light=False, prefetched=None, defer_pu
     auth_error = reg_cfg.get("auth_error")
     auth_alert_sent = bool(state_doc.get("auth_alert_sent"))
     auth_verified = bool(candidate_ids) or reg_cfg.get("auth_checked")
-    if auth_error and not auth_alert_sent:
-        notify_auth_problem(topic, auth_error, book_url)
-        auth_alert_sent = True
-    elif not auth_error and auth_alert_sent and auth_verified and reg_cfg.get("enabled"):
-        log("✓ Token Decathlon znów działa — kasuję alert.")
-        auth_alert_sent = False
+    auth_since = state_doc.get("auth_error_since")
+    if auth_error:
+        # KARENCJA: czytnik tokenu ma najpierw spróbować CICHEGO LOGOWANIA — po nieudanym
+        # odczycie ponawia po 45 s, a samo odbicie przez OAuth trwa do ~20 s. Push wysłany
+        # natychmiast trafiał więc do użytkownika, zanim aplikacja w ogóle spróbowała się
+        # naprawić, i bardzo często okazywał się fałszywym alarmem.
+        if not auth_since:
+            auth_since = datetime.now(timezone.utc).isoformat()
+            log(f"~ Problem z tokenem ({auth_error}) — daję cichemu logowaniu "
+                f"{AUTH_ALERT_GRACE}s, zanim powiadomię.")
+        elif not auth_alert_sent and _starszy_niz(auth_since, AUTH_ALERT_GRACE):
+            notify_auth_problem(topic, auth_error, book_url)
+            auth_alert_sent = True
+    else:
+        auth_since = None
+        if auth_alert_sent and auth_verified and reg_cfg.get("enabled"):
+            log("✓ Token Decathlon znów działa — kasuję alert.")
+            auth_alert_sent = False
 
     if new_ids:
         log(f"NOWE wolne terminy: {len(new_ids)}")
@@ -3141,6 +3172,7 @@ def run_once(announce_startup=False, skip_light=False, prefetched=None, defer_pu
         reg_cfg.get("token"),
         pending_ids=reg_cfg.get("pending_ids") or [],
         auth_alert_sent=auth_alert_sent,
+        auth_error_since=auth_since or "",
         decathlon_rt=reg_cfg.get("refresh_token"),
     )
     return 0

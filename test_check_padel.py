@@ -756,7 +756,11 @@ class TestVerifyToken(unittest.TestCase):
             ok = cp.check_decathlon_credentials(cfg, topic="temat")
         self.assertFalse(ok)
         self.assertIn("ODRZUCIŁ", cfg["auth_error"])
-        fake_notify.assert_called_once()
+        # Test poświadczeń SAM nie powiadamia. Robił to obok `run_once`, który zaraz
+        # potem wysyłał drugie powiadomienie z tego samego powodu — użytkownik dostawał
+        # dwa identyczne pushe. Jeden punkt powiadamiania jest w `run_once`, po karencji
+        # na ciche logowanie.
+        fake_notify.assert_not_called()
         self.assertTrue(any("✗" in str(c) for c in fake_log.call_args_list))
 
     def test_check_reports_success_when_server_accepts(self):
@@ -805,7 +809,8 @@ class TestCredentialSelfTest(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("brak tokenu", cfg["auth_error"])
 
-    def test_bad_cookie_notifies(self):
+    def test_bad_cookie_is_recorded_but_not_pushed(self):
+        """Powód trafia do `auth_error`; wysłanie pusha to decyzja `run_once`."""
         cfg = {"token": "", "refresh_cookie": "sid=zle"}
         with mock.patch.object(cp, "refresh_decathlon_token",
                                side_effect=urllib.error.HTTPError("u", 401, "Unauthorized", {}, io.BytesIO(b"{}"))), \
@@ -814,7 +819,7 @@ class TestCredentialSelfTest(unittest.TestCase):
             ok = cp.check_decathlon_credentials(cfg, topic="temat")
         self.assertFalse(ok)
         self.assertIn("nie udało się odświeżyć tokenu", cfg["auth_error"])
-        fake_notify.assert_called_once()
+        fake_notify.assert_not_called()
 
     def test_does_not_book_anything(self):
         """Test poświadczeń nie może niczego rezerwować."""
@@ -4550,3 +4555,81 @@ class NtfyTopicWarningTest(unittest.TestCase):
     def test_no_topic_means_no_noise(self):
         """Puste = powiadomienia wyłączone świadomie, nie ma o czym ostrzegać."""
         self.assertEqual(self.ostrzez(""), "")
+
+
+class AuthAlertGraceTest(unittest.TestCase):
+    """Push o martwym tokenie ma poczekać, aż aplikacja spróbuje się naprawić sama.
+
+    Zgłoszone 04.09: „jak wygasa token to dostaję od razu powiadomienie, lepiej jakby
+    najpierw apka zrobiła próbę zalogowania".
+
+    Tak właśnie było: `check_padel` wysyłał push natychmiast, a ciche logowanie żyje
+    w DRUGIM procesie (`read_token.py`), który po nieudanym odczycie ponawia dopiero
+    po 45 s — samo odbicie przez OAuth trwa do ~20 s. Powiadomienie trafiało więc do
+    użytkownika, zanim aplikacja w ogóle spróbowała, i bardzo często było fałszywe.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        for nazwa, plik in (("STATE_PATH", "s.json"), ("HUNTS_PATH", "h.json")):
+            pat = mock.patch.object(cp, nazwa, os.path.join(self.dir.name, plik))
+            pat.start()
+            self.addCleanup(pat.stop)
+        self.env = mock.patch.dict(os.environ, {
+            "LISTINGS": "https://go.decathlon.pl/l/aaaaaaaa-1111-2222-3333-444444444444",
+            "NTFY_TOPIC": "k7Qm2xR9vLbT4nWpZs", "FILTERS": "mon-sun:00:00-24:00",
+            "AUTO_REGISTER": "true", "AUTO_REGISTER_DRY_RUN": "false",
+            "DECATHLON_TOKEN": "", "CONFIG_PATH": os.path.join(self.dir.name, "brak.json"),
+        })
+        self.env.start()
+        self.addCleanup(self.env.stop)
+
+    def bieg(self, stan=None):
+        """Jeden `run_once` z martwym tokenem. Zwraca (czy_wyslano_push, stan_po)."""
+        if stan is not None:
+            with open(cp.STATE_PATH, "w", encoding="utf-8") as f:
+                json.dump(stan, f)
+        doc = {"data": {"attributes": {"title": "Kort", "price": None,
+                                       "datesStats": {"availableListingDates": 0}}},
+               "included": []}
+        with mock.patch.object(cp, "resolve_current_id", side_effect=lambda x: "kort"), \
+                mock.patch.object(cp, "fetch_listing", return_value=doc), \
+                mock.patch.object(cp, "fetch_listing_light", return_value=doc), \
+                mock.patch.object(cp, "notify_auth_problem") as push, \
+                mock.patch.object(cp, "notify_startup"), \
+                mock.patch.object(cp, "build_reg_cfg",
+                                  side_effect=lambda c, s: {"enabled": True,
+                                                            "auth_error": "brak tokenu — "
+                                                            "zaloguj się w panelu Padel"}), \
+                mock.patch("sys.stdout", io.StringIO()):
+            cp.run_once()
+        return push.called, cp.load_state_doc() or {}
+
+    def test_the_first_failure_is_quiet(self):
+        """SEDNO: pierwszy nieudany odczyt NIE wysyła pusha — daje szansę cichemu logowaniu."""
+        wyslano, stan = self.bieg({"free_ids": [], "registered_ids": []})
+        self.assertFalse(wyslano, "push poszedł, zanim aplikacja spróbowała się naprawić")
+        self.assertIn("auth_error_since", stan, "brak znacznika = karencja liczona od nowa")
+
+    def test_a_problem_that_persists_is_reported(self):
+        """Ciche logowanie dostało swoją szansę i nie pomogło — teraz push jest zasadny."""
+        dawno = (datetime.now(timezone.utc)
+                 - timedelta(seconds=cp.AUTH_ALERT_GRACE + 30)).isoformat()
+        wyslano, stan = self.bieg({"free_ids": [], "registered_ids": [],
+                                   "auth_error_since": dawno})
+        self.assertTrue(wyslano, "trwały problem z tokenem musi w końcu dać znać")
+        self.assertTrue(stan.get("auth_alert_sent"))
+
+    def test_the_alert_is_sent_once_not_every_iteration(self):
+        dawno = (datetime.now(timezone.utc)
+                 - timedelta(seconds=cp.AUTH_ALERT_GRACE + 30)).isoformat()
+        wyslano, _ = self.bieg({"free_ids": [], "registered_ids": [],
+                                "auth_error_since": dawno, "auth_alert_sent": True})
+        self.assertFalse(wyslano, "push powtarzany co iterację przestaje być czytany")
+
+    def test_a_broken_marker_does_not_silence_the_alert(self):
+        """Zepsuty znacznik czasu nie może wyciszyć alarmu na zawsze."""
+        wyslano, _ = self.bieg({"free_ids": [], "registered_ids": [],
+                                "auth_error_since": "nie-data"})
+        self.assertTrue(wyslano)

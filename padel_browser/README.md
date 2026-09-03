@@ -253,6 +253,16 @@ Decathlona nie zabierała funkcji na stałe.
 
 `auto_login: false` wyłącza mechanizm całkowicie.
 
+**Powiadomienie o problemie z tokenem czeka 2 minuty.** Ciche logowanie żyje w drugim
+procesie: po nieudanym odczycie ponawia po 45 s, a odbicie przez OAuth trwa do ~20 s.
+Push wysłany natychmiast trafiał do Ciebie, zanim aplikacja w ogóle spróbowała się
+naprawić — i najczęściej okazywał się fałszywym alarmem. Teraz przychodzi tylko wtedy,
+gdy problem przetrwał karencję. W logu widać to jako:
+
+```
+~ Problem z tokenem (brak tokenu…) — daję cichemu logowaniu 120s, zanim powiadomię.
+```
+
 ## Poziomy logowania
 
 Doba pracy dodatku to ~2000 linii, a ~95 % z nich to dwa powtarzalne komunikaty:
