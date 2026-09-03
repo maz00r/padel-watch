@@ -4785,3 +4785,54 @@ class OperatingModeIsAnnouncedTest(unittest.TestCase):
         out = self.tryb(AUTO_REGISTER="true", AUTO_REGISTER_DRY_RUN="false")
         self.assertIn("Brak auto_register_name", out)
         self.assertIn("odrzuci KAŻDĄ", out)
+
+
+class CorruptApiRecordTest(unittest.TestCase):
+    """Jeden uszkodzony rekord z API nie może zabić polowania.
+
+    Zła data albo liczba miejsc w postaci napisu leciała wyjątkiem przez `free_slots`
+    aż na wierzch. Lokalnie kosztowało to jedną iterację (pętla łapie wszystko), ale
+    w Lambdzie `cp.free_slots` NIE JEST opakowane — całe wywołanie padało i publikacja
+    przechodziła bokiem. Awaria w najgorszym możliwym momencie, z powodu jednego pola.
+    """
+
+    def pozycja(self, ident, **nadpisz):
+        teraz = datetime.now(timezone.utc)
+        baza = {"date": (teraz + timedelta(days=7)).isoformat(), "registrationEndDate": None,
+                "participantsLimit": 1, "participantsCount": 0, "cancelled": False,
+                "name": "R", "price": None}
+        baza.update(nadpisz)
+        return {"id": ident, "type": "listing-date", "attributes": baza}
+
+    def parsuj(self, *pozycje):
+        with mock.patch("sys.stdout", io.StringIO()) as buf:
+            sloty = cp.parse_slots({"included": list(pozycje)}, "kort",
+                                   datetime.now(timezone.utc))
+        return sloty, buf.getvalue()
+
+    def test_one_bad_record_does_not_hide_the_good_ones(self):
+        sloty, _ = self.parsuj(self.pozycja("zly", date="10.09.2026 17:00"),
+                               self.pozycja("dobry"))
+        self.assertEqual([s["date_id"] for s in sloty], ["dobry"])
+
+    def test_skipping_is_loud(self):
+        """Niewidzialny termin wygląda dokładnie jak nieistniejący — to musi krzyczeć."""
+        _sloty, out = self.parsuj(self.pozycja("zly", date="nie-data"))
+        self.assertIn("Pominąłem 1 termin", out)
+        self.assertIn("API", out)
+
+    def test_numbers_as_strings_are_accepted_not_dropped(self):
+        """`"1"` zamiast `1` to zmiana kosmetyczna po stronie API — nie powód do straty."""
+        sloty, _ = self.parsuj(self.pozycja("a", participantsLimit="2", participantsCount="1"))
+        self.assertEqual(len(sloty), 1)
+        self.assertEqual(sloty[0]["limit"], 2)
+        self.assertEqual(sloty[0]["count"], 1)
+
+    def test_a_full_slot_is_still_excluded(self):
+        """Nie rozluźniamy zasady „wolny" — tylko przestajemy wybuchać."""
+        sloty, _ = self.parsuj(self.pozycja("a", participantsLimit="1", participantsCount="1"))
+        self.assertEqual(sloty, [])
+
+    def test_a_clean_document_says_nothing(self):
+        _sloty, out = self.parsuj(self.pozycja("a"), self.pozycja("b"))
+        self.assertNotIn("Pominąłem", out)

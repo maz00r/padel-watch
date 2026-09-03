@@ -689,22 +689,32 @@ def parse_slots(doc, listing_id, now_utc, only_free=True):
     zdążył przed nami" — brakujące godziny wyglądały tak samo jak nigdy niewystawione.
     """
     out = []
+    pominiete = 0
     for item in doc.get("included", []):
         if item.get("type") != "listing-date":
             continue
         a = item.get("attributes", {})
         if a.get("cancelled"):
             continue
-        limit = a.get("participantsLimit")
-        if limit is None:  # bez limitu miejsc — pomijamy (nie da się ocenić)
+        try:
+            limit = a.get("participantsLimit")
+            if limit is None:  # bez limitu miejsc — pomijamy (nie da się ocenić)
+                continue
+            limit = int(limit)
+            count = int(a.get("participantsCount") or 0)
+            start = parse_dt(a.get("date"))
+            reg_end = parse_dt(a.get("registrationEndDate"))
+        except (TypeError, ValueError):
+            # JEDEN uszkodzony rekord nie może zabić polowania. Wcześniej zła data albo
+            # liczba w postaci napisu leciała wyjątkiem przez `free_slots` aż na wierzch:
+            # lokalnie kosztowało to iterację, ale w Lambdzie NIE JEST ŁAPANE — całe
+            # wywołanie padało i publikacja przechodziła bokiem.
+            pominiete += 1
             continue
-        count = a.get("participantsCount") or 0
         if only_free and count >= limit:
             continue
-        start = parse_dt(a.get("date"))
         if start is None or start <= now_utc:
             continue
-        reg_end = parse_dt(a.get("registrationEndDate"))
         if reg_end is not None and reg_end <= now_utc:
             continue
         out.append(
@@ -719,6 +729,14 @@ def parse_slots(doc, listing_id, now_utc, only_free=True):
                 "limit": limit,
             }
         )
+    if pominiete:
+        # Głośno, bo to znaczy, że API zmieniło kształt danych i część grafiku jest
+        # dla nas niewidzialna — a niewidzialny termin wygląda dokładnie jak
+        # nieistniejący. Cisza zamieniłaby awarię integracji w „dziś nic nie było".
+        log(f"! Pominąłem {pominiete} "
+            f"{plural(pominiete, 'termin', 'terminy', 'terminów')} o nieczytelnych "
+            f"danych (data albo liczba miejsc w nieznanym formacie) — sprawdź, "
+            f"czy API Decathlona się nie zmieniło.")
     return out
 
 
