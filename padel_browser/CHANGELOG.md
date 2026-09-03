@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.22.1 — zestaw testów wykonywał 46 testów po raz drugi
+
+Przegląd kodu wykazał, że pięć klas testowych dziedziczyło po **konkretnych** klasach
+`TestCase`, przez co testy rodzica biegły ponownie w każdym dziecku:
+
+| klasa | własnych | powtórzonych |
+|---|---|---|
+| `RemoteBatchesTest(RemoteHandlerTest)` | 6 | 14 |
+| `RemoteLossReachesTheJournalTest` | 5 | 10 |
+| `CancellationIsNotPublicationTest` | 4 | 10 |
+| `NeverSeenTest`, `PublicationWindowTest` | 7 | 20 |
+
+`RemoteBatchesTest` uruchamiał 20 testów zamiast własnych 6 i zajmował 9,4 s. Wzorzec
+był w pliku od początku — `SalvoHelpers` ma komentarz „Bez TestCase, żeby testy bazowe
+nie biegły dwa razy" — ale został złamany pięć razy.
+
+- `HuntJournalTest` i `RemoteHandlerTest` rozdzielone na **mixin z `setUp` i pomocnikami**
+  (bez `TestCase`) oraz cienką klasę z testami. Klasy pochodne dziedziczą po mixinie.
+- **Żaden test nie zniknął:** 358 unikalnych metod `test_*` przed i po. Zniknęły wyłącznie
+  powtórzenia wykonań: 471 → 418 uruchomień, **22,3 s → 13,3 s**.
+- **Strażnik `NoDuplicatedTestRunsTest`** przechodzi po drzewie AST wszystkich plików
+  testowych i nie przepuszcza klasy z testami dziedziczącej po innej klasie z testami.
+  Sprawdzony na sztucznym złym przypadku — łapie go.
+
 ## 0.22.0 — zryw patrzy DALEJ, kiedy strzelamy
 
 Log z 03.09 pokazał ostatnie okno ślepoty, tym razem po stronie lokalnej:

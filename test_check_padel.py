@@ -2573,7 +2573,14 @@ class DeferredPushTest(unittest.TestCase):
         self.assertEqual(cp._pending_notifications, [])
 
 
-class RemoteHandlerTest(unittest.TestCase):
+class RemoteHandlerHelpers:
+    """Wspólna atrapa Lambdy: żądanie, dokument, rozpakowanie odpowiedzi.
+
+    Bez `TestCase` — inaczej każda klasa dziedzicząca uruchamiałaby te 14 testów
+    PONOWNIE. `RemoteBatchesTest` robił dokładnie to: 20 testów zamiast 6, 9,4 s
+    zamiast ~2,5 s. Ten sam wzorzec co `SalvoHelpers`.
+    """
+
     """Zdalny strzał z eu-west-1: handler Lambdy + przeniesienie wyniku do dodatku.
 
     Najważniejsza własność: skoro rejestracja odbyła się w Irlandii, strona lokalna
@@ -2630,6 +2637,9 @@ class RemoteHandlerTest(unittest.TestCase):
         self.assertEqual(odp["headers"]["Content-Encoding"], "gzip")
         return json.loads(gzip.decompress(base64.b64decode(odp["body"])).decode("utf-8"))
 
+
+
+class RemoteHandlerTest(RemoteHandlerHelpers, unittest.TestCase):
     def test_bad_secret_is_rejected_without_details(self):
         """Adres Function URL jest publiczny — odmowa nie może zdradzać, czemu."""
         odp = self.handler.lambda_handler(self.zadanie({}, sekret="zle"), None)
@@ -2923,7 +2933,13 @@ class SalvoStaggerTest(SalvoHelpers, unittest.TestCase):
         self.assertLess(time.monotonic() - start, 1.0)
 
 
-class HuntJournalTest(unittest.TestCase):
+class HuntJournalHelpers:
+    """Wspólne pomocniki dziennika polowań: katalog tymczasowy, slot, zapis wpisu.
+
+    Bez `TestCase` — patrz komentarz przy `SalvoHelpers`. Cztery klasy dziedziczyły
+    stąd i każda powtarzała komplet 10 testów bazowych.
+    """
+
     """Dziennik polowań: odkłada się sam, alarmuje oszczędnie.
 
     Powód powstania: 23.08 publikacja przesunęła się o 40 s i zryw jej nie złapał.
@@ -2958,6 +2974,9 @@ class HuntJournalTest(unittest.TestCase):
             wpis = cp.record_hunt(teraz, self.TZ, sl, wyn, list(shots), grid, False, "temat")
         return wpis, push, buf.getvalue()
 
+
+
+class HuntJournalTest(HuntJournalHelpers, unittest.TestCase):
     def test_entry_is_written_and_readable(self):
         wpis, _, _ = self.zapisz()
         self.assertEqual(wpis["date"], "2026-08-23")
@@ -3086,7 +3105,7 @@ class HuntJournalEndToEndTest(unittest.TestCase):
         self.assertEqual(wpisy[0]["registered"][0], cp.fmt_when(oczekiwana, short=True))
 
 
-class NeverSeenTest(HuntJournalTest):
+class NeverSeenTest(HuntJournalHelpers, unittest.TestCase):
     """Rozróżnienie, po które powstała ta zmiana: przegrany WYŚCIG vs godzina,
     której nigdy nie zobaczyliśmy jako wolnej.
 
@@ -3277,7 +3296,7 @@ class PreflightTokenTest(unittest.TestCase):
             self.assertIsNone(cp.burst_start_today(piatek, self.TZ))
 
 
-class PublicationWindowTest(HuntJournalTest):
+class PublicationWindowTest(HuntJournalHelpers, unittest.TestCase):
     """REGRESJA 28.08: „nigdy nie pokazane jako wolne" liczyło CAŁĄ dobę.
 
     Wpis mówił `8 wolnych z 11` i jednocześnie wymieniał 8 godzin jako zniknięte
@@ -3312,7 +3331,7 @@ class PublicationWindowTest(HuntJournalTest):
         self.assertEqual(wpis["free"], 2)
 
 
-class CancellationIsNotPublicationTest(HuntJournalTest):
+class CancellationIsNotPublicationTest(HuntJournalHelpers, unittest.TestCase):
     """REGRESJA 28.08: odwołanie na DZIŚ zostało ogłoszone jako publikacja.
 
     O 08:57 ktoś zwolnił termin na ten sam dzień. Dziennik wziął pierwsze nowe
@@ -3708,7 +3727,7 @@ class OwnDuplicateIsNotALostRaceTest(SalvoHelpers, unittest.TestCase):
         self.assertIn("(1 prób)", mieszane)
 
 
-class RemoteBatchesTest(RemoteHandlerTest):
+class RemoteBatchesTest(RemoteHandlerHelpers, unittest.TestCase):
     """PĘTLA PARTII — sedno straty z 01.09.
 
     Publikacja nie przychodzi naraz. Tego dnia grafik sypnął dwiema partiami w odstępie
@@ -3790,7 +3809,7 @@ class RemoteBatchesTest(RemoteHandlerTest):
         self.assertEqual(sorted(self.zarejestrowane), ["d17", "d19"])
 
 
-class RemoteLossReachesTheJournalTest(HuntJournalTest):
+class RemoteLossReachesTheJournalTest(HuntJournalHelpers, unittest.TestCase):
     """REGRESJA 02.09: wpis twierdził „nigdy nie pokazane jako wolne: 17:00",
     a tego samego dnia oddaliśmy w 17:00 DWA strzały.
 
@@ -4070,3 +4089,40 @@ class SecondWaveIsShotAtTest(unittest.TestCase):
                 mock.patch("sys.stdout", io.StringIO()):
             cp.run_once(skip_light=False)
         self.assertLessEqual(len(pobrania), 2, "poza zrywem obserwator nie powinien działać")
+
+
+class NoDuplicatedTestRunsTest(unittest.TestCase):
+    """STRAŻNIK: żadna klasa testowa nie może dziedziczyć po INNEJ klasie testowej.
+
+    Klasa dziedzicząca po konkretnym `TestCase` uruchamia wszystkie testy rodzica
+    PONOWNIE. Pięć takich klas dawało 46 zbędnych wykonań i podnosiło czas zestawu
+    z ~14 s do ~22 s — `RemoteBatchesTest` biegł 20 testów zamiast własnych 6.
+
+    Wzorzec jest w tym pliku od początku (`SalvoHelpers`): wspólne `setUp` i pomocniki
+    idą do klasy BEZ `TestCase`, testy zostają w cienkiej klasie na dole. Ten test
+    pilnuje, żeby wyjątek od tej zasady nie wśliznął się przy kolejnej zmianie.
+    """
+
+    def test_no_test_class_inherits_from_another_test_class(self):
+        import ast
+        winne = []
+        for plik in ("test_check_padel.py", "test_read_token.py", "test_check_cinema.py"):
+            sciezka = os.path.join(os.path.dirname(os.path.abspath(__file__)), plik)
+            if not os.path.exists(sciezka):
+                continue
+            drzewo = ast.parse(open(sciezka, encoding="utf-8").read())
+            klasy = {n.name: n for n in drzewo.body if isinstance(n, ast.ClassDef)}
+            for nazwa, wezel in klasy.items():
+                ma_testy = any(f.name.startswith("test_") for f in wezel.body
+                               if isinstance(f, ast.FunctionDef))
+                for baza in wezel.bases:
+                    rodzic = getattr(baza, "id", None)
+                    if rodzic not in klasy:
+                        continue
+                    rodzic_ma_testy = any(
+                        f.name.startswith("test_") for f in klasy[rodzic].body
+                        if isinstance(f, ast.FunctionDef))
+                    if ma_testy and rodzic_ma_testy:
+                        winne.append(f"{plik}: {nazwa}({rodzic})")
+        self.assertEqual(winne, [], "testy rodzica będą uruchamiane po raz drugi — "
+                                    "wydziel wspólną część do klasy bez TestCase")
