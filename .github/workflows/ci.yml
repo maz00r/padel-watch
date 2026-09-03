@@ -19,6 +19,10 @@ jobs:
         run: python3 -m unittest -v test_read_token
       - name: Testy jednostkowe (kino)
         run: python3 -m unittest -v test_check_cinema
+      - name: Testy jednostkowe (panel)
+        # Panel jest JEDYNYM miejscem, które potrafi anulować rezerwację, i jedynym
+        # wystawionym przez Ingress. Do 0.24.0 nie miał ani jednego testu.
+        run: python3 -m unittest -v test_panel
       - name: Składnia silników
         run: python3 -m py_compile padel_browser/check_padel.py padel_browser/read_token.py padel_browser/panel.py cinema_watch/check_cinema.py
       - name: Paczka Lambdy jest aktualna

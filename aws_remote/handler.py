@@ -169,7 +169,7 @@ def poluj(wejscie):
     szukanie = time.monotonic()
     koniec = szukanie + sekundy
     widziane = set(baseline)
-    wyniki, zapisane, czasy_strzalow = {}, set(), []
+    wyniki, zapisane = {}, set()
     lid, doc, partie = None, None, 0
 
     while time.monotonic() < koniec:
@@ -207,13 +207,18 @@ def poluj(wejscie):
         reg_cfg["seen_at"] = zobaczone
         ceny = {s["id"]: (doc.get("data", {}).get("attributes", {}) or {}).get("price")
                 for s in nowe}
-        wyniki_partii, zapisane_partii = cp.auto_register_new_slots(
-            nowe, ceny, reg_cfg, set(zapisane))
+        # Ten sam rdzeń co strona lokalna: rejestrujemy, patrząc RÓWNOLEGLE na to,
+        # co pojawia się w trakcie zapisu. Zapis stąd trwa ~100–200 ms, ale publikacja
+        # sypie partiami co ~450 ms — więc i tutaj mieściła się cała partia.
+        wyniki_partii, zapisane_partii, druga, swiezy = cp.rejestruj_obserwujac(
+            lid, nowe, ceny, reg_cfg, set(zapisane), filtry, tz, set(widziane))
         wyniki.update(wyniki_partii)
         zapisane |= zapisane_partii
-        # `shots` jest zerowane przy każdym wywołaniu, więc zbieramy je po każdej partii —
-        # bez tego dziennik pokazałby wyłącznie ostatnią.
-        czasy_strzalow.extend(reg_cfg.get("shots") or [])
+        if druga:
+            widziane |= set(druga)
+            partie += 1
+            if swiezy is not None:
+                doc = swiezy          # do domu jedzie najświeższy obraz grafiku
         if reg_cfg.get("auth_error"):
             cp.log(f"Przerywam partie: {reg_cfg['auth_error']}")
             break
@@ -230,7 +235,8 @@ def poluj(wejscie):
         "doc": doc,
         "results": {k: [bool(v[0]), v[1]] for k, v in wyniki.items()},
         "registered": sorted(zapisane),
-        "shots": czasy_strzalow,
+        # `shots` doklada sie samo przez cale wywolanie — reg_cfg zyje ponad partiami.
+        "shots": reg_cfg.get("shots") or [],
         "timings": {"sprint_ms": sprint_ms, "batches": partie,
                     "total_ms": int((time.monotonic() - started) * 1000)},
     }

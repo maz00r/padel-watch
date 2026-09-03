@@ -249,12 +249,7 @@ def load_hunts():
 def save_hunts(wpisy):
     """Zapis dziennika. Błąd zapisu jest głośny, ale nie przerywa polowania —
     historia jest cenna, a rezerwacja cenniejsza."""
-    try:
-        with open(HUNTS_PATH, "w", encoding="utf-8") as f:
-            json.dump(wpisy[:HUNTS_KEEP], f, ensure_ascii=False, indent=2)
-            f.write("\n")
-    except OSError as e:
-        log(f"! Nie zapisałem dziennika polowań: {e!r}")
+    zapisz_json_atomowo(HUNTS_PATH, wpisy[:HUNTS_KEEP])
 
 
 # KONTROLA SESJI PRZED POLOWANIEM. 27.08 wszystkie pięć strzałów padło w 0 ms
@@ -383,10 +378,37 @@ def hunt_window(now_local, tz):
     return granice[0] <= now_local < granice[1], opis
 
 
+def zapisz_json_atomowo(sciezka, dane):
+    """Zapis przez plik tymczasowy i `os.replace` — czytelnik nigdy nie widzi połówki.
+
+    `read_token.py` robił tak od początku dla tokenu, ale stan i dziennik zapisywały się
+    w miejscu. Ubicie dodatku w trakcie zapisu (restart HA, zatrzymanie kontenera, zanik
+    zasilania) zostawiało ucięty `state.json`, a to znaczy:
+
+    - punkt odniesienia zerowany → KAŻDY termin wygląda na nowy → lawina powiadomień,
+    - `registered_ids` przepadają → możemy strzelić w termin, który już mamy.
+
+    `os.replace` jest atomowe w obrębie jednego systemu plików, a `/data` w dodatku HA
+    jest jednym wolumenem — więc plik tymczasowy trzymamy obok celu, nie w /tmp.
+    """
+    tmp = f"{sciezka}.tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(dane, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+        os.replace(tmp, sciezka)
+        return True
+    except OSError as e:
+        log(f"! Nie zapisałem {sciezka}: {e!r}")
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        return False
+
+
 def write_state_doc(doc):
-    with open(STATE_PATH, "w", encoding="utf-8") as f:
-        json.dump(doc, f, ensure_ascii=False, indent=2)
-        f.write("\n")
+    zapisz_json_atomowo(STATE_PATH, doc)
 
 
 def save_state(free_ids, registered_ids=None, decathlon_jwt=None, pending_ids=None,
@@ -2316,7 +2338,12 @@ def auto_register_new_slots(slots, listing_price_by_id, cfg, already_registered)
     # Czasy strzałów wędrują przez cfg (jak transaction_id), żeby trafiły do dziennika
     # polowań. Bez nich wpis mówiłby CO się udało, ale nie JAK szybko — a to właśnie
     # ta liczba rozstrzygała każdą dotychczasową zagadkę.
-    cfg["shots"] = []
+    # DOKŁADAMY, nie kasujemy. Zerowanie zmuszało każdego wołającego, żeby pamiętał
+    # o sklejeniu list po sobie — robiły to trzy miejsca (druga fala lokalnie, pętla
+    # partii w Lambdzie, scalanie wyniku zdalnego). Zapomniana kopia nie krzyczy, tylko
+    # cicho gubi strzały z Dziennika, czyli jedyny ślad po sekundzie publikacji.
+    # Świeżą listę daje `build_reg_cfg`, wołane raz na bieg.
+    cfg.setdefault("shots", [])
     done = 0
     skipped = []
 
@@ -2801,62 +2828,70 @@ def zbierz_terminy(listings, filters, tz, now_utc, skip_light=False, prefetched=
     return g
 
 
-def zarejestruj_z_obserwacja(grafik, kandydaci, reg_cfg, registered_ids, filters, tz,
-                             skip_light):
-    """Rejestruje kandydatów, patrząc RÓWNOLEGLE na to, co pojawia się w trakcie zapisu.
+def rejestruj_obserwujac(lid, sloty, ceny, cfg, registered, filters, tz, znane,
+                         obserwuj=True):
+    """Rejestruje `sloty`, patrząc RÓWNOLEGLE na to, co pojawia się w trakcie zapisu.
 
-    Zwraca `(wyniki, registered_ids, nowe_z_drugiej_fali)`. `grafik` jest dopisywany
-    w miejscu: terminy z drugiej fali stają się częścią obrazu tego biegu, żeby trafiły
-    do powiadomień, stanu i dziennika tak samo jak pierwsza fala.
+    Zwraca `(wyniki, registered, druga_fala, swiezy_dokument)`.
 
-    Dlaczego druga fala w ogóle istnieje — log z 03.09: czekanie na odpowiedź serwera
-    trwało 1303 ms i przez ten czas nikt nie patrzył na grafik. Liczba dostępnych
-    terminów skoczyła w tym oknie z 4 na 10, a wszystkie wieczorne godziny zniknęły,
-    zanim spojrzeliśmy ponownie.
+    Używane po OBU stronach — lokalnie i w Irlandii. Wcześniej obserwacja w trakcie
+    zapisu istniała tylko lokalnie, a to Irlandia strzela w sekundzie publikacji.
+    Jej okno ślepoty było krótsze (zapis ~100–200 ms zamiast ~1300 ms), ale publikacja
+    sypie partiami co ~450 ms — więc i tam mieściła się cała partia.
     """
-    reg_cfg["seen_at"] = grafik.seen_at
-    # Obserwujemy kort, który wydał terminy do rejestracji — nie ostatni z brzegu.
-    lid_obs = next((grafik.lid_by_id[i] for i in kandydaci if i in grafik.lid_by_id), None)
-    # Tylko w zrywie: poza nim publikacja nie sypie partiami, a ciągłe pobieranie
-    # to sam ruch bez zysku.
-    obserwator = (obserwuj_podczas_zapisu(lid_obs, filters, tz, set(grafik.current))
-                  if skip_light and lid_obs else None)
+    obserwator = (obserwuj_podczas_zapisu(lid, filters, tz, znane)
+                  if obserwuj and lid else None)
     try:
-        wyniki, registered_ids = auto_register_new_slots(
-            [grafik.current[i] for i in kandydaci], grafik.listing_price_by_id,
-            reg_cfg, registered_ids)
+        wyniki, registered = auto_register_new_slots(sloty, ceny, cfg, registered)
     finally:
         if obserwator:
             obserwator[0].set()
-    strzaly_pierwszej_fali = list(reg_cfg.get("shots") or [])
 
     druga = obserwator[1]["nowe"] if obserwator else {}
     if not druga:
-        return wyniki, registered_ids, {}
+        return wyniki, registered, {}, None
 
     log(f"⇉ Druga fala: {len(druga)} "
         f"{plural(len(druga), 'termin', 'terminy', 'terminów')} pojawiło się "
         f"w trakcie zapisu ({obserwator[1]['pobran']} pobrań) — strzelam od razu")
-    url_obs, cena_obs = grafik.meta_by_lid.get(lid_obs, (grafik.book_url, None))
-    for sid, s in druga.items():
-        grafik.current[sid] = s
-        grafik.book_url_by_id[sid] = url_obs
-        grafik.listing_price_by_id[sid] = cena_obs
-        grafik.lid_by_id[sid] = lid_obs
-    if obserwator[1]["doc"] is not None:
-        # Grafik dnia liczony z dokumentu sprzed publikacji dał 03.09 wpis
-        # „4 wolne z 4", choć chwilę później kort miał ich jedenaście.
-        grafik.docs_by_lid[lid_obs] = obserwator[1]["doc"]
-
+    doc = obserwator[1]["doc"]
+    cena = ((doc.get("data", {}).get("attributes", {}) or {}).get("price")
+            if doc else None)
+    ceny_fala = dict(ceny)
+    ceny_fala.update({sid: cena for sid in druga})
     # Strzelamy PRZED księgowaniem: dziennik, stan i powiadomienia kosztowały 03.09
     # kolejne ~470 ms, a to więcej, niż trwa cudzy zapis.
-    reg_cfg["seen_at"] = time.monotonic()
-    wyniki_fala, registered_ids = auto_register_new_slots(
-        list(druga.values()), grafik.listing_price_by_id, reg_cfg, registered_ids)
+    cfg["seen_at"] = time.monotonic()
+    wyniki_fala, registered = auto_register_new_slots(
+        list(druga.values()), ceny_fala, cfg, registered)
     wyniki.update(wyniki_fala)
-    # `shots` jest zerowane przy każdym wywołaniu — bez sklejenia dziennik pokazałby
-    # wyłącznie drugą falę i zgubił strzał, który ją poprzedził.
-    reg_cfg["shots"] = strzaly_pierwszej_fali + list(reg_cfg.get("shots") or [])
+    return wyniki, registered, druga, doc
+
+
+def zarejestruj_z_obserwacja(grafik, kandydaci, reg_cfg, registered_ids, filters, tz,
+                             skip_light):
+    """Strona lokalna: mapuje `Grafik` na wspólny rdzeń i wnosi drugą falę z powrotem.
+
+    Obserwujemy kort, który wydał terminy do rejestracji — nie ostatni z brzegu.
+    Ciągłe pobieranie tylko w zrywie: poza nim publikacja nie sypie partiami.
+    """
+    reg_cfg["seen_at"] = grafik.seen_at
+    lid_obs = next((grafik.lid_by_id[i] for i in kandydaci if i in grafik.lid_by_id), None)
+    wyniki, registered_ids, druga, doc = rejestruj_obserwujac(
+        lid_obs, [grafik.current[i] for i in kandydaci], grafik.listing_price_by_id,
+        reg_cfg, registered_ids, filters, tz, set(grafik.current),
+        obserwuj=bool(skip_light))
+    if druga:
+        url_obs, cena_obs = grafik.meta_by_lid.get(lid_obs, (grafik.book_url, None))
+        for sid, s in druga.items():
+            grafik.current[sid] = s
+            grafik.book_url_by_id[sid] = url_obs
+            grafik.listing_price_by_id[sid] = cena_obs
+            grafik.lid_by_id[sid] = lid_obs
+        if doc is not None:
+            # Grafik dnia liczony z dokumentu sprzed publikacji dał 03.09 wpis
+            # „4 wolne z 4", choć chwilę później kort miał ich jedenaście.
+            grafik.docs_by_lid[lid_obs] = doc
     return wyniki, registered_ids, druga
 
 

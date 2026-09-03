@@ -4370,3 +4370,56 @@ class SettingsTest(unittest.TestCase):
         n = self.nastawy(AUTO_REGISTER_SALVO="6", AUTO_REGISTER_HEDGE="2",
                          LISTINGS="https://go.decathlon.pl/l/aaaaaaaa-1111-2222-3333-444444444444")
         self.assertEqual(n.warm_size, 7, "kopie czołowego celu też potrzebują ciepłych gniazd")
+
+
+class SharedRegistrationCoreTest(RemoteHandlerHelpers, unittest.TestCase):
+    """Obie strony używają TEGO SAMEGO rdzenia rejestracji z obserwacją.
+
+    Wcześniej obserwacja w trakcie zapisu istniała wyłącznie lokalnie — a to Irlandia
+    strzela w sekundzie publikacji. Jej okno ślepoty było krótsze (zapis ~100–200 ms
+    zamiast ~1300 ms), ale publikacja sypie partiami co ~450 ms, więc i tam mieściła
+    się cała partia.
+
+    Osobno: `cfg["shots"]` dokłada się teraz samo. Zerowanie zmuszało każdego wołającego
+    do sklejania list po sobie — robiły to trzy miejsca, a zapomniana kopia nie krzyczy,
+    tylko cicho gubi strzały z Dziennika.
+    """
+
+    def test_shots_accumulate_without_the_caller_remembering(self):
+        cfg = {"enabled": True, "max_per_run": 9, "salvo": 0, "name": "Jan",
+               "browser_mode": True,
+               "token": jwt_with_exp(int(time.time()) + 3600)}
+        sloty = [{"id": f"s{h}", "date_id": f"d{h}", "name": "R",
+                  "start_utc": datetime(2026, 9, 10, h, tzinfo=timezone.utc),
+                  "count": 0, "limit": 1, "price": None} for h in (17, 18)]
+        with mock.patch.object(cp, "register_slot", return_value=(False, "409")), \
+                mock.patch("sys.stdout", io.StringIO()):
+            cp.auto_register_new_slots(sloty[:1], {}, cfg, set())
+            po_pierwszym = len(cfg["shots"])
+            cp.auto_register_new_slots(sloty[1:], {}, cfg, set())
+        self.assertEqual(po_pierwszym, 1)
+        self.assertEqual(len(cfg["shots"]), 2, "druga runda skasowała strzały pierwszej")
+
+    def test_ireland_watches_while_it_writes(self):
+        """SEDNO: termin pojawiający się w trakcie zdalnego zapisu ma dostać strzał."""
+        strzelone = []
+        # Pierwsze pobranie widzi 18:00; kolejne — z obserwatora — także 19:00.
+        widoki = [self.doc(18)] + [self.doc(18, 19)] * 80
+
+        def fetch(lid):
+            return widoki.pop(0) if len(widoki) > 1 else widoki[0]
+
+        def zapis(slot, price, cfg, speculative=False):
+            strzelone.append(slot["date_id"])
+            time.sleep(0.1)
+            cfg["transaction_id"] = "tx"
+            return False, "Decathlon HTTP 409: No available seats"
+
+        with mock.patch.object(cp, "resolve_current_id", side_effect=lambda x: self.LID), \
+                mock.patch.object(cp, "fetch_listing", side_effect=fetch), \
+                mock.patch.object(cp, "register_slot", side_effect=zapis), \
+                mock.patch("sys.stdout", io.StringIO()):
+            wynik = self.rozpakuj(self.handler.lambda_handler(
+                self.zadanie(self.tresc()), None))
+        self.assertIn("d19", strzelone, "Irlandia nie strzeliła w termin z drugiej fali")
+        self.assertEqual(len({s["when"] for s in wynik["shots"]}), 2)

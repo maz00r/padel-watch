@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.24.0 — rozbicie wielkich funkcji (bez zmiany zachowania)
+## 0.24.0 — rozbicie wielkich funkcji, wspólny rdzeń rejestracji, testy panelu
 
 Refaktor z przeglądu kodu. **Zachowanie nie zmienia się w żadnym miejscu** — zmienia się
 to, ile trzeba przeczytać, żeby cokolwiek zrozumieć.
@@ -32,6 +32,44 @@ Nowe jednostki, każda testowalna bez udawania połowy aplikacji:
 - **Literówka w adresie kortu wywracała cały proces** nieobsłużonym wyjątkiem — a w Home
   Assistancie znaczy to pętlę restartów bez wyjaśnienia. Każda inna błędna opcja wyłącza
   tylko swoją funkcję; ta nie może być wyjątkiem. Teraz mówi, co jest nie tak.
+
+### Wspólny rdzeń rejestracji — i Irlandia, która wreszcie patrzy w trakcie zapisu
+
+Obserwacja w trakcie zapisu (0.22.0) istniała **tylko lokalnie**, a to Irlandia strzela
+w sekundzie publikacji. Jej okno ślepoty było krótsze (zapis ~100–200 ms zamiast
+~1300 ms), ale publikacja sypie partiami co ~450 ms — więc i tam mieściła się cała partia.
+
+- **`rejestruj_obserwujac`** — jeden rdzeń używany po obu stronach.
+- **`cfg["shots"]` dokłada się samo.** Zerowanie zmuszało każdego wołającego, żeby
+  pamiętał o sklejeniu list po sobie; robiły to **trzy** miejsca. Zapomniana kopia nie
+  krzyczy, tylko cicho gubi strzały z Dziennika — jedyny ślad po sekundzie publikacji.
+  Pierwszy przebieg po zmianie od razu pokazał podwójne liczenie w Lambdzie.
+
+### Zapis stanu jest wreszcie atomowy
+
+`read_token.py` od początku zapisywał token przez plik tymczasowy i `os.replace`
+(„by monitor nie czytał połówki"), ale **stan i dziennik zapisywały się w miejscu**.
+Ubicie dodatku w trakcie zapisu — restart HA, zatrzymanie kontenera, zanik zasilania —
+zostawiało ucięty `state.json`, a to znaczy:
+
+- punkt odniesienia zerowany → KAŻDY termin wygląda na nowy → **lawina powiadomień**,
+- `registered_ids` przepadają → możemy strzelić w termin, który już mamy.
+
+`write_state_doc` nie obsługiwał też `OSError` — pełny dysk wywracał polowanie, choć
+`save_hunts` ten sam błąd łykał. Teraz oba idą przez `zapisz_json_atomowo`.
+
+### Panel dostał pierwsze testy w historii
+
+`panel.py` — 322 linie, jedyne miejsce potrafiące **anulować rezerwację** i jedyne
+wystawione przez Ingress — nie miał ani jednego testu. Nowy `test_panel.py` sprawdza:
+
+- `/api/cancel` wymaga `Content-Type: application/json` (jedyna bariera przed
+  anulowaniem cudzym żądaniem z obcej strony), odrzuca puste ID, przekazuje identyfikator
+  bez zmian i nie połyka nieudanego anulowania,
+- serwowanie plików nie wychodzi poza katalog noVNC (`..`, `%2e%2e`, katalogi),
+- uszkodzony dziennik nie wywraca panelu.
+
+Testy sprawdzone metodą mutacji: po usunięciu obu zabezpieczeń padają.
 
 ### Czego NIE zrobiłem i dlaczego
 
