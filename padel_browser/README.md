@@ -199,6 +199,24 @@ osiągalne — więc winna była informacja, nie prędkość. To drugi rodzaj po
 zupełnie innej poprawki niż przyspieszanie strzału.
 
 
+## Okno sprintu a rozrzut publikacji
+
+Pora publikacji **nie jest stała**. Zmierzone przez 11 dni (23.08–03.09):
+
+```
+11:00:13  13  15  15  25  36  36  36  37  37  42      -> rozrzut 29 s
+```
+
+Okno sprintu musi ten rozrzut **pokryć**, bo poza nim Irlandia w ogóle nie obserwuje,
+a zapas lokalny strzela pięciokrotnie wolniej (448–1303 ms wobec 66–178 ms z regionu).
+Wąskie okno 11:00:30 + 10 s trafiało w 5 dni na 11.
+
+Zalecane: `sprint: mon-sun:11:00:05`, `sprint_seconds: 40`.
+
+**Timeout funkcji Lambda musi być większy niż okno sprintu** (przy 40 s ustaw 60 s).
+Inaczej AWS ubije funkcję w trakcie obserwacji i nie odda nawet tego, co zdążyła
+zarezerwować.
+
 ## Ciche logowanie
 
 Gdy sesja w Decathlon GO wygaśnie, a sesja u dostawcy tożsamości jeszcze żyje, samo

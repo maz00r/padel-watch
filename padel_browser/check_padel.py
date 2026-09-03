@@ -2910,7 +2910,8 @@ def main():
     if sprint_env.strip() and warm_url:
         try:
             sprint = parse_burst_env(sprint_env)   # ten sam format co burst
-            sprint["seconds"] = max(1, min(int(os.environ.get("SPRINT_SECONDS") or 4), 30))
+            # Ten sam sufit co w Lambdzie — zapas lokalny musi umieć pokryć to samo okno.
+            sprint["seconds"] = max(1, min(int(os.environ.get("SPRINT_SECONDS") or 4), 60))
             hour, minute, second = sprint["at"]
             log(f"🏁 Sprint: {','.join(sprint['days'])} o {hour:02d}:{minute:02d}:{second:02d}, "
                 f"przez {sprint['seconds']}s, {sprint_threads} wątków bez przerw "

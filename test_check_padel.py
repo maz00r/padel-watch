@@ -3842,3 +3842,32 @@ class RemoteLossReachesTheJournalTest(HuntJournalTest):
         """Nie stępiamy diagnostyki: godzina bez strzału nadal ma krzyczeć."""
         wpis = self.polowanie([self.strzal("20:00")], ["18:00", "19:00", "20:00"])
         self.assertEqual(wpis["never_seen"], ["18:00", "19:00"])
+
+
+class SprintWindowCoversPublicationDriftTest(unittest.TestCase):
+    """Pora publikacji przestała być stała: 11 dni (23.08–03.09) dało 11:00:13 … 11:00:42.
+
+    Dziesięciosekundowe okno sprintu trafiało w 5 dni na 11. W pozostałe strzelaliśmy
+    z domu, gdzie zapis trwa 448–1303 ms zamiast 66–178 ms z regionu — i to wystarczało,
+    żeby stracić termin. Limity muszą więc pozwolić na okno rzędu 40 s po OBU stronach.
+    """
+
+    PORY = [13, 13, 15, 15, 25, 36, 36, 36, 37, 37, 42]   # sekunda po 11:00
+
+    def pokrycie(self, start, dlugosc):
+        return sum(1 for p in self.PORY if start <= p <= start + dlugosc)
+
+    def test_the_old_window_missed_most_days(self):
+        """Punkt odniesienia — bez tego nie widać, po co ta zmiana."""
+        self.assertEqual(self.pokrycie(30, 10), 5)
+
+    def test_the_new_default_covers_every_observed_day(self):
+        self.assertEqual(self.pokrycie(5, 40), len(self.PORY))
+
+    def test_remote_cap_allows_the_new_window(self):
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "aws_remote"))
+        self.addCleanup(lambda: sys.path.remove(
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "aws_remote")))
+        import handler
+        self.assertGreaterEqual(handler.MAX_SPRINT_SEKUND, 40,
+                                "Lambda przycięłaby okno i znów gubiła publikacje")

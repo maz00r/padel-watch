@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.21.0 — okno sprintu nie nadążało za publikacją
+
+Wpis z 03.09 nie miał odznaki „Irlandia", a strzały trwały **1303 ms i 448 ms** zamiast
+typowych 66–178 ms z regionu. Powód: publikacja przyszła o **11:00:25**, pięć sekund
+przed startem sprintu, więc strzelaliśmy z domu.
+
+Zebrane pory publikacji z 11 dni (23.08–03.09):
+
+```
+11:00:13  13  15  15  25  36  36  36  37  37  42
+```
+
+**Rozrzut 29 sekund.** Dotychczasowe okno sprintu (11:00:30 + 10 s) trafiało w **5 dni
+na 11**. W pozostałe dni Irlandia nie obserwowała wcale, a zapas lokalny strzelał
+pięciokrotnie wolniej — i to wystarczało, żeby stracić termin.
+
+- **`MAX_SPRINT_SEKUND` w Lambdzie: 20 → 45.** Wcześniej funkcja i tak przycięłaby
+  dłuższe okno do 20 s, więc sama zmiana ustawień w dodatku nic by nie dała.
+- **Sufit lokalny: 30 → 60 s.** Zapas na wypadek awarii Irlandii musi umieć pokryć
+  to samo okno, inaczej cofa nas do punktu wyjścia.
+- **Nowe wartości domyślne: `sprint: mon-sun:11:00:05`, `sprint_seconds: 40`** —
+  pokrywają wszystkie 11 zaobserwowanych dni z zapasem po obu stronach.
+
+**UWAGA — dwie rzeczy do zrobienia ręcznie:**
+
+1. **Home Assistant nie nadpisuje zapisanych opcji.** Ustaw `sprint` na `mon-sun:11:00:05`
+   i `sprint_seconds` na `40` w konfiguracji dodatku.
+2. **Timeout Lambdy musi być większy niż okno sprintu.** Przy 30 s i oknie 40 s funkcja
+   zostanie ubita w trakcie obserwacji i nie odda nawet tego, co zdążyła zarezerwować.
+   Ustaw **60 s** w konsoli AWS.
+
+**Koszt:** 1769 MB × ~40 s to ~71 GB-s na dobę, czyli ~2100 GB-s miesięcznie —
+około 0,5 % darmowego limitu 400 000 GB-s.
+
 ## 0.20.2 — przegrana zdalnego strzału nie docierała do Dziennika
 
 Wpis z 02.09 twierdził „nigdy nie pokazane jako wolne: **17:00**, 18:00, 19:00", a tego

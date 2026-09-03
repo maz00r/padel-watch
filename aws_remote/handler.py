@@ -38,7 +38,13 @@ SEKRET_NAGLOWEK = "x-padel-secret"
 LAMBDA_PELNY_RDZEN_MB = 1769
 # Twardy sufit na okno sprintu. Wywołujący i tak podaje własne, krótsze, ale bez
 # sufitu literówka w konfiguracji dodatku potrafiłaby trzymać funkcję do timeoutu.
-MAX_SPRINT_SEKUND = 20
+# Okno sprintu musi POKRYĆ rozrzut pory publikacji, a ten okazał się ogromny:
+# 11 dni od 23.08 do 03.09 dało pory od 11:00:13 do 11:00:42. Dziesięciosekundowe okno
+# trafiało w 5 dni na 11; w pozostałe strzelaliśmy z domu, gdzie zapis trwa 448-1303 ms
+# zamiast 66-178 ms z regionu. Limit musi więc pozwolić na okno rzędu 40 s.
+# Timeout funkcji w konsoli AWS musi być WIĘKSZY niż to okno — inaczej Lambda zostanie
+# ubita w trakcie obserwacji i nie odda nawet tego, co zdążyła zarezerwować.
+MAX_SPRINT_SEKUND = 45
 
 
 def _sekret_ok(event):
