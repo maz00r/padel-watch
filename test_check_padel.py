@@ -4126,3 +4126,137 @@ class NoDuplicatedTestRunsTest(unittest.TestCase):
                         winne.append(f"{plik}: {nazwa}({rodzic})")
         self.assertEqual(winne, [], "testy rodzica będą uruchamiane po raz drugi — "
                                     "wydziel wspólną część do klasy bez TestCase")
+
+
+class OptionPrecedenceTest(unittest.TestCase):
+    """Trzy opcje rozstrzygały się RÓŻNIE zależnie od tego, która funkcja je czytała.
+
+    Były to ciche błędy — nic nie krzyczało, po prostu dwie części aplikacji działały
+    na innych ustawieniach. W dodatku HA `run.sh` eksportuje wszystko do ENV, więc
+    problem był zamaskowany i wychodził tylko przy konfiguracji z samego pliku.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.plik = os.path.join(self.dir.name, "config.json")
+        patcher = mock.patch.object(cp, "CONFIG_PATH", self.plik)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        cp._LOG_TZ = None
+        cp._config_warned = False
+        self.addCleanup(lambda: setattr(cp, "_LOG_TZ", None))
+
+    def zapisz(self, **cfg):
+        with open(self.plik, "w", encoding="utf-8") as f:
+            json.dump(cfg, f)
+
+    def test_env_wins_over_the_file(self):
+        self.zapisz(timezone="Europe/London")
+        with mock.patch.dict(os.environ, {"TIMEZONE": "Europe/Warsaw"}):
+            self.assertEqual(cp.opcja("TIMEZONE", cp.load_config(True), "timezone"),
+                             "Europe/Warsaw")
+
+    def test_the_file_is_used_when_env_is_absent(self):
+        self.zapisz(timezone="Europe/London")
+        with mock.patch.dict(os.environ, {"TIMEZONE": ""}):
+            self.assertEqual(cp.opcja("TIMEZONE", cp.load_config(True), "timezone"),
+                             "Europe/London")
+
+    def test_log_timestamps_follow_the_file_too(self):
+        """Znaczniki czasu w innej strefie niż filtrowanie terminów to pułapka
+        przy każdej analizie logu po polowaniu."""
+        self.zapisz(timezone="Europe/London")
+        with mock.patch.dict(os.environ, {"TIMEZONE": ""}):
+            self.assertEqual(str(cp._log_tz()), "Europe/London")
+
+    def test_listings_from_the_file_reach_the_sprint(self):
+        """Sprint i rozgrzewka czytały wyłącznie ENV — przy konfiguracji plikowej
+        po cichu NIE BRAŁY UDZIAŁU w polowaniu."""
+        self.zapisz(listings=["https://go.decathlon.pl/l/aaa", "https://go.decathlon.pl/l/bbb"])
+        with mock.patch.dict(os.environ, {"LISTINGS": ""}):
+            wynik = cp.listings_z_konfiguracji(cp.load_config(True))
+        self.assertIn("aaa", wynik)
+        self.assertIn("bbb", wynik)
+
+    def test_a_corrupt_config_does_not_kill_logging(self):
+        """SEDNO: skoro strefa logu pochodzi z konfiguracji, uszkodzony plik
+        wywracałby KAŻDĄ linię logu — czyli cały dodatek."""
+        with open(self.plik, "w", encoding="utf-8") as f:
+            f.write("{ to nie jest JSON")
+        self.assertEqual(cp.load_config(quiet=True), {})
+        with mock.patch("sys.stdout", io.StringIO()) as buf:
+            cp.log("żyjemy")
+        self.assertIn("żyjemy", buf.getvalue())
+
+
+class SecondWaveWithTwoCourtsTest(unittest.TestCase):
+    """Druga fala musi przypisać termin do WŁAŚCIWEGO kortu.
+
+    Reszta `run_once` trzyma mapy „per termin" (`book_url_by_id`, `listing_price_by_id`)
+    właśnie po to, żeby wiele kortów działało. Blok drugiej fali brał zamiast tego
+    `canon_url` i `listing_price` z OSTATNIEGO obiegu pętli — więc przy dwóch kortach
+    terminy z pierwszego dostawały cenę i link drugiego. Obserwator patrzył zresztą
+    też na niewłaściwy kort.
+    """
+
+    A = "aaaaaaaa-1111-2222-3333-444444444444"
+    B = "bbbbbbbb-1111-2222-3333-444444444444"
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        for nazwa, plik in (("STATE_PATH", "s.json"), ("HUNTS_PATH", "h.json")):
+            pat = mock.patch.object(cp, nazwa, os.path.join(self.dir.name, plik))
+            pat.start()
+            self.addCleanup(pat.stop)
+        self.env = mock.patch.dict(os.environ, {
+            "LISTINGS": f"https://go.decathlon.pl/l/{self.A},https://go.decathlon.pl/l/{self.B}",
+            "NTFY_TOPIC": "", "FILTERS": "mon-sun:00:00-24:00",
+            "AUTO_REGISTER": "true", "AUTO_REGISTER_DRY_RUN": "false",
+            "AUTO_REGISTER_MAX": "5", "AUTO_REGISTER_SALVO": "0",
+            "AUTO_REGISTER_HEDGE": "1", "AUTO_REGISTER_NAME": "Jan",
+            "DECATHLON_TOKEN": jwt_with_exp(int(time.time()) + 3600),
+            "CONFIG_PATH": os.path.join(self.dir.name, "brak.json"),
+        })
+        self.env.start()
+        self.addCleanup(self.env.stop)
+        with open(cp.STATE_PATH, "w", encoding="utf-8") as f:
+            json.dump({"free_ids": ["cos-innego"], "registered_ids": []}, f)
+
+    def doc(self, cena, *godziny, prefiks="A"):
+        start = datetime.now(timezone.utc) + timedelta(days=7)
+        return {"data": {"attributes": {"title": f"Kort {prefiks}", "price": cena,
+                                        "datesStats": {"availableListingDates": len(godziny)}}},
+                "included": [TestFreeSlots.date_item(
+                    start.replace(hour=h, minute=0, second=0, microsecond=0).isoformat(),
+                    f"{prefiks}{h}") for h in godziny]}
+
+    def test_the_second_wave_keeps_the_right_court(self):
+        # Kort A publikuje w trakcie zapisu; kort B jest tylko „ostatni w pętli".
+        widoki_a = [self.doc(11, 18, prefiks="A")] + [self.doc(11, 18, 19, prefiks="A")] * 60
+        ceny_uzyte, obserwowane = {}, []
+
+        def fetch(lid):
+            obserwowane.append(lid)
+            if lid == self.A:
+                return widoki_a.pop(0) if len(widoki_a) > 1 else widoki_a[0]
+            return self.doc(99, prefiks="B")     # kort B: nic wolnego
+
+        def zapis(slot, price, cfg, speculative=False):
+            ceny_uzyte[slot["date_id"]] = price
+            time.sleep(0.1)
+            return False, "Decathlon HTTP 409: No available seats"
+
+        with mock.patch.object(cp, "resolve_current_id",
+                               side_effect=lambda x: x), \
+                mock.patch.object(cp, "fetch_listing", side_effect=fetch), \
+                mock.patch.object(cp, "register_slot", side_effect=zapis), \
+                mock.patch("sys.stdout", io.StringIO()):
+            cp.run_once(skip_light=True)
+
+        self.assertIn("A19", ceny_uzyte, "termin z drugiej fali nie dostał strzału")
+        self.assertEqual(ceny_uzyte["A19"], 11,
+                         "termin kortu A dostał cenę kortu B")
+        # Obserwator ma patrzeć na kort, który wydał kandydatów — nie na ostatni z pętli.
+        self.assertGreater(obserwowane.count(self.A), obserwowane.count(self.B))

@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.23.0 — trzy opcje rozstrzygały się różnie w różnych miejscach
+
+Ciąg dalszy przeglądu kodu. Ta sama opcja czytana w dwóch funkcjach dawała dwa różne
+wyniki — bez żadnego ostrzeżenia, po prostu dwie części aplikacji działały na innych
+ustawieniach. W dodatku HA `run.sh` eksportuje wszystko do ENV, więc problem był
+zamaskowany i wychodził tylko przy konfiguracji z samego `config.json`.
+
+| opcja | kto uwzględniał `config.json` | skutek pominięcia |
+|-------|-------------------------------|-------------------|
+| `TIMEZONE` | `run_once` tak, `main` i `_log_tz` **nie** | znaczniki czasu i okno zrywu w innej strefie niż filtrowanie terminów |
+| `NTFY_TOPIC` | `run_once` tak, kontrola tokenu **nie** | brak ostrzeżenia o martwym tokenie przed zrywem |
+| `LISTINGS` | `run_once` tak, rozgrzewka i sprint **nie** | sprint i zdalny strzał po cichu NIE BIORĄ UDZIAŁU w polowaniu |
+
+- **`opcja(env, cfg, klucz, domyślna)`** — jedno miejsce rozstrzygające pierwszeństwo
+  źródeł. Używane we wszystkich powyższych ścieżkach.
+- **`listings_z_konfiguracji(cfg)`** — lista kortów niezależnie od źródła (`config.json`
+  trzyma listę, ENV napis po przecinkach).
+- **`zryw_z_otoczenia()`** — parsowanie zrywu stało w **trzech** identycznych kopiach
+  (`burst_start_today`, `hunt_window`, `main`). Zapomniana kopia nie krzyczy, tylko
+  cicho liczy inaczej niż pozostałe.
+- **Uszkodzony `config.json` nie zatrzymuje polowania.** `load_config` łapał wyłącznie
+  `FileNotFoundError`; odkąd strefa czasowa logu pochodzi z konfiguracji, jeden zabłąkany
+  przecinek w JSON-ie wywracałby **każdą linię logu**, czyli cały dodatek.
+
+## Druga fala trafiała do niewłaściwego kortu
+
+Blok drugiej fali (0.22.0) brał `canon_url` i `listing_price` z **ostatniego obiegu pętli
+po kortach**, a obserwator patrzył na ostatni kort zamiast na ten, który wydał terminy
+do rejestracji. Reszta `run_once` trzyma mapy „per termin" właśnie po to, żeby wiele
+kortów działało.
+
+Test z dwoma kortami pokazał, że skutek był gorszy, niż zakładałem: przy publikacji na
+pierwszym korcie **druga fala nie dostawała strzału w ogóle**, bo obserwator patrzył
+w drugą stronę.
+
+Naprawione mapami `lid_by_id` i `meta_by_lid`. Przy jednym korcie — a tak jest
+w praktyce — zachowanie bez zmian.
+
 ## 0.22.1 — zestaw testów wykonywał 46 testów po raz drugi
 
 Przegląd kodu wykazał, że pięć klas testowych dziedziczyło po **konkretnych** klasach

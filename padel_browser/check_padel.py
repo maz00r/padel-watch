@@ -85,7 +85,10 @@ def _log_tz():
     """Strefa czasowa znaczników w logach (TIMEZONE / Europe/Warsaw; fallback UTC)."""
     global _LOG_TZ
     if _LOG_TZ is None:
-        name = os.environ.get("TIMEZONE") or "Europe/Warsaw"
+        # Strefa także z `config.json` — inaczej znaczniki czasu w logu chodziłyby
+        # w innej strefie niż filtrowanie terminów. `quiet=True`, bo ta funkcja bywa
+        # wywołana z wnętrza logowania i nie może wołać o pomoc do samej siebie.
+        name = opcja("TIMEZONE", load_config(quiet=True), "timezone", "Europe/Warsaw")
         try:
             _LOG_TZ = ZoneInfo(name) if ZoneInfo else timezone.utc
         except Exception:  # noqa: BLE001 - zła nazwa strefy nie może wywrócić logowania
@@ -151,6 +154,40 @@ def log(*args, level=None):
 _config_warned = False
 
 
+def listings_z_konfiguracji(cfg):
+    """Lista kortów jako pojedynczy napis, niezależnie od źródła.
+
+    `config.json` trzyma listę, ENV — napis rozdzielony przecinkami. Bez tej funkcji
+    rozgrzewka i sprint czytały wyłącznie ENV i przy konfiguracji plikowej po cichu
+    nie miały czego obserwować.
+    """
+    z_env = os.environ.get("LISTINGS")
+    if z_env:
+        return z_env
+    z_pliku = (cfg or {}).get("listings") or []
+    return ",".join(z_pliku) if isinstance(z_pliku, (list, tuple)) else str(z_pliku)
+
+
+def opcja(env, cfg, klucz, domyslna=""):
+    """Wartość opcji: ENV wygrywa nad `config.json`, potem wartość domyślna.
+
+    Wydzielone, bo trzy opcje rozstrzygały się RÓŻNIE zależnie od tego, która funkcja
+    je czytała, i były to ciche błędy — nic nie krzyczało, po prostu dwie części
+    aplikacji działały na innych ustawieniach:
+
+    - `TIMEZONE`  — `run_once` uwzględniał `config.json`, `main` i `_log_tz` nie.
+      Skutek: znaczniki czasu i okno zrywu w innej strefie niż filtrowanie terminów.
+    - `NTFY_TOPIC` — `run_once` uwzględniał, kontrola tokenu przed zrywem nie.
+      Skutek: brak ostrzeżenia o martwym tokenie u kogoś, kto ustawił temat w pliku.
+    - `LISTINGS`  — `run_once` uwzględniał, rozgrzewka i sprint nie.
+      Skutek: sprint i zdalny strzał po cichu NIE BIORĄ UDZIAŁU w polowaniu.
+
+    W dodatku HA `run.sh` eksportuje wszystko do ENV, więc te trzy były zamaskowane.
+    Wychodziły dopiero przy uruchomieniu z samym `config.json`.
+    """
+    return os.environ.get(env) or (cfg or {}).get(klucz) or domyslna
+
+
 def load_config(quiet=False):
     """Konfiguracja z pliku; w dodatku HA pliku nie ma i wszystko idzie z ENV.
 
@@ -164,6 +201,14 @@ def load_config(quiet=False):
     except FileNotFoundError:
         if not quiet and not _config_warned:
             log(f"(brak {CONFIG_PATH} — używam wartości z ENV)")
+            _config_warned = True
+        return {}
+    except (ValueError, OSError) as e:
+        # USZKODZONY plik nie może zatrzymać polowania. Wcześniej leciał tu wyjątek —
+        # a odkąd strefę czasową logu też bierzemy z konfiguracji, wywracałby KAŻDĄ
+        # linię logu, czyli cały dodatek, przez jeden zabłąkany przecinek w JSON-ie.
+        if not quiet and not _config_warned:
+            log(f"! {CONFIG_PATH} jest uszkodzony ({e}) — używam wartości z ENV")
             _config_warned = True
         return {}
 
@@ -221,8 +266,17 @@ PREFLIGHT_MIN_BEFORE = 30
 _preflight_done_on = None   # data ostatniej kontroli — jedna na dobę wystarczy
 
 
-def burst_start_today(now_local, tz):
-    """Początek dzisiejszego okna zrywu albo None, gdy zryw wyłączony/błędny."""
+def zryw_z_otoczenia():
+    """Zryw odczytany z ENV — JEDNO miejsce, które to robi.
+
+    Ta sama parę linii stała wcześniej w trzech miejscach (`burst_start_today`,
+    `hunt_window`, `main`). Trzy kopie tego samego ograniczenia znaczą, że przy zmianie
+    limitu trzeba pamiętać o wszystkich — a zapomniana kopia nie krzyczy, tylko cicho
+    liczy inaczej niż pozostałe.
+
+    Zwraca None, gdy zryw jest wyłączony ALBO zapisany błędnie: zły zryw nie może
+    wywrócić polowania, kontroli tokenu ani dziennika.
+    """
     surowy = (os.environ.get("BURST") or "").strip()
     if not surowy:
         return None
@@ -230,7 +284,15 @@ def burst_start_today(now_local, tz):
         burst = parse_burst_env(surowy)
         burst["seconds"] = max(1, min(int(os.environ.get("BURST_SECONDS") or 15),
                                       BURST_MAX_SECONDS))
-    except Exception:  # noqa: BLE001 - zły zryw nie może wywrócić kontroli
+        return burst
+    except Exception:  # noqa: BLE001 - zły zryw nie może wywrócić niczego
+        return None
+
+
+def burst_start_today(now_local, tz):
+    """Początek dzisiejszego okna zrywu albo None, gdy zryw wyłączony/błędny."""
+    burst = zryw_z_otoczenia()
+    if not burst:
         return None
     hour, minute, second = burst["at"]
     dzis = now_local.replace(hour=hour, minute=minute, second=second, microsecond=0)
@@ -311,14 +373,8 @@ def hunt_window(now_local, tz):
     zanim w ogóle spojrzeliśmy. Bez tego sprawdzenia takie przesunięcie wygląda
     po prostu jak seria gorszych dni.
     """
-    surowy = (os.environ.get("BURST") or "").strip()
-    if not surowy:
-        return None, ""
-    try:
-        burst = parse_burst_env(surowy)
-        burst["seconds"] = max(1, min(int(os.environ.get("BURST_SECONDS") or 15),
-                                      BURST_MAX_SECONDS))
-    except Exception:  # noqa: BLE001 - zły zryw nie może wywrócić dziennika
+    burst = zryw_z_otoczenia()
+    if not burst:
         return None, ""
     granice = burst_bounds(burst, tz, now_local)
     if not granice:
@@ -2643,9 +2699,9 @@ def run_once(announce_startup=False, skip_light=False, prefetched=None, defer_pu
     """
     cfg = load_config()
     state_doc = load_state_doc()
-    topic = os.environ.get("NTFY_TOPIC") or cfg.get("ntfy_topic") or ""
+    topic = opcja("NTFY_TOPIC", cfg, "ntfy_topic")
     reg_cfg = build_reg_cfg(cfg, state_doc)
-    tzname = os.environ.get("TIMEZONE") or cfg.get("timezone") or "Europe/Warsaw"
+    tzname = opcja("TIMEZONE", cfg, "timezone", "Europe/Warsaw")
     tz = ZoneInfo(tzname) if ZoneInfo else timezone.utc
     filters = resolve_filters(cfg)
     now_utc = datetime.now(timezone.utc)
@@ -2661,6 +2717,11 @@ def run_once(announce_startup=False, skip_light=False, prefetched=None, defer_pu
     book_url_by_id = {}
     listing_price_by_id = {}
     docs_by_lid = {}   # do policzenia CAŁEGO grafiku dnia, nie tylko wolnych terminów
+    # Który kort wydał dany termin i jakie ma dane. Reszta funkcji trzyma mapy „per
+    # termin" właśnie po to, żeby wiele kortów działało — druga fala musi robić tak samo,
+    # inaczej terminy z kortu A dostałyby cenę i link kortu B.
+    lid_by_id = {}
+    meta_by_lid = {}
     seen_at_all = None  # chwila, w której zobaczyliśmy grafik — punkt zerowy wieku danych
     # Ostatni przetworzony kort. Obserwator zapisu patrzy właśnie na niego — przy jednym
     # korcie (a tak jest w praktyce) to po prostu ten jedyny.
@@ -2729,10 +2790,12 @@ def run_once(announce_startup=False, skip_light=False, prefetched=None, defer_pu
         log(f"= {title}: {avail} dostępnych, {len(slots)} pasujących do filtra"
             + (f" (pobranie {fetch_ms} ms)" if skip_light else ""),
             level="info" if skip_light else "debug")
+        meta_by_lid[lid] = (canon_url, listing_price)
         for s in slots:
             current[s["id"]] = s
             book_url_by_id[s["id"]] = canon_url
             listing_price_by_id[s["id"]] = listing_price
+            lid_by_id[s["id"]] = lid
         for s in sorted(slots, key=lambda x: x["start_utc"]):
             log(f"   - {fmt_when(s['start_utc'].astimezone(tz), short=True)}  {s['name']}  {s['count']}/{s['limit']}",
                 level="info" if skip_light else "debug")
@@ -2788,8 +2851,10 @@ def run_once(announce_startup=False, skip_light=False, prefetched=None, defer_pu
         reg_cfg["seen_at"] = seen_at_all
         # Patrzymy RÓWNOLEGLE do zapisu — tylko w zrywie, bo tylko tam publikacja
         # sypie partiami i tylko tam warto płacić za ciągłe pobieranie.
-        obserwator = (obserwuj_podczas_zapisu(lid, filters, tz, set(current_ids))
-                      if skip_light and lid else None)
+        # Obserwujemy kort, który wydał terminy do rejestracji — a nie ostatni z pętli.
+        lid_obs = next((lid_by_id[i] for i in candidate_ids if i in lid_by_id), lid)
+        obserwator = (obserwuj_podczas_zapisu(lid_obs, filters, tz, set(current_ids))
+                      if skip_light and lid_obs else None)
         try:
             wyniki_lokalne, registered_ids = auto_register_new_slots(
                 [current[i] for i in candidate_ids], listing_price_by_id, reg_cfg,
@@ -2811,16 +2876,18 @@ def run_once(announce_startup=False, skip_light=False, prefetched=None, defer_pu
             log(f"⇉ Druga fala: {len(druga)} "
                 f"{plural(len(druga), 'termin', 'terminy', 'terminów')} pojawiło się "
                 f"w trakcie zapisu ({obserwator[1]['pobran']} pobrań) — strzelam od razu")
+            url_obs, cena_obs = meta_by_lid.get(lid_obs, (book_url, None))
             for sid, s in druga.items():
                 current[sid] = s
-                book_url_by_id[sid] = canon_url
-                listing_price_by_id[sid] = listing_price
+                book_url_by_id[sid] = url_obs
+                listing_price_by_id[sid] = cena_obs
+                lid_by_id[sid] = lid_obs
             current_ids |= set(druga)
             new_ids |= set(druga)
             if obserwator[1]["doc"] is not None:
                 # Grafik dnia liczony z dokumentu sprzed publikacji dał 03.09 wpis
                 # „4 wolne z 4", choć chwilę później kort miał ich jedenaście.
-                docs_by_lid[lid] = obserwator[1]["doc"]
+                docs_by_lid[lid_obs] = obserwator[1]["doc"]
             reg_cfg["seen_at"] = time.monotonic()
             wyniki_fala, registered_ids = auto_register_new_slots(
                 list(druga.values()), listing_price_by_id, reg_cfg, registered_ids)
@@ -2912,7 +2979,8 @@ def main():
         return 0  # tryb jednorazowy — nie wywracaj wywołującego
 
     # Opcjonalne okna z inną częstotliwością (INTERVALS), w strefie TIMEZONE.
-    tzname = os.environ.get("TIMEZONE") or "Europe/Warsaw"
+    cfg_startowy = load_config(quiet=True)
+    tzname = opcja("TIMEZONE", cfg_startowy, "timezone", "Europe/Warsaw")
     try:
         tz = ZoneInfo(tzname) if ZoneInfo else timezone.utc
     except Exception:  # noqa: BLE001
@@ -2957,7 +3025,8 @@ def main():
     except ValueError:
         salvo_size = 0
     warm_url = ""
-    first_listing = [u for u in re.split(r"[,\s]+", os.environ.get("LISTINGS", "")) if u.strip()]
+    first_listing = [u for u in re.split(r"[,\s]+", listings_z_konfiguracji(cfg_startowy))
+                     if u.strip()]
     if first_listing:
         warm_url = LISTING_URL.format(id=listing_id_from_url(first_listing[0]))
     if salvo_size > 1:
@@ -3050,7 +3119,7 @@ def main():
         # Kontrola sesji na pół godziny przed zrywem — 27.08 martwa sesja kosztowała
         # cztery wolne terminy, a dowiedzieliśmy się o tym dopiero po polowaniu.
         try:
-            preflight_token(now_local, tz, os.environ.get("NTFY_TOPIC") or "",
+            preflight_token(now_local, tz, opcja("NTFY_TOPIC", cfg_startowy, "ntfy_topic"),
                             LISTING_PAGE_URL.format(id=listing_id_from_url(first_listing[0]))
                             if first_listing else "")
         except Exception as e:  # noqa: BLE001 - kontrola nie może wywrócić pętli
