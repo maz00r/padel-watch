@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.24.0 — rozbicie wielkich funkcji (bez zmiany zachowania)
+
+Refaktor z przeglądu kodu. **Zachowanie nie zmienia się w żadnym miejscu** — zmienia się
+to, ile trzeba przeczytać, żeby cokolwiek zrozumieć.
+
+| funkcja | przed | po |
+|---------|-------|-----|
+| `run_once` | 267 linii, 67 rozgałęzień | **152 / 34** |
+| `main` | 258 linii, 66 rozgałęzień | **123 / 31** |
+| `auto_register_new_slots` | 228 linii, 51 rozgałęzień | **181 / 39** |
+
+Powód nie jest estetyczny. Pięć błędów rodzaju „etykieta twierdziła więcej, niż mówiły
+dane" (0.14.1, 0.16.1, 0.18.0, 0.19.1, 0.20.2) wyszło dopiero z produkcji — bo w funkcji
+na 260 linii nie widać, że dwie listy powstają z różnych zbiorów.
+
+Nowe jednostki, każda testowalna bez udawania połowy aplikacji:
+
+- **`zbierz_terminy` → `Grafik`** — obchód kortów. Jedyna część biegu rozmawiająca
+  z siecią. Zwraca `blad=True` zamiast `return 2` z połowy funkcji.
+- **`zarejestruj_z_obserwacja`** — rejestracja z równoległą obserwacją i druga fala.
+- **`wczytaj_nastawy` → `Nastawy`** — 60 linii parsowania opcji wyjętych z `main`.
+- **`wykonaj_sprint`** — jedno okno sprintu: rozgrzewka, strzał z Irlandii, zapas lokalny.
+- **`oddaj_salwe`** — wybór kształtu salwy (redundantna / zwykła / czołowa).
+
+### Dwa błędy znalezione przy okazji
+
+- **`warm_size` nie powstawało przy błędnym `auto_register_salvo`.** Poprawność zależała
+  wyłącznie od strażnika `if salvo_size > 1` stojącego sto linii dalej. Teraz zmienna
+  istnieje zawsze.
+- **Literówka w adresie kortu wywracała cały proces** nieobsłużonym wyjątkiem — a w Home
+  Assistancie znaczy to pętlę restartów bez wyjaśnienia. Każda inna błędna opcja wyłącza
+  tylko swoją funkcję; ta nie może być wyjątkiem. Teraz mówi, co jest nie tak.
+
+### Czego NIE zrobiłem i dlaczego
+
+**Podziału `check_padel.py` na osobne pliki.** Pomiar pokazał 210 wywołań
+`mock.patch.object(cp, ...)` na 29 różnych celach. Po przeniesieniu funkcji do submodułu
+takie łatanie cicho przestaje działać: test przechodzi, nie testując niczego. Podział na
+pliki nie skraca ani jednej funkcji — a to długość funkcji, nie długość pliku, była
+źródłem pięciu błędów produkcyjnych. Ryzyko bez zysku.
+
 ## 0.23.0 — trzy opcje rozstrzygały się różnie w różnych miejscach
 
 Ciąg dalszy przeglądu kodu. Ta sama opcja czytana w dwóch funkcjach dawała dwa różne

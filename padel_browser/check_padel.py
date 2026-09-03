@@ -2225,6 +2225,56 @@ def resolve_filters(cfg):
     return cfg.get("filters", [])
 
 
+def oddaj_salwe(fired, listing_price_by_id, cfg, speculative, salvo):
+    """Wybiera kształt salwy, ogłasza go w logu i strzela. Zwraca `(wyniki, ile_kopii)`.
+
+    Trzy kształty, w kolejności historycznej:
+
+    - **redundantny** (`hedge`, domyślny) — najcenniejszy termin dostaje kilka
+      równoległych zapisów o TEJ SAMEJ randze, więc ruszają razem. Czas przetwarzania
+      zapisu przez serwer to loteria (61–730 ms bez związku z czymkolwiek, co robimy),
+      więc bierzemy minimum z kilku losowań zamiast jednego.
+    - **zwykły** — wszystkie cele naraz.
+    - **czołowy** (`lead`) — najcenniejszy termin sam i pierwszy. HIPOTEZA OBALONA
+      31.08: czołowy strzał w 19:00 poszedł SAM, na danych sprzed 1 ms, i trwał 730 ms —
+      przy zerowej konkurencji z naszej strony. Kolejka nie jest nasza, tylko serwera.
+      Co gorsza, kosztowało to drugi strzał: 17:00 ruszyło na danych sprzed 732 ms.
+      Mediany po dwóch dniach: samotny 251 ms, z salwy 157 ms. Domyślnie wyłączone;
+      zostaje wyłącznie jako wyłącznik na wypadek powtórzenia pomiaru.
+    """
+    opis = ", ".join(fmt_when(s["start_utc"].astimezone(_log_tz()), short=True) for s in fired)
+    pierwszy = fmt_when(fired[0]["start_utc"].astimezone(_log_tz()), short=True)
+    czolowy = boolish(cfg.get("lead")) and len(fired) > 1
+    try:
+        kopie = max(1, min(int(cfg.get("hedge") or 1), HEDGE_MAX))
+    except (TypeError, ValueError):
+        kopie = 1
+
+    if czolowy:
+        log(f"⇉ Strzał czołowy: {pierwszy} sam, potem salwa w resztę ({opis})")
+        wyniki = fire_salvo(fired[:1], listing_price_by_id, cfg, speculative, 1)
+        # Któryś wątek mógł odnowić token po 401 — druga fala nie ma czekać na to samo.
+        for res in wyniki:
+            cfg["token"] = newer_decathlon_token(cfg.get("token") or "", res.get("token") or "")
+        wyniki += fire_salvo(fired[1:], listing_price_by_id, cfg, speculative, salvo - 1)
+        ile_kopii = collections.Counter(s["id"] for s in fired)
+    elif kopie > 1:
+        log(f"⇉ Salwa: {len(fired)} prób równolegle, w tym {pierwszy} "
+            f"×{kopie} równolegle ({opis})")
+        strzaly = [fired[0]] * kopie + fired[1:]
+        rangi = [0] * kopie + list(range(1, len(fired)))
+        wyniki = fire_salvo(strzaly, listing_price_by_id, cfg, speculative,
+                            len(strzaly), ranks=rangi)
+        ile_kopii = collections.Counter([fired[0]["id"]] * kopie
+                                        + [s["id"] for s in fired[1:]])
+    else:
+        log(f"⇉ Salwa: {len(fired)} prób równolegle ({opis})" if len(fired) > 1
+            else f"⇉ Strzał z rozgrzanego wątku ({opis})")
+        wyniki = fire_salvo(fired, listing_price_by_id, cfg, speculative, salvo)
+        ile_kopii = collections.Counter(s["id"] for s in fired)
+    return wyniki, ile_kopii
+
+
 def auto_register_new_slots(slots, listing_price_by_id, cfg, already_registered):
     """Zapisuje na NOWE wolne terminy, od najwcześniejszego, z limitem na przebieg.
 
@@ -2283,55 +2333,8 @@ def auto_register_new_slots(slots, listing_price_by_id, cfg, already_registered)
     if salvo > 1 and queue:
         fired = queue[:salvo]
         queue = queue[salvo:]
-        opis = ", ".join(fmt_when(s["start_utc"].astimezone(_log_tz()), short=True) for s in fired)
-        czolowy = boolish(cfg.get("lead")) and len(fired) > 1
-        try:
-            kopie = max(1, min(int(cfg.get("hedge") or 1), HEDGE_MAX))
-        except (TypeError, ValueError):
-            kopie = 1
-        if czolowy:
-            log(f"⇉ Strzał czołowy: {fmt_when(fired[0]['start_utc'].astimezone(_log_tz()), short=True)} "
-                f"sam, potem salwa w resztę ({opis})")
-        elif kopie > 1:
-            log(f"⇉ Salwa: {len(fired)} prób równolegle, w tym "
-                f"{fmt_when(fired[0]['start_utc'].astimezone(_log_tz()), short=True)} "
-                f"×{kopie} równolegle ({opis})")
-        else:
-            log(f"⇉ Salwa: {len(fired)} prób równolegle ({opis})" if len(fired) > 1
-                else f"⇉ Strzał z rozgrzanego wątku ({opis})")
         wins, auth_error = [], None
-        ile_kopii = collections.Counter(s["id"] for s in fired) if kopie == 1 else \
-            collections.Counter([fired[0]["id"]] * kopie + [s["id"] for s in fired[1:]])
-        if czolowy:
-            # HIPOTEZA OBALONA 31.08 — zostawione wyłącznie jako wyłączony wyłącznik.
-            #
-            # Zakładaliśmy (28.08), że serwer kolejkuje zapisy do kortu, a my sami
-            # spychamy najcenniejszą godzinę na koniec WŁASNEJ kolejki, strzelając w nią
-            # razem z pięcioma innymi. Podstawą była salwa z 25.08: start +0/+0/+8/+16 ms,
-            # powrót po 84 / 700 / 800 / 725 ms.
-            #
-            # Test 31.08 rozstrzygnął przeciwnie. Czołowy strzał w 19:00 poszedł SAM,
-            # na danych sprzed 1 ms — i trwał 730 ms. Przy zerowej konkurencji z naszej
-            # strony. Kolejka nie jest więc nasza, tylko serwera, i dostajemy ją tak samo
-            # przy jednym strzale jak przy sześciu.
-            #
-            # Co gorsza, kosztowało to drugi strzał: 17:00 ruszyło na danych sprzed
-            # 732 ms, bo czekało na czołowego. Mediany po dwóch dniach: strzał samotny
-            # 251 ms, strzał z salwy 157 ms — samotność NIE skraca zapisu, tylko psuje
-            # świeżość informacji dla reszty.
-            wyniki = fire_salvo(fired[:1], listing_price_by_id, cfg, speculative, 1)
-            for res in wyniki:
-                cfg["token"] = newer_decathlon_token(cfg.get("token") or "", res.get("token") or "")
-            wyniki += fire_salvo(fired[1:], listing_price_by_id, cfg, speculative, salvo - 1)
-        elif kopie > 1:
-            # Czołowy cel dostaje `kopie` równoległych zapisów o TEJ SAMEJ randze,
-            # więc wszystkie ruszają razem; reszta salwy leci obok bez zmian.
-            strzaly = [fired[0]] * kopie + fired[1:]
-            rangi = [0] * kopie + list(range(1, len(fired)))
-            wyniki = fire_salvo(strzaly, listing_price_by_id, cfg, speculative,
-                                len(strzaly), ranks=rangi)
-        else:
-            wyniki = fire_salvo(fired, listing_price_by_id, cfg, speculative, salvo)
+        wyniki, ile_kopii = oddaj_salwe(fired, listing_price_by_id, cfg, speculative, salvo)
         # Któryś wątek mógł odnowić token po HTTP 401 (pracował na kopii cfg).
         # Przejmujemy najświeższy, żeby próby sekwencyjne po salwie nie czekały
         # jeszcze raz na to samo odnowienie.
@@ -2686,53 +2689,47 @@ def obserwuj_podczas_zapisu(lid, filters, tz, znane_ids):
     return stop, wynik
 
 
-def run_once(announce_startup=False, skip_light=False, prefetched=None, defer_push=False,
-             remote=None):
-    """Zwraca 0 przy powodzeniu, 2 przy błędzie sieci (stan nietknięty).
+class Grafik:
+    """Wynik jednego obchodu kortów — wszystko, czego potrzebuje reszta biegu.
 
-    `defer_push=True` (tylko w zrywie/sprincie) odkłada powiadomienia do kolejki
-    zamiast wysyłać je od razu — patrz `flush_notifications`.
+    Wydzielone z `run_once`, która miała 256 linii i 69 punktów rozgałęzienia. Pięć
+    błędów rodzaju „etykieta twierdziła więcej, niż mówiły dane" (0.14.1, 0.16.1,
+    0.18.0, 0.19.1, 0.20.2) wyszło dopiero z produkcji — bo w tak długiej funkcji nie
+    widać, że dwie listy powstają z różnych zbiorów.
 
-    `remote` (wynik z Irlandii) niesie rejestracje, które JUŻ SIĘ ODBYŁY. Ich ID
-    dokładamy do zapisanych, zanim policzymy kandydatów — inaczej lokalna strona
-    próbowałaby zarezerwować drugi raz to, co zdalna właśnie zajęła.
+    `blad=True` znaczy: pobranie się nie udało i stanu NIE WOLNO nadpisać. Cisza po
+    błędzie sieci jest bezpieczna, nadpisany stan już nie — następny bieg uznałby
+    wszystkie terminy za nowe i wysłał lawinę powiadomień.
     """
-    cfg = load_config()
-    state_doc = load_state_doc()
-    topic = opcja("NTFY_TOPIC", cfg, "ntfy_topic")
-    reg_cfg = build_reg_cfg(cfg, state_doc)
-    tzname = opcja("TIMEZONE", cfg, "timezone", "Europe/Warsaw")
-    tz = ZoneInfo(tzname) if ZoneInfo else timezone.utc
-    filters = resolve_filters(cfg)
-    now_utc = datetime.now(timezone.utc)
 
-    listings_env = os.environ.get("LISTINGS")
-    if listings_env:
-        listings = [u.strip() for u in re.split(r"[,\s]+", listings_env) if u.strip()]
-    else:
-        listings = cfg.get("listings", [])
-    book_url = None  # kanoniczny link do rezerwacji (budowany z aktualnego ID)
+    __slots__ = ("current", "book_url", "book_url_by_id", "listing_price_by_id",
+                 "lid_by_id", "meta_by_lid", "docs_by_lid", "seen_at", "blad")
 
-    current = {}  # id -> slot
-    book_url_by_id = {}
-    listing_price_by_id = {}
-    docs_by_lid = {}   # do policzenia CAŁEGO grafiku dnia, nie tylko wolnych terminów
-    # Który kort wydał dany termin i jakie ma dane. Reszta funkcji trzyma mapy „per
-    # termin" właśnie po to, żeby wiele kortów działało — druga fala musi robić tak samo,
-    # inaczej terminy z kortu A dostałyby cenę i link kortu B.
-    lid_by_id = {}
-    meta_by_lid = {}
-    seen_at_all = None  # chwila, w której zobaczyliśmy grafik — punkt zerowy wieku danych
-    # Ostatni przetworzony kort. Obserwator zapisu patrzy właśnie na niego — przy jednym
-    # korcie (a tak jest w praktyce) to po prostu ten jedyny.
-    lid = canon_url = listing_price = None
+    def __init__(self):
+        self.current = {}                # id terminu -> termin
+        self.book_url = None             # kanoniczny link, z PIERWSZEGO kortu
+        self.book_url_by_id = {}
+        self.listing_price_by_id = {}
+        self.lid_by_id = {}              # który kort wydał dany termin
+        self.meta_by_lid = {}            # kort -> (link, cena)
+        self.docs_by_lid = {}            # do policzenia CAŁEGO grafiku dnia
+        self.seen_at = None              # NAJSTARSZA obserwacja: punkt zerowy wieku danych
+        self.blad = False
 
+
+def zbierz_terminy(listings, filters, tz, now_utc, skip_light=False, prefetched=None):
+    """Obchodzi korty i zwraca `Grafik`.
+
+    Wyłącznie zbieranie: nie rejestruje, nie powiadamia, nie zapisuje stanu. Dzięki
+    temu da się to przetestować bez udawania połowy aplikacji.
+    """
+    g = Grafik()
     for url in listings:
         # Podążaj za przekierowaniem -> aktualne ID kortu (do monitoringu i linku).
         lid = resolve_current_id(listing_id_from_url(url))
         canon_url = LISTING_PAGE_URL.format(id=lid)
-        if book_url is None:
-            book_url = canon_url
+        if g.book_url is None:
+            g.book_url = canon_url
         # Krok 1: lekki ping (~1 KB) — licznik dostępności bez ciężkiego payloadu.
         # W ZRYWIE go pomijamy: oszczędza transfer, ale kosztuje całą rundę do serwera
         # (~110 ms), a pełne dane i tak są potrzebne po identyfikatory terminów —
@@ -2760,7 +2757,8 @@ def run_once(announce_startup=False, skip_light=False, prefetched=None, defer_pu
                     attrs = (fetch_listing_light(lid).get("data", {}).get("attributes", {}) or {})
             except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as e:
                 log(f"! Błąd pobierania kortu {lid}: {e} — nie zmieniam stanu, kończę.")
-                return 2  # błąd sieci: nie nadpisuj stanu
+                g.blad = True
+                return g
             seen_at = time.monotonic()
             fetch_ms = int((seen_at - fetch_started) * 1000)
         listing_price = attrs.get("price")
@@ -2777,28 +2775,129 @@ def run_once(announce_startup=False, skip_light=False, prefetched=None, defer_pu
                 doc = fetch_listing(lid)
             except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as e:
                 log(f"! Błąd pobierania terminów kortu {lid}: {e} — nie zmieniam stanu, kończę.")
-                return 2  # błąd sieci: nie nadpisuj stanu
+                g.blad = True
+                return g
             seen_at = time.monotonic()
-        docs_by_lid[lid] = doc
+        g.docs_by_lid[lid] = doc
         # Wiek danych liczymy od NAJSTARSZEJ obserwacji w tym biegu: jeśli któryś kort
         # pobraliśmy wcześniej, to jego terminy są odpowiednio starsze.
         if seen_at is not None:
-            seen_at_all = seen_at if seen_at_all is None else min(seen_at_all, seen_at)
+            g.seen_at = seen_at if g.seen_at is None else min(g.seen_at, seen_at)
         slots = [s for s in free_slots(doc, lid, now_utc) if passes_filter(s, filters, tz)]
         # W zrywie dokładamy czas pobrania — pozwala oddzielić opóźnienie sieci
         # od opóźnienia wykrycia przy analizie logu po polowaniu.
         log(f"= {title}: {avail} dostępnych, {len(slots)} pasujących do filtra"
             + (f" (pobranie {fetch_ms} ms)" if skip_light else ""),
             level="info" if skip_light else "debug")
-        meta_by_lid[lid] = (canon_url, listing_price)
+        g.meta_by_lid[lid] = (canon_url, listing_price)
         for s in slots:
-            current[s["id"]] = s
-            book_url_by_id[s["id"]] = canon_url
-            listing_price_by_id[s["id"]] = listing_price
-            lid_by_id[s["id"]] = lid
+            g.current[s["id"]] = s
+            g.book_url_by_id[s["id"]] = canon_url
+            g.listing_price_by_id[s["id"]] = listing_price
+            g.lid_by_id[s["id"]] = lid
         for s in sorted(slots, key=lambda x: x["start_utc"]):
             log(f"   - {fmt_when(s['start_utc'].astimezone(tz), short=True)}  {s['name']}  {s['count']}/{s['limit']}",
                 level="info" if skip_light else "debug")
+    return g
+
+
+def zarejestruj_z_obserwacja(grafik, kandydaci, reg_cfg, registered_ids, filters, tz,
+                             skip_light):
+    """Rejestruje kandydatów, patrząc RÓWNOLEGLE na to, co pojawia się w trakcie zapisu.
+
+    Zwraca `(wyniki, registered_ids, nowe_z_drugiej_fali)`. `grafik` jest dopisywany
+    w miejscu: terminy z drugiej fali stają się częścią obrazu tego biegu, żeby trafiły
+    do powiadomień, stanu i dziennika tak samo jak pierwsza fala.
+
+    Dlaczego druga fala w ogóle istnieje — log z 03.09: czekanie na odpowiedź serwera
+    trwało 1303 ms i przez ten czas nikt nie patrzył na grafik. Liczba dostępnych
+    terminów skoczyła w tym oknie z 4 na 10, a wszystkie wieczorne godziny zniknęły,
+    zanim spojrzeliśmy ponownie.
+    """
+    reg_cfg["seen_at"] = grafik.seen_at
+    # Obserwujemy kort, który wydał terminy do rejestracji — nie ostatni z brzegu.
+    lid_obs = next((grafik.lid_by_id[i] for i in kandydaci if i in grafik.lid_by_id), None)
+    # Tylko w zrywie: poza nim publikacja nie sypie partiami, a ciągłe pobieranie
+    # to sam ruch bez zysku.
+    obserwator = (obserwuj_podczas_zapisu(lid_obs, filters, tz, set(grafik.current))
+                  if skip_light and lid_obs else None)
+    try:
+        wyniki, registered_ids = auto_register_new_slots(
+            [grafik.current[i] for i in kandydaci], grafik.listing_price_by_id,
+            reg_cfg, registered_ids)
+    finally:
+        if obserwator:
+            obserwator[0].set()
+    strzaly_pierwszej_fali = list(reg_cfg.get("shots") or [])
+
+    druga = obserwator[1]["nowe"] if obserwator else {}
+    if not druga:
+        return wyniki, registered_ids, {}
+
+    log(f"⇉ Druga fala: {len(druga)} "
+        f"{plural(len(druga), 'termin', 'terminy', 'terminów')} pojawiło się "
+        f"w trakcie zapisu ({obserwator[1]['pobran']} pobrań) — strzelam od razu")
+    url_obs, cena_obs = grafik.meta_by_lid.get(lid_obs, (grafik.book_url, None))
+    for sid, s in druga.items():
+        grafik.current[sid] = s
+        grafik.book_url_by_id[sid] = url_obs
+        grafik.listing_price_by_id[sid] = cena_obs
+        grafik.lid_by_id[sid] = lid_obs
+    if obserwator[1]["doc"] is not None:
+        # Grafik dnia liczony z dokumentu sprzed publikacji dał 03.09 wpis
+        # „4 wolne z 4", choć chwilę później kort miał ich jedenaście.
+        grafik.docs_by_lid[lid_obs] = obserwator[1]["doc"]
+
+    # Strzelamy PRZED księgowaniem: dziennik, stan i powiadomienia kosztowały 03.09
+    # kolejne ~470 ms, a to więcej, niż trwa cudzy zapis.
+    reg_cfg["seen_at"] = time.monotonic()
+    wyniki_fala, registered_ids = auto_register_new_slots(
+        list(druga.values()), grafik.listing_price_by_id, reg_cfg, registered_ids)
+    wyniki.update(wyniki_fala)
+    # `shots` jest zerowane przy każdym wywołaniu — bez sklejenia dziennik pokazałby
+    # wyłącznie drugą falę i zgubił strzał, który ją poprzedził.
+    reg_cfg["shots"] = strzaly_pierwszej_fali + list(reg_cfg.get("shots") or [])
+    return wyniki, registered_ids, druga
+
+
+def run_once(announce_startup=False, skip_light=False, prefetched=None, defer_push=False,
+             remote=None):
+    """Zwraca 0 przy powodzeniu, 2 przy błędzie sieci (stan nietknięty).
+
+    `defer_push=True` (tylko w zrywie/sprincie) odkłada powiadomienia do kolejki
+    zamiast wysyłać je od razu — patrz `flush_notifications`.
+
+    `remote` (wynik z Irlandii) niesie rejestracje, które JUŻ SIĘ ODBYŁY. Ich ID
+    dokładamy do zapisanych, zanim policzymy kandydatów — inaczej lokalna strona
+    próbowałaby zarezerwować drugi raz to, co zdalna właśnie zajęła.
+    """
+    cfg = load_config()
+    state_doc = load_state_doc()
+    topic = opcja("NTFY_TOPIC", cfg, "ntfy_topic")
+    reg_cfg = build_reg_cfg(cfg, state_doc)
+    tzname = opcja("TIMEZONE", cfg, "timezone", "Europe/Warsaw")
+    tz = ZoneInfo(tzname) if ZoneInfo else timezone.utc
+    filters = resolve_filters(cfg)
+    now_utc = datetime.now(timezone.utc)
+
+    listings_env = os.environ.get("LISTINGS")
+    if listings_env:
+        listings = [u.strip() for u in re.split(r"[,\s]+", listings_env) if u.strip()]
+    else:
+        listings = cfg.get("listings", [])
+    grafik = zbierz_terminy(listings, filters, tz, now_utc, skip_light, prefetched)
+    if grafik.blad:
+        return 2  # błąd sieci: stan zostaje nietknięty
+    # Nazwy lokalne, żeby reszta funkcji czytała się jak dotąd. `grafik` jest jedynym
+    # źródłem prawdy o tym, co widzieliśmy w tym biegu.
+    current = grafik.current
+    book_url = grafik.book_url
+    book_url_by_id = grafik.book_url_by_id
+    listing_price_by_id = grafik.listing_price_by_id
+    lid_by_id = grafik.lid_by_id
+    meta_by_lid = grafik.meta_by_lid
+    docs_by_lid = grafik.docs_by_lid
+    seen_at_all = grafik.seen_at
 
     current_ids = set(current.keys())
     prev = None if state_doc is None else set(state_doc.get("free_ids", []))
@@ -2848,53 +2947,13 @@ def run_once(announce_startup=False, skip_light=False, prefetched=None, defer_pu
         if retried:
             log(f"↻ Ponawiam auto-rejestrację dla {len(retried)} zapamiętanego(-ych) "
                 f"terminu(-ów) po wcześniejszym błędzie tokenu.")
-        reg_cfg["seen_at"] = seen_at_all
-        # Patrzymy RÓWNOLEGLE do zapisu — tylko w zrywie, bo tylko tam publikacja
-        # sypie partiami i tylko tam warto płacić za ciągłe pobieranie.
-        # Obserwujemy kort, który wydał terminy do rejestracji — a nie ostatni z pętli.
-        lid_obs = next((lid_by_id[i] for i in candidate_ids if i in lid_by_id), lid)
-        obserwator = (obserwuj_podczas_zapisu(lid_obs, filters, tz, set(current_ids))
-                      if skip_light and lid_obs else None)
-        try:
-            wyniki_lokalne, registered_ids = auto_register_new_slots(
-                [current[i] for i in candidate_ids], listing_price_by_id, reg_cfg,
-                registered_ids
-            )
-        finally:
-            if obserwator:
-                obserwator[0].set()
+        wyniki_lokalne, registered_ids, druga_fala = zarejestruj_z_obserwacja(
+            grafik, candidate_ids, reg_cfg, registered_ids, filters, tz, skip_light)
         # update, nie podstawienie: wyniki z Irlandii muszą przetrwać, bo to one
         # trafiają do powiadomienia jako „co udało się zarezerwować".
         registration_results.update(wyniki_lokalne)
-        strzaly_lokalne = list(reg_cfg.get("shots") or [])
-
-        # DRUGA FALA: terminy, które pojawiły się W TRAKCIE zapisu. Strzelamy w nie
-        # NATYCHMIAST, przed księgowaniem — dziennik, stan i powiadomienia kosztowały
-        # 03.09 kolejne ~470 ms, a to więcej, niż trwa cudzy zapis.
-        if obserwator and obserwator[1]["nowe"]:
-            druga = obserwator[1]["nowe"]
-            log(f"⇉ Druga fala: {len(druga)} "
-                f"{plural(len(druga), 'termin', 'terminy', 'terminów')} pojawiło się "
-                f"w trakcie zapisu ({obserwator[1]['pobran']} pobrań) — strzelam od razu")
-            url_obs, cena_obs = meta_by_lid.get(lid_obs, (book_url, None))
-            for sid, s in druga.items():
-                current[sid] = s
-                book_url_by_id[sid] = url_obs
-                listing_price_by_id[sid] = cena_obs
-                lid_by_id[sid] = lid_obs
-            current_ids |= set(druga)
-            new_ids |= set(druga)
-            if obserwator[1]["doc"] is not None:
-                # Grafik dnia liczony z dokumentu sprzed publikacji dał 03.09 wpis
-                # „4 wolne z 4", choć chwilę później kort miał ich jedenaście.
-                docs_by_lid[lid_obs] = obserwator[1]["doc"]
-            reg_cfg["seen_at"] = time.monotonic()
-            wyniki_fala, registered_ids = auto_register_new_slots(
-                list(druga.values()), listing_price_by_id, reg_cfg, registered_ids)
-            registration_results.update(wyniki_fala)
-            # `shots` jest zerowane przy każdym wywołaniu — bez sklejenia dziennik
-            # pokazałby wyłącznie drugą falę i zgubił strzał, który ją poprzedził.
-            reg_cfg["shots"] = strzaly_lokalne + list(reg_cfg.get("shots") or [])
+        current_ids |= set(druga_fala)
+        new_ids |= set(druga_fala)
 
     # Alert o tokenie: raz na incydent (kasowany, gdy token znów działa).
     auth_error = reg_cfg.get("auth_error")
@@ -2956,28 +3015,24 @@ def run_once(announce_startup=False, skip_light=False, prefetched=None, defer_pu
     return 0
 
 
-def main():
-    """Jednorazowo (domyślnie) albo w pętli, jeśli CHECK_INTERVAL > 0 (sekundy).
+class Nastawy:
+    """Ustawienia polowania odczytane RAZ, przy starcie procesu.
 
-    Tryb pętli jest przeznaczony do kontenera Docker / własnego serwera — proces
-    żyje cały czas i sprawdza terminy co CHECK_INTERVAL sekund. Pojedynczy błąd
-    nie zabija procesu — logujemy i próbujemy ponownie w kolejnej iteracji.
+    Wcześniej `main` parsowała to wszystko w miejscu — 60 linii przed pętlą, przez które
+    trzeba było przejść, żeby zobaczyć, co właściwie robi polowanie. Osobno: każda z tych
+    opcji ma inny sposób zawodzenia (zły format, przekroczony zakres, brak zależnej
+    opcji), a wymieszane z pętlą główną te ścieżki błędu były nieczytelne.
     """
-    try:
-        interval = int(os.environ.get("CHECK_INTERVAL", "0"))
-    except ValueError:
-        interval = 0
 
-    # Czyszczenie stanu wykonujemy RAZ przy starcie procesu, nie w każdej iteracji.
-    try:
-        apply_clear_state()
-    except OSError as e:
-        log(f"! Nie udało się wyczyścić stanu: {e!r} — kontynuuję.")
+    __slots__ = ("tz", "tzname", "windows", "burst", "salvo_size", "hedge_size",
+                 "warm_size", "warm_url", "first_listing", "remote_url", "remote_secret",
+                 "sprint", "sprint_threads")
 
-    if interval <= 0:
-        run_once()
-        return 0  # tryb jednorazowy — nie wywracaj wywołującego
 
+def wczytaj_nastawy(interval):
+    """Parsuje opcje z ENV/pliku i zwraca `Nastawy`. Błędna opcja WYŁĄCZA swoją funkcję,
+    nigdy nie wywraca procesu — polowanie bez zrywu jest gorsze, ale wciąż polowaniem."""
+    n = Nastawy()
     # Opcjonalne okna z inną częstotliwością (INTERVALS), w strefie TIMEZONE.
     cfg_startowy = load_config(quiet=True)
     tzname = opcja("TIMEZONE", cfg_startowy, "timezone", "Europe/Warsaw")
@@ -3024,11 +3079,22 @@ def main():
         warm_size = min(salvo_size + hedge_size - 1, SALVO_MAX + HEDGE_MAX - 1)
     except ValueError:
         salvo_size = 0
+        # Bez tego `warm_size` w ogóle nie powstaje przy błędnej opcji. Dziś ratuje nas
+        # tylko to, że `if salvo_size > 1` nie dopuszcza do użycia — czyli poprawność
+        # zależy od strażnika stojącego sto linii dalej. Tak się nie pisze.
+        hedge_size = warm_size = 1
     warm_url = ""
     first_listing = [u for u in re.split(r"[,\s]+", listings_z_konfiguracji(cfg_startowy))
                      if u.strip()]
     if first_listing:
-        warm_url = LISTING_URL.format(id=listing_id_from_url(first_listing[0]))
+        try:
+            warm_url = LISTING_URL.format(id=listing_id_from_url(first_listing[0]))
+        except Exception as e:  # noqa: BLE001
+            # Literówka w adresie kortu wywracała CAŁY proces bez czytelnego powodu,
+            # a w Home Assistancie znaczy to pętlę restartów bez wyjaśnienia. Każda inna
+            # błędna opcja wyłącza tylko swoją funkcję — ta nie może być wyjątkiem.
+            log(f"! Nie rozpoznaję adresu kortu '{first_listing[0]}' ({e}) — "
+                f"sprint i rozgrzewka wyłączone. Popraw opcję listing_url.")
     if salvo_size > 1:
         log(f"⇉ Salwa włączona: do {salvo_size} prób rejestracji równolegle "
             f"(nadmiar ponad auto_register_max jest anulowany).")
@@ -3064,6 +3130,114 @@ def main():
         except Exception as e:  # noqa: BLE001 - błędna opcja nie może wywrócić monitora
             log(f"! Błędny SPRINT '{sprint_env}': {e} — sprint wyłączony")
             sprint = None
+
+
+    n.tz, n.tzname, n.windows, n.burst = tz, tzname, windows, burst
+    n.salvo_size, n.hedge_size, n.warm_size = salvo_size, hedge_size, warm_size
+    n.warm_url, n.first_listing = warm_url, first_listing
+    n.remote_url, n.remote_secret = remote_url, remote_secret
+    n.sprint, n.sprint_threads = sprint, sprint_threads
+    return n
+
+
+def wykonaj_sprint(n, granice, now_local, in_sprint):
+    """Jedno okno sprintu: rozgrzewka, strzał z Irlandii, zapas lokalny.
+
+    Zwraca `(prefetched, remote_result, in_sprint)`. Wydzielone z pętli głównej, w której
+    zajmowało 62 linie i mieszało trzy odrębne sprawy: cykl życia okna, wywołanie zdalne
+    i decyzję o zapasie lokalnym.
+    """
+    if not in_sprint:
+        # Sprint to najbardziej czasowo-krytyczny moment całego polowania —
+        # milisekundy w znacznikach są tu potrzebne nawet bez zrywu.
+        set_log_precision(True)
+        log(f"🏁 Sprint START — {n.sprint_threads} wątków bez przerw "
+            f"do {granice[1]:%H:%M:%S}")
+        in_sprint = True
+        # Salwa strzela dopiero, gdy sprint coś znajdzie — a jej pula leży bezczynnie
+        # od startu zrywu. UWAGA: „wystygnięte gniazda" jako wyjaśnienie wolnego
+        # PIERWSZEGO strzału zostały obalone DWA RAZY: (1) pomiarem — połączenie
+        # przeżywa 12 s bezczynności (66–70 ms), (2) produkcyjnie 9.08 — połączenia
+        # odświeżono tu, 2,5 s przed strzałem, a pierwsza rejestracja i tak kosztowała
+        # 319 ms wobec 57–84 ms następnych (8.08 identycznie: 294 ms wobec 73 ms).
+        # Uwierzytelniona rozgrzewka (0.9.0) tego NIE naprawiła i została usunięta —
+        # patrz `warm_connections`. Zostaje jako tanie ubezpieczenie na wypadek, gdyby
+        # serwer jednak zamknął bezczynne gniazdo. Sprint swojej puli nie potrzebuje:
+        # zaraz zacznie pobierać bez przerw.
+        if n.salvo_size > 1:
+            odswiezone = time.monotonic()
+            warm_connections(salvo_pool(n.warm_size), n.warm_size, n.warm_url)
+            log(f"⇉ Salwa odświeżona przed sprintem "
+                f"[{int((time.monotonic() - odswiezone) * 1000)} ms]")
+
+    szukanie = time.monotonic()
+    zostalo = max(0.0, (granice[1] - now_local).total_seconds())
+    deadline = szukanie + zostalo
+    baseline = set((load_state_doc() or {}).get("free_ids") or [])
+    prefetched = remote_result = None
+
+    if n.remote_url:
+        # ZDALNY STRZAŁ: sprint i salwa lecą z eu-west-1, obok serwera Decathlona.
+        # Rejestracja odbywa się TAM, więc wynik trzeba przenieść do stanu tutaj.
+        wynik, blad = call_remote(
+            n.remote_url, n.remote_secret,
+            remote_payload(n.first_listing[0], baseline, n.tzname, zostalo,
+                           n.sprint_threads,
+                           build_reg_cfg(load_config(quiet=True), load_state_doc())),
+            timeout=zostalo + REMOTE_TIMEOUT_MARGIN)
+        if blad:
+            # ZAPAS: gdy Irlandia milczy, polujemy lokalnie. Gorzej, ale wciąż.
+            # Jedyny groźny przypadek to timeout PO rejestracji — wtedy termin jest
+            # zajęty, a my o tym nie wiemy, więc mówimy o tym głośno.
+            log(f"! ☁ Zdalny sprint nieudany ({blad}) — poluję lokalnie.")
+            if "brak odpowiedzi" in blad:
+                log("! ☁ UWAGA: brak odpowiedzi NIE znaczy, że nic nie "
+                    "zarezerwowano. Sprawdź panel Padel po polowaniu.")
+        else:
+            prefetched, remote_result = adopt_remote(wynik)
+
+    # Zapas lokalny ma sens tylko przy SZYBKIEJ wpadce zdalnej (odmowa, zły adres, brak
+    # sekretu) — te wracają w milisekundach i okno jeszcze trwa. Po timeoucie okna już
+    # nie ma, a do tego zdalna strona mogła zarezerwować: dlatego wtedy nie strzelamy
+    # powtórnie, tylko ostrzegamy (wyżej).
+    if prefetched is None and remote_result is None and time.monotonic() < deadline:
+        prefetched = run_sprint(deadline, n.sprint_threads, n.first_listing[0],
+                                baseline, n.tz,
+                                filters=resolve_filters(load_config(quiet=True)))
+    if prefetched:
+        log(f"🏁 Sprint: NOWE terminy wykryte po "
+            f"{int((time.monotonic() - szukanie) * 1000)} ms — rejestruję z gotowych danych")
+    return prefetched, remote_result, in_sprint
+
+
+def main():
+    """Jednorazowo (domyślnie) albo w pętli, jeśli CHECK_INTERVAL > 0 (sekundy).
+
+    Tryb pętli jest przeznaczony do kontenera Docker / własnego serwera — proces
+    żyje cały czas i sprawdza terminy co CHECK_INTERVAL sekund. Pojedynczy błąd
+    nie zabija procesu — logujemy i próbujemy ponownie w kolejnej iteracji.
+    """
+    try:
+        interval = int(os.environ.get("CHECK_INTERVAL", "0"))
+    except ValueError:
+        interval = 0
+
+    # Czyszczenie stanu wykonujemy RAZ przy starcie procesu, nie w każdej iteracji.
+    try:
+        apply_clear_state()
+    except OSError as e:
+        log(f"! Nie udało się wyczyścić stanu: {e!r} — kontynuuję.")
+
+    if interval <= 0:
+        run_once()
+        return 0  # tryb jednorazowy — nie wywracaj wywołującego
+
+    n = wczytaj_nastawy(interval)
+    tz, windows, burst = n.tz, n.windows, n.burst
+    salvo_size, warm_size, warm_url = n.salvo_size, n.warm_size, n.warm_url
+    first_listing, tzname = n.first_listing, n.tzname
+    remote_url, remote_secret = n.remote_url, n.remote_secret
+    sprint, sprint_threads = n.sprint, n.sprint_threads
 
     log_rtt(urllib.parse.urlsplit(DECATHLON_API_URL).netloc)
 
@@ -3131,63 +3305,8 @@ def main():
         remote_result = None
         sprint_bounds = burst_bounds(sprint, tz, now_local) if sprint else None
         if sprint_bounds and sprint_bounds[0] <= now_local < sprint_bounds[1] and warm_url:
-            if not in_sprint:
-                # Sprint to najbardziej czasowo-krytyczny moment całego polowania —
-                # milisekundy w znacznikach są tu potrzebne nawet bez zrywu.
-                set_log_precision(True)
-                log(f"🏁 Sprint START — {sprint_threads} wątków bez przerw "
-                    f"do {sprint_bounds[1]:%H:%M:%S}")
-                in_sprint = True
-                # Salwa strzela dopiero, gdy sprint coś znajdzie — a jej pula leży
-                # bezczynnie od startu zrywu. UWAGA: „wystygnięte gniazda" jako
-                # wyjaśnienie wolnego PIERWSZEGO strzału zostały obalone DWA RAZY:
-                # (1) pomiarem — połączenie przeżywa 12 s bezczynności (66–70 ms),
-                # (2) produkcyjnie 9.08 — połączenia odświeżono tu, 2,5 s przed
-                # strzałem, a pierwsza rejestracja i tak kosztowała 319 ms wobec
-                # 57–84 ms następnych (8.08 identycznie: 294 ms wobec 73 ms).
-                # Uwierzytelniona rozgrzewka (0.9.0) tego NIE naprawiła i została
-                # usunięta — patrz `warm_connections`. Zostaje jako tanie ubezpieczenie
-                # na wypadek, gdyby serwer jednak zamknął bezczynne gniazdo.
-                # Sprint swojej puli nie potrzebuje: zaraz zacznie pobierać bez przerw.
-                if salvo_size > 1:
-                    odswiezone = time.monotonic()
-                    warm_connections(salvo_pool(warm_size), warm_size, warm_url)
-                    log(f"⇉ Salwa odświeżona przed sprintem "
-                        f"[{int((time.monotonic() - odswiezone) * 1000)} ms]")
-            szukanie = time.monotonic()
-            zostalo = max(0.0, (sprint_bounds[1] - now_local).total_seconds())
-            deadline = szukanie + zostalo
-            baseline = set((load_state_doc() or {}).get("free_ids") or [])
-            remote_result = None
-            if remote_url:
-                # ZDALNY STRZAŁ: sprint i salwa lecą z eu-west-1, obok serwera Decathlona.
-                # Rejestracja odbywa się TAM, więc wynik trzeba przenieść do stanu tutaj.
-                wynik, blad = call_remote(
-                    remote_url, remote_secret,
-                    remote_payload(first_listing[0], baseline, tzname, zostalo,
-                                   sprint_threads,
-                                   build_reg_cfg(load_config(quiet=True), load_state_doc())),
-                    timeout=zostalo + REMOTE_TIMEOUT_MARGIN)
-                if blad:
-                    # ZAPAS: gdy Irlandia milczy, polujemy lokalnie. Gorzej, ale wciąż.
-                    # Jedyny groźny przypadek to timeout PO rejestracji — wtedy termin
-                    # jest zajęty, a my o tym nie wiemy, więc mówimy o tym głośno.
-                    log(f"! ☁ Zdalny sprint nieudany ({blad}) — poluję lokalnie.")
-                    if "brak odpowiedzi" in blad:
-                        log("! ☁ UWAGA: brak odpowiedzi NIE znaczy, że nic nie "
-                            "zarezerwowano. Sprawdź panel Padel po polowaniu.")
-                else:
-                    prefetched, remote_result = adopt_remote(wynik)
-            # Zapas lokalny ma sens tylko przy SZYBKIEJ wpadce zdalnej (odmowa, zły
-            # adres, brak sekretu) — te wracają w milisekundach i okno jeszcze trwa.
-            # Po timeoucie okna już nie ma, a do tego zdalna strona mogła zarezerwować:
-            # dlatego wtedy nie strzelamy powtórnie, tylko ostrzegamy (wyżej).
-            if prefetched is None and remote_result is None and time.monotonic() < deadline:
-                prefetched = run_sprint(deadline, sprint_threads, first_listing[0],
-                                        baseline, tz, filters=resolve_filters(load_config(quiet=True)))
-            if prefetched:
-                log(f"🏁 Sprint: NOWE terminy wykryte po "
-                    f"{int((time.monotonic() - szukanie) * 1000)} ms — rejestruję z gotowych danych")
+            prefetched, remote_result, in_sprint = wykonaj_sprint(
+                n, sprint_bounds, now_local, in_sprint)
         elif in_sprint:
             log("🏁 Sprint koniec")
             in_sprint = False

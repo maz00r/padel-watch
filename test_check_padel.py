@@ -4260,3 +4260,113 @@ class SecondWaveWithTwoCourtsTest(unittest.TestCase):
                          "termin kortu A dostał cenę kortu B")
         # Obserwator ma patrzeć na kort, który wydał kandydatów — nie na ostatni z pętli.
         self.assertGreater(obserwowane.count(self.A), obserwowane.count(self.B))
+
+
+class GatherSlotsTest(unittest.TestCase):
+    """`zbierz_terminy` — obchód kortów wydzielony z `run_once`.
+
+    Sedno wydzielenia: to jedyna część biegu, która rozmawia z siecią i buduje obraz
+    grafiku. Wcześniej dało się ją sprawdzić wyłącznie przez `run_once`, czyli udając
+    stan, token, powiadomienia i dziennik naraz.
+    """
+
+    LID = "aaaaaaaa-1111-2222-3333-444444444444"
+    URL = f"https://go.decathlon.pl/l/aaaaaaaa-1111-2222-3333-444444444444"
+
+    def doc(self, *godziny, cena=None):
+        start = datetime.now(timezone.utc) + timedelta(days=7)
+        return {"data": {"attributes": {"title": "Kort", "price": cena,
+                                        "datesStats": {"availableListingDates": len(godziny)}}},
+                "included": [TestFreeSlots.date_item(
+                    start.replace(hour=h, minute=0, second=0, microsecond=0).isoformat(),
+                    f"d{h}") for h in godziny]}
+
+    def zbierz(self, doc, **kw):
+        with mock.patch.object(cp, "resolve_current_id", side_effect=lambda x: self.LID), \
+                mock.patch.object(cp, "fetch_listing", return_value=doc), \
+                mock.patch.object(cp, "fetch_listing_light", return_value=doc), \
+                mock.patch.object(cp, "passes_filter", return_value=True), \
+                mock.patch("sys.stdout", io.StringIO()):
+            return cp.zbierz_terminy([self.URL], [], TZ, datetime.now(timezone.utc), **kw)
+
+    def test_it_maps_every_slot_to_its_court(self):
+        g = self.zbierz(self.doc(17, 18), skip_light=True)
+        self.assertEqual(len(g.current), 2)
+        self.assertEqual(set(g.lid_by_id.values()), {self.LID})
+        self.assertEqual(g.meta_by_lid[self.LID][1], None)
+
+    def test_price_travels_with_the_slot(self):
+        g = self.zbierz(self.doc(17, cena=39), skip_light=True)
+        self.assertEqual(set(g.listing_price_by_id.values()), {39})
+
+    def test_a_network_error_is_a_flag_not_an_exception(self):
+        """Stanu NIE WOLNO nadpisać po błędzie sieci — inaczej następny bieg uzna
+        wszystkie terminy za nowe i wyśle lawinę powiadomień."""
+        with mock.patch.object(cp, "resolve_current_id", side_effect=lambda x: self.LID), \
+                mock.patch.object(cp, "fetch_listing",
+                                  side_effect=urllib.error.URLError("padło")), \
+                mock.patch("sys.stdout", io.StringIO()):
+            g = cp.zbierz_terminy([self.URL], [], TZ, datetime.now(timezone.utc),
+                                  skip_light=True)
+        self.assertTrue(g.blad)
+        self.assertEqual(g.current, {})
+
+    def test_prefetched_data_is_not_fetched_again(self):
+        doc = self.doc(17)
+        with mock.patch.object(cp, "resolve_current_id", side_effect=lambda x: self.LID), \
+                mock.patch.object(cp, "fetch_listing") as ciezkie, \
+                mock.patch.object(cp, "passes_filter", return_value=True), \
+                mock.patch("sys.stdout", io.StringIO()):
+            g = cp.zbierz_terminy([self.URL], [], TZ, datetime.now(timezone.utc),
+                                  skip_light=True,
+                                  prefetched=(self.LID, doc, time.monotonic()))
+        ciezkie.assert_not_called()
+        self.assertEqual(len(g.current), 1)
+
+    def test_the_data_age_reference_is_the_oldest_look(self):
+        """Wiek danych liczymy od NAJSTARSZEJ obserwacji — jeśli któryś kort
+        pobraliśmy wcześniej, jego terminy są odpowiednio starsze."""
+        przed = time.monotonic()
+        g = self.zbierz(self.doc(17), skip_light=True)
+        self.assertGreaterEqual(g.seen_at, przed)
+        self.assertLessEqual(g.seen_at, time.monotonic())
+
+
+class SettingsTest(unittest.TestCase):
+    """`wczytaj_nastawy` — 60 linii parsowania wyjęte z `main`."""
+
+    def nastawy(self, **env):
+        pelne = {"INTERVALS": "", "BURST": "", "SPRINT": "", "LISTINGS": "",
+                 "AUTO_REGISTER_SALVO": "", "AUTO_REGISTER_HEDGE": "",
+                 "REMOTE_URL": "", "REMOTE_SECRET": "", "TIMEZONE": "Europe/Warsaw"}
+        pelne.update(env)
+        with mock.patch.dict(os.environ, pelne), mock.patch("sys.stdout", io.StringIO()):
+            return cp.wczytaj_nastawy(60)
+
+    def test_a_broken_salvo_option_still_leaves_a_usable_warm_size(self):
+        """SEDNO: przy błędnej opcji `warm_size` w ogóle nie powstawało. Poprawność
+        zależała od strażnika `if salvo_size > 1` sto linii dalej."""
+        n = self.nastawy(AUTO_REGISTER_SALVO="cztery")
+        self.assertEqual(n.salvo_size, 0)
+        self.assertIsInstance(n.warm_size, int)
+        self.assertGreaterEqual(n.warm_size, 1)
+
+    def test_remote_without_secret_is_refused(self):
+        """Adres funkcji byłby otwarty dla każdego, kto go pozna."""
+        n = self.nastawy(REMOTE_URL="https://x.lambda-url.eu-west-1.on.aws/")
+        self.assertEqual(n.remote_url, "")
+
+    def test_a_broken_burst_disables_only_the_burst(self):
+        n = self.nastawy(BURST="to nie jest zryw")
+        self.assertIsNone(n.burst)
+
+    def test_a_typo_in_the_court_url_does_not_kill_the_process(self):
+        """W Home Assistancie nieobsłużony wyjątek to pętla restartów bez wyjaśnienia.
+        Każda inna błędna opcja wyłącza tylko swoją funkcję."""
+        n = self.nastawy(LISTINGS="to nie jest adres")
+        self.assertEqual(n.warm_url, "")
+
+    def test_warm_size_covers_salvo_plus_hedge_copies(self):
+        n = self.nastawy(AUTO_REGISTER_SALVO="6", AUTO_REGISTER_HEDGE="2",
+                         LISTINGS="https://go.decathlon.pl/l/aaaaaaaa-1111-2222-3333-444444444444")
+        self.assertEqual(n.warm_size, 7, "kopie czołowego celu też potrzebują ciepłych gniazd")
