@@ -258,7 +258,9 @@ def save_hunts(wpisy):
 # walczymy od tygodni. Push o martwej sesji ma przychodzić ZANIM okno się otworzy,
 # żeby był czas się zalogować.
 PREFLIGHT_MIN_BEFORE = 30
-_preflight_done_on = None   # data ostatniej kontroli — jedna na dobę wystarczy
+_preflight_done_on = None    # data zamkniętej kontroli — jedna na dobę wystarczy
+_preflight_problem_od = None  # odkąd kontrola widzi martwą sesję (karencja na ciche logowanie)
+_preflight_alarm = False      # czy poszedł już push „zaloguj się"
 
 
 def zryw_z_otoczenia():
@@ -309,7 +311,7 @@ def preflight_token(now_local, tz, topic, book_url):
     strzał i została obalona. Tu chodzi o jedno zapytanie na dobę, pół godziny przed
     oknem, wyłącznie po to, żeby zdążyć zareagować.
     """
-    global _preflight_done_on
+    global _preflight_done_on, _preflight_problem_od, _preflight_alarm
     start = burst_start_today(now_local, tz)
     if start is None:
         return None
@@ -322,11 +324,19 @@ def preflight_token(now_local, tz, topic, book_url):
         return None
     moment = start - timedelta(minutes=ile_wczesniej)
     # Okno minutowe, a nie punkt: pętla budzi się co kilka sekund i nie trafi w sekundę.
-    if not (moment <= now_local < moment + timedelta(seconds=90)):
+    # Znaczniki są WAŻNE TYLKO DZIŚ. Bez tego nierozwiązany problem z wczoraj trzymałby
+    # `czuwamy` w prawdzie i dziś rano odpytywalibyśmy API w KAŻDEJ iteracji aż do zrywu.
+    if _preflight_problem_od is not None and _preflight_problem_od.date() != now_local.date():
+        _preflight_problem_od, _preflight_alarm = None, False
+    w_oknie = moment <= now_local < moment + timedelta(seconds=90)
+    # Gdy sesja nie żyje, sprawdzamy DALEJ — aż do startu zrywu. Wcześniej kontrola
+    # zamykała się po jednym spojrzeniu, więc sesja odzyskana przez ciche logowanie
+    # minutę później nie miała jak zdjąć alarmu: użytkownik biegł do komputera na darmo.
+    czuwamy = _preflight_problem_od is not None and now_local < start
+    if not (w_oknie or czuwamy):
         return None
     if _preflight_done_on == now_local.date():
         return None
-    _preflight_done_on = now_local.date()
 
     cfg = load_config(quiet=True)
     if not boolish(os.environ.get("AUTO_REGISTER") or cfg.get("auto_register")):
@@ -347,16 +357,36 @@ def preflight_token(now_local, tz, topic, book_url):
         except Exception:  # noqa: BLE001 - awaria sieci to nie martwa sesja
             blad = ""
     if not blad:
-        log(f"🔑 Sesja Decathlon sprawdzona — polowanie o {start:%H:%M:%S} ma czym strzelać.")
+        _preflight_done_on = now_local.date()
+        if _preflight_alarm and topic:
+            # Alarm już poszedł, a sesja wróciła — najczęściej sama, cichym logowaniem.
+            # Bez tej wiadomości użytkownik jedzie do komputera po nic.
+            ntfy_post(topic, "✅ Sesja wróciła — polowanie ma czym strzelać",
+                      f"Token znów działa. Nic nie musisz robić przed {start:%H:%M}.",
+                      click=book_url, priority="default", tags="white_check_mark")
+        log(f"🔑 Sesja Decathlon sprawdzona — polowanie o {start:%H:%M:%S} ma czym strzelać."
+            + (" Alarm odwołany." if _preflight_alarm else ""))
+        _preflight_problem_od, _preflight_alarm = None, False
         return True
 
-    log(f"⚠ SESJA NIE ŻYJE ({blad}). Polowanie o {start:%H:%M:%S} nie uda się bez "
-        f"zalogowania w panelu Padel.")
-    if topic:
-        ntfy_post(topic, "⚠️ Zaloguj się — polowanie za %d min" % ile_wczesniej,
-                  f"{blad}\n\nOtwórz panel Padel i zaloguj się na go.decathlon.pl.\n"
-                  f"Bez tego rejestracja o {start:%H:%M} nie wyśle ani jednego żądania.",
-                  click=book_url, priority="urgent", tags="rotating_light")
+    if _preflight_problem_od is None:
+        # KARENCJA: ciche logowanie żyje w drugim procesie i po nieudanym odczycie
+        # ponawia dopiero po 45 s. Push wysłany teraz trafiłby do użytkownika, zanim
+        # aplikacja w ogóle spróbowała się naprawić — i najczęściej byłby fałszywy.
+        _preflight_problem_od = now_local
+        log(f"⚠ Sesja nie odpowiada ({blad}) — daję cichemu logowaniu "
+            f"{AUTH_ALERT_GRACE}s, zanim zaalarmuję. Do zrywu {start:%H:%M:%S}.")
+        return False
+
+    if not _preflight_alarm and (now_local - _preflight_problem_od).total_seconds() >= AUTH_ALERT_GRACE:
+        _preflight_alarm = True
+        log(f"⚠ SESJA NIE ŻYJE ({blad}). Polowanie o {start:%H:%M:%S} nie uda się bez "
+            f"zalogowania w panelu Padel.")
+        if topic:
+            ntfy_post(topic, "⚠️ Zaloguj się — polowanie za %d min" % ile_wczesniej,
+                      f"{blad}\n\nOtwórz panel Padel i zaloguj się na go.decathlon.pl.\n"
+                      f"Bez tego rejestracja o {start:%H:%M} nie wyśle ani jednego żądania.",
+                      click=book_url, priority="urgent", tags="rotating_light")
     return False
 
 
@@ -412,7 +442,8 @@ def write_state_doc(doc):
 
 
 def save_state(free_ids, registered_ids=None, decathlon_jwt=None, pending_ids=None,
-               auth_alert_sent=None, decathlon_rt=None, auth_error_since=""):
+               auth_alert_sent=None, decathlon_rt=None, auth_error_since="",
+               startup_push_at=""):
     old = load_state_doc() or {}
     if registered_ids is None:
         registered_ids = set(old.get("registered_ids", []))
@@ -433,6 +464,8 @@ def save_state(free_ids, registered_ids=None, decathlon_jwt=None, pending_ids=No
         doc["pending_ids"] = sorted(pending_ids)  # terminy do ponowienia po naprawie tokenu
     if auth_alert_sent:
         doc["auth_alert_sent"] = True            # nie spamuj alertem o tokenie co iterację
+    if startup_push_at:
+        doc["startup_push_at"] = startup_push_at   # dławik powiadomienia startowego
     if auth_error_since:
         # Odkąd token nie działa. Bez tego karencja liczyłaby się od nowa przy KAŻDEJ
         # iteracji i powiadomienie nie przyszłoby nigdy.
@@ -1066,13 +1099,18 @@ def burst_bounds(burst, tz, now=None):
     return None
 
 
-def plan_sleep(default_s, windows, burst, tz, elapsed=0.0, now=None):
+def plan_sleep(default_s, windows, burst, tz, elapsed=0.0, now=None, sprint=None):
     """Ile spać przed kolejnym sprawdzeniem.
 
-    Trzy zasady:
+    Cztery zasady:
       1. w trwającym zrywie obowiązuje jego własny, gęsty takt,
       2. tuż przed zrywem śpimy DOKŁADNIE do jego początku, żeby go nie przespać,
-      3. od reszty odejmujemy czas pracy — inaczej ustawione 2 s dają realnie ~2,4 s,
+      3. TO SAMO dotyczy sprintu — bez tego dawało się go przespać W CAŁOŚCI: przy
+         domyślnej konfiguracji (sprint 11:00:05–11:00:45, zryw dopiero 11:00:45) pętla
+         budziła się o 10:59:50, liczyła sen do startu zrywu i spała 55 s. Irlandia nie
+         była wywoływana ani razu, a w logu nie było śladu, bo z punktu widzenia pętli
+         wszystko poszło zgodnie z planem,
+      4. od reszty odejmujemy czas pracy — inaczej ustawione 2 s dają realnie ~2,4 s,
          bo do każdego cyklu doklejał się czas zapytań.
     """
     now = now or datetime.now(tz)
@@ -1081,11 +1119,12 @@ def plan_sleep(default_s, windows, burst, tz, elapsed=0.0, now=None):
     if bounds and bounds[0] <= now < bounds[1]:
         return max(MIN_SLEEP_SECONDS, burst["interval"] - elapsed)
     target = current_interval(default_s, windows, tz, now.astimezone(timezone.utc)) - elapsed
-    if bounds and now < bounds[0]:
-        # Do startu zrywu liczymy od TERAZ — czas pracy już upłynął, więc drugi raz
-        # go nie odejmujemy; inaczej budzilibyśmy się ułamek sekundy za wcześnie
-        # i pierwsze sprawdzenie zrywu wypadałoby obok celu.
-        target = min(target, (bounds[0] - now).total_seconds())
+    # Do startu okna liczymy od TERAZ — czas pracy już upłynął, więc drugi raz go nie
+    # odejmujemy; inaczej budzilibyśmy się ułamek sekundy za wcześnie i pierwsze
+    # sprawdzenie wypadałoby obok celu.
+    for granice in (bounds, burst_bounds(sprint, tz, now) if sprint else None):
+        if granice and now < granice[0]:
+            target = min(target, (granice[0] - now).total_seconds())
     return max(MIN_SLEEP_SECONDS, target)
 
 
@@ -2717,6 +2756,18 @@ def ostrzez_o_temacie(topic):
             f"zabezpieczeniem. Zalecane co najmniej 16 losowych znaków.")
 
 
+# Jak rzadko wolno przypominać, że monitor wstał. Aktualizacja dodatku ma dać jeden
+# push; pętla restartów — jeden na godzinę, a nie jeden na minutę.
+STARTUP_PUSH_MIN_ODSTEP = 3600
+
+
+def _wolno_powiadomic_o_starcie(state_doc):
+    ostatni = (state_doc or {}).get("startup_push_at")
+    if not ostatni:
+        return True
+    return _starszy_niz(ostatni, STARTUP_PUSH_MIN_ODSTEP)
+
+
 def notify_startup(topic, count, tz, book_url=None):
     if not topic:
         log("! Brak NTFY_TOPIC — pomijam powiadomienie startowe (tryb testowy).")
@@ -3052,10 +3103,16 @@ def run_once(announce_startup=False, skip_light=False, prefetched=None, defer_pu
     current_ids = set(current.keys())
     prev = None if state_doc is None else set(state_doc.get("free_ids", []))
 
-    # Powiadomienie startowe: przy każdym uruchomieniu aplikacji (announce_startup)
-    # oraz przy pierwszym biegu bez zapisanego stanu.
-    if announce_startup or prev is None:
+    # Powiadomienie startowe: przy uruchomieniu aplikacji oraz przy pierwszym biegu bez
+    # zapisanego stanu — ale NIE CZĘŚCIEJ niż raz na godzinę. Proces wstaje przy każdym
+    # restarcie Home Assistanta, aktualizacji dodatku, zadziałaniu watchdoga i po każdym
+    # crashu. Dodatek w pętli restartów zasypywał telefon „✅ Monitor uruchomiony",
+    # a push, który przychodzi bez powodu, uczy ignorowania wszystkich pozostałych.
+    if (announce_startup or prev is None) and _wolno_powiadomic_o_starcie(state_doc):
         notify_startup(topic, len(current_ids), tz, book_url)
+        start_push_iso = datetime.now(timezone.utc).isoformat()
+    else:
+        start_push_iso = (state_doc or {}).get("startup_push_at", "")
 
     # Test poświadczeń Decathlon GO — NIE wymaga wolnego terminu. Uruchamiany przy
     # starcie procesu (gdy auto_register włączone) albo na żądanie opcją test_token.
@@ -3173,6 +3230,7 @@ def run_once(announce_startup=False, skip_light=False, prefetched=None, defer_pu
         pending_ids=reg_cfg.get("pending_ids") or [],
         auth_alert_sent=auth_alert_sent,
         auth_error_since=auth_since or "",
+        startup_push_at=start_push_iso,
         decathlon_rt=reg_cfg.get("refresh_token"),
     )
     return 0
@@ -3190,6 +3248,41 @@ class Nastawy:
     __slots__ = ("tz", "tzname", "windows", "burst", "salvo_size", "hedge_size",
                  "warm_size", "warm_url", "first_listing", "remote_url", "remote_secret",
                  "sprint", "sprint_threads")
+
+
+def oglos_tryb_pracy():
+    """Mówi WPROST, co dodatek będzie robił. Raz, przy starcie.
+
+    Dwie opcje domyślne cicho wyłączają polowanie: `auto_register: false` (w ogóle nie
+    rezerwuje) i `auto_register_dry_run: true` (sprawdza wszystko i nie rezerwuje nic).
+    Druga jest groźniejsza, bo wygląda identycznie jak działające polowanie — jedyny
+    ślad to linia „~ Auto-rejestracja (test, bez rezerwacji)", która pojawia się raz na
+    dobę, w chwili publikacji, wśród tysiąca innych. Można stracić tydzień, zanim się
+    zauważy, że nic nigdy nie zostało zarezerwowane.
+    """
+    cfg = load_config(quiet=True)
+    wlaczona = boolish(os.environ.get("AUTO_REGISTER") or cfg.get("auto_register"))
+    proba = boolish(os.environ.get("AUTO_REGISTER_DRY_RUN") or cfg.get("auto_register_dry_run"))
+    if not wlaczona:
+        log("= Auto-rejestracja WYŁĄCZONA — dostaniesz powiadomienie o wolnym terminie, "
+            "ale rezerwacja jest po Twojej stronie (auto_register).")
+        return
+    if proba:
+        log("! TRYB PRÓBNY: auto_register_dry_run=true — sprawdzam i loguję wszystko, "
+            "ale NIE REZERWUJĘ NICZEGO. Ustaw auto_register_dry_run: false, żeby "
+            "dodatek naprawdę zajmował korty.")
+        return
+    imie = opcja("AUTO_REGISTER_NAME", cfg, "auto_register_name")
+    ile = opcja("AUTO_REGISTER_MAX", cfg, "auto_register_max", 1)
+    kolejnosc = opcja("AUTO_REGISTER_ORDER", cfg, "auto_register_order", "earliest")
+    # Cudzysłowy w apostrofach: polski znak zamykający zapisany jako ASCII " kończyłby
+    # literał. Ten sam błąd zjadł już raz `read_token.py`.
+    log(f'✓ Auto-rejestracja WŁĄCZONA: do {ile} '
+        f'{plural(int(ile) if str(ile).isdigit() else 1, "terminu", "terminów", "terminów")} '
+        f'na przebieg, kolejność „{kolejnosc}”, uczestnik „{imie or "BRAK IMIENIA"}”.')
+    if not imie:
+        log("! Brak auto_register_name — serwer odrzuci KAŻDĄ rezerwację. "
+            "Wpisz imię i nazwisko uczestnika.")
 
 
 def wczytaj_nastawy(interval):
@@ -3403,6 +3496,7 @@ def main():
     remote_url, remote_secret = n.remote_url, n.remote_secret
     sprint, sprint_threads = n.sprint, n.sprint_threads
 
+    oglos_tryb_pracy()
     log_rtt(urllib.parse.urlsplit(DECATHLON_API_URL).netloc)
 
     log(f"Tryb pętli: sprawdzam co {interval}s. Ctrl+C aby zakończyć.")
@@ -3491,7 +3585,7 @@ def main():
             flush_notifications()
         # Czas pracy odejmujemy od uśpienia: bez tego ustawione 2s dawały realnie ~2,4s.
         elapsed = time.monotonic() - started
-        sleep_s = plan_sleep(interval, windows, burst, tz, elapsed)
+        sleep_s = plan_sleep(interval, windows, burst, tz, elapsed, sprint=sprint)
         if not active and windows:
             shown = current_interval(interval, windows, tz)
             if shown != last_sleep:

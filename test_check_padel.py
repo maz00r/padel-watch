@@ -3218,7 +3218,11 @@ class PreflightTokenTest(unittest.TestCase):
 
     def setUp(self):
         cp._preflight_done_on = None
+        cp._preflight_problem_od = None
+        cp._preflight_alarm = False
         self.addCleanup(setattr, cp, "_preflight_done_on", None)
+        self.addCleanup(setattr, cp, "_preflight_problem_od", None)
+        self.addCleanup(setattr, cp, "_preflight_alarm", False)
         self.dir = tempfile.mkdtemp()
         self.env = mock.patch.dict(os.environ, {
             "BURST": "mon-sun:11:00:05", "BURST_SECONDS": "60",
@@ -3262,17 +3266,60 @@ class PreflightTokenTest(unittest.TestCase):
 
     def test_missing_token_raises_urgent_push(self):
         """To jest dokładnie przypadek z 27.08."""
+        # PIERWSZE spojrzenie jest CICHE — ciche logowanie dostaje swoją szansę.
         wynik, push, out, _ = self.sprawdz(token="")
         self.assertFalse(wynik)
-        self.assertTrue(push.called)
+        push.assert_not_called()
+        self.assertIn("daję cichemu logowaniu", out)
+        # Po karencji, gdy problem trwa, alarm ma być głośny.
+        wynik, push, out, _ = self.sprawdz(
+            o_ktorej="10:33:00", token="")     # 150 s później, powyżej AUTH_ALERT_GRACE
+        self.assertFalse(wynik)
+        self.assertTrue(push.called, "trwale martwa sesja musi w końcu zaalarmować")
         self.assertIn("SESJA NIE ŻYJE", out)
         self.assertEqual(push.call_args.kwargs.get("priority"), "urgent")
+
+    def test_a_session_that_comes_back_on_its_own_never_alarms(self):
+        """SEDNO ZGŁOSZENIA: ciche logowanie naprawia sesję w minutę — push jest zbędny."""
+        _wynik, push, _out, _ = self.sprawdz(token="")     # problem zauważony, cisza
+        push.assert_not_called()
+        wynik, push, out, _ = self.sprawdz(o_ktorej="10:31:00")   # sesja wróciła
+        self.assertTrue(wynik)
+        push.assert_not_called()
+        self.assertIn("Sesja Decathlon sprawdzona", out)
+
+    def test_a_recovery_after_the_alarm_is_announced(self):
+        """Alarm poszedł, sesja wróciła — bez tej wiadomości jedziesz do komputera po nic."""
+        self.sprawdz(token="")                              # cisza
+        _w, push, _o, _ = self.sprawdz("10:33:00", token="")  # alarm
+        self.assertTrue(push.called)
+        wynik, push, out, _ = self.sprawdz("10:34:00")      # sesja wróciła
+        self.assertTrue(wynik)
+        self.assertTrue(push.called, "brak odwołania alarmu")
+        self.assertIn("Sesja wróciła", push.call_args.args[1])
+        self.assertIn("Alarm odwołany", out)
+
+    def test_the_alarm_is_not_repeated_every_iteration(self):
+        self.sprawdz(token="")
+        self.sprawdz("10:33:00", token="")                  # alarm
+        _w, push, _o, _ = self.sprawdz("10:34:00", token="")
+        push.assert_not_called()
+
+    def test_yesterdays_unresolved_problem_does_not_leak_into_today(self):
+        """Bez tego nierozwiązany problem trzymałby czuwanie i dziś rano odpytywalibyśmy
+        API w KAŻDEJ iteracji aż do zrywu."""
+        self.sprawdz(token="")
+        cp._preflight_problem_od = cp._preflight_problem_od.replace(day=27)
+        # 09:00 jest daleko poza oknem kontroli — bez wyczyszczenia znacznika
+        # „czuwamy" wpuściłoby nas tutaj.
+        self.assertIsNone(self.sprawdz("09:00:00")[0])
 
     def test_server_rejecting_a_valid_looking_token_also_alarms(self):
         """Token z ważnym `exp` może być już unieważniony po stronie serwera."""
         def odrzuca(*a, **k):
             raise cp.urllib.error.HTTPError("u", 401, "Unauthorized", {}, io.BytesIO(b"{}"))
-        wynik, push, _, _ = self.sprawdz(rpc=odrzuca)
+        self.assertFalse(self.sprawdz(rpc=odrzuca)[0])          # cisza w karencji
+        wynik, push, _, _ = self.sprawdz("10:33:00", rpc=odrzuca)
         self.assertFalse(wynik)
         self.assertTrue(push.called)
 
@@ -4633,3 +4680,108 @@ class AuthAlertGraceTest(unittest.TestCase):
         wyslano, _ = self.bieg({"free_ids": [], "registered_ids": [],
                                 "auth_error_since": "nie-data"})
         self.assertTrue(wyslano)
+
+
+class StartupPushThrottleTest(unittest.TestCase):
+    """„✅ Monitor uruchomiony" przy KAŻDYM starcie procesu.
+
+    Proces wstaje przy restarcie Home Assistanta, aktualizacji dodatku, zadziałaniu
+    watchdoga i po każdym crashu. Dodatek w pętli restartów zasypywał telefon, a push
+    przychodzący bez powodu uczy ignorowania wszystkich pozostałych — w tym tego
+    jednego, który naprawdę coś znaczy.
+    """
+
+    def test_the_first_start_is_announced(self):
+        self.assertTrue(cp._wolno_powiadomic_o_starcie(None))
+        self.assertTrue(cp._wolno_powiadomic_o_starcie({}))
+
+    def test_a_restart_loop_is_not_announced_every_time(self):
+        teraz = datetime.now(timezone.utc).isoformat()
+        self.assertFalse(cp._wolno_powiadomic_o_starcie({"startup_push_at": teraz}))
+
+    def test_after_an_hour_it_speaks_again(self):
+        dawno = (datetime.now(timezone.utc)
+                 - timedelta(seconds=cp.STARTUP_PUSH_MIN_ODSTEP + 60)).isoformat()
+        self.assertTrue(cp._wolno_powiadomic_o_starcie({"startup_push_at": dawno}))
+
+    def test_a_broken_marker_does_not_silence_it_forever(self):
+        self.assertTrue(cp._wolno_powiadomic_o_starcie({"startup_push_at": "nie-data"}))
+
+
+class SleepMustNotSkipTheSprintTest(unittest.TestCase):
+    """`plan_sleep` znało tylko zryw. Sprint dało się PRZESPAĆ w całości.
+
+    Domyślna konfiguracja: sprint 11:00:05–11:00:45, zryw dopiero 11:00:45. Pętla budzi
+    się o 10:59:50, liczy sen „dokładnie do startu zrywu" i śpi 55 s — czyli przez CAŁE
+    okno sprintu. Irlandia nie zostaje wywołana ani razu, publikacja przechodzi bokiem,
+    a w logu nie ma śladu, bo z punktu widzenia pętli wszystko poszło zgodnie z planem.
+
+    U Patryka to zamaskowane, bo jego zryw startuje o tej samej sekundzie co sprint.
+    Wystarczyłoby przesunąć zryw później, żeby zdalny strzał cicho przestał istnieć.
+    """
+
+    TZ = ZoneInfo("Europe/Warsaw") if ZoneInfo else timezone.utc
+
+    def test_sleep_wakes_up_for_the_sprint(self):
+        zryw = {"days": list(cp.DAY_NAMES), "at": (11, 0, 45), "seconds": 15, "interval": 0.2}
+        sprint = {"days": list(cp.DAY_NAMES), "at": (11, 0, 5), "seconds": 40}
+        teraz = datetime(2026, 9, 10, 10, 59, 50, tzinfo=self.TZ)
+        sen = cp.plan_sleep(60, [], zryw, self.TZ, elapsed=0.0, now=teraz, sprint=sprint)
+        self.assertLessEqual(sen, 15.5,
+                             f"pętla zasypia na {sen:.0f} s i przesypia okno sprintu")
+
+    def test_the_burst_still_wins_when_it_comes_first(self):
+        zryw = {"days": list(cp.DAY_NAMES), "at": (11, 0, 5), "seconds": 60, "interval": 0.2}
+        sprint = {"days": list(cp.DAY_NAMES), "at": (11, 0, 30), "seconds": 10}
+        teraz = datetime(2026, 9, 10, 10, 59, 50, tzinfo=self.TZ)
+        sen = cp.plan_sleep(60, [], zryw, self.TZ, now=teraz, sprint=sprint)
+        self.assertAlmostEqual(sen, 15.0, delta=0.5)
+
+    def test_without_a_sprint_nothing_changes(self):
+        zryw = {"days": list(cp.DAY_NAMES), "at": (11, 0, 45), "seconds": 15, "interval": 0.2}
+        teraz = datetime(2026, 9, 10, 10, 59, 50, tzinfo=self.TZ)
+        self.assertAlmostEqual(cp.plan_sleep(60, [], zryw, self.TZ, now=teraz), 55.0, delta=0.5)
+
+
+class OperatingModeIsAnnouncedTest(unittest.TestCase):
+    """Dwie opcje domyślne CICHO wyłączają polowanie.
+
+    `auto_register: false` — nie rezerwuje w ogóle.
+    `auto_register_dry_run: true` — sprawdza wszystko i nie rezerwuje NICZEGO.
+
+    Druga jest groźniejsza, bo wygląda identycznie jak działające polowanie. Jedyny ślad
+    to linia „~ Auto-rejestracja (test, bez rezerwacji)", która pojawia się raz na dobę,
+    w sekundzie publikacji, wśród tysiąca innych. Można stracić tydzień, zanim się
+    zauważy, że nic nigdy nie zostało zarezerwowane.
+    """
+
+    def tryb(self, **env):
+        pelne = {"AUTO_REGISTER": "", "AUTO_REGISTER_DRY_RUN": "", "AUTO_REGISTER_NAME": "",
+                 "AUTO_REGISTER_MAX": "", "AUTO_REGISTER_ORDER": "", "CONFIG_PATH": "/nie-ma"}
+        pelne.update(env)
+        with mock.patch.dict(os.environ, pelne), mock.patch("sys.stdout", io.StringIO()) as b:
+            cp.oglos_tryb_pracy()
+            return b.getvalue()
+
+    def test_dry_run_shouts(self):
+        out = self.tryb(AUTO_REGISTER="true", AUTO_REGISTER_DRY_RUN="true")
+        self.assertIn("TRYB PRÓBNY", out)
+        self.assertIn("NIE REZERWUJĘ NICZEGO", out)
+
+    def test_disabled_registration_says_so_plainly(self):
+        self.assertIn("WYŁĄCZONA", self.tryb(AUTO_REGISTER="false"))
+
+    def test_a_working_setup_reports_what_it_will_do(self):
+        out = self.tryb(AUTO_REGISTER="true", AUTO_REGISTER_DRY_RUN="false",
+                        AUTO_REGISTER_NAME="Jan Kowalski", AUTO_REGISTER_MAX="2",
+                        AUTO_REGISTER_ORDER="latest")
+        self.assertIn("WŁĄCZONA", out)
+        self.assertIn("do 2 terminów", out)
+        self.assertIn("latest", out)
+        self.assertIn("Jan Kowalski", out)
+
+    def test_a_missing_name_is_called_out(self):
+        """Bez imienia serwer odrzuca KAŻDĄ rezerwację — to nie jest drobiazg."""
+        out = self.tryb(AUTO_REGISTER="true", AUTO_REGISTER_DRY_RUN="false")
+        self.assertIn("Brak auto_register_name", out)
+        self.assertIn("odrzuci KAŻDĄ", out)

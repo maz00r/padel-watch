@@ -1,5 +1,57 @@
 # Changelog
 
+## 0.24.0 (ciąg dalszy) — audyt powiadomień z perspektywy użytkownika
+
+Poprzedni audyt sprawdzał, czy kod jest poprawny. Nie zadał najprostszego pytania:
+**kiedy każdy komunikat leci, jak często i czy jest prawdziwy.** Problem z pchnięciami
+o tokenie zgłosił użytkownik, nie ja. Ten przebieg nadrabia całą tę kategorię.
+
+### Sprint dało się PRZESPAĆ w całości
+
+`plan_sleep` znało tylko zryw. Przy domyślnej konfiguracji (sprint 11:00:05–11:00:45,
+zryw dopiero 11:00:45) pętla budziła się o 10:59:50, liczyła sen „dokładnie do startu
+zrywu" i spała 55 s — **przez całe okno sprintu**. Irlandia nie była wywoływana ani razu,
+publikacja przechodziła bokiem, a w logu nie było śladu, bo z punktu widzenia pętli
+wszystko poszło zgodnie z planem.
+
+Zamaskowane tylko dlatego, że u użytkownika zryw startuje o tej samej sekundzie co
+sprint. Wystarczyłoby przesunąć zryw później, żeby zdalny strzał cicho przestał istnieć.
+
+### Kontrola sesji przed zrywem alarmowała natychmiast — i nigdy nie odwoływała alarmu
+
+`preflight_token` wysyłał push o **najwyższym priorytecie** (`urgent`, `rotating_light`)
+przy pierwszym niepowodzeniu, nie dając cichemu logowaniu żadnej szansy. Gorzej:
+znacznik „sprawdzone na dziś" ustawiał się **przed** sprawdzeniem, więc gdy sesja wracała
+minutę później, użytkownik nie dostawał już nic — jechał do komputera na darmo.
+
+- Pierwsze niepowodzenie jest **ciche**; kontrola czuwa dalej, aż do startu zrywu.
+- Push idzie dopiero po `AUTH_ALERT_GRACE` (120 s).
+- **Powrót sesji po alarmie jest ogłaszany** („✅ Sesja wróciła").
+- Znaczniki są ważne tylko dziś — bez tego nierozwiązany problem z wczoraj kazałby dziś
+  rano odpytywać API w KAŻDEJ iteracji aż do zrywu.
+
+### „✅ Monitor uruchomiony" przy każdym starcie procesu
+
+Proces wstaje przy restarcie Home Assistanta, aktualizacji dodatku, zadziałaniu watchdoga
+i po każdym crashu. Pętla restartów zasypywała telefon, a push przychodzący bez powodu
+uczy ignorowania wszystkich pozostałych. Teraz najwyżej raz na godzinę, ze znacznikiem
+w stanie — żeby dławik przeżył restart.
+
+### Tryb próbny nie mówił o sobie
+
+`auto_register_dry_run: true` jest **wartością domyślną**: dodatek sprawdza wszystko
+i nie rezerwuje niczego. Wygląda identycznie jak działające polowanie — jedyny ślad to
+linia pojawiająca się raz na dobę wśród tysiąca innych. Można stracić tydzień, zanim się
+zauważy.
+
+Przy starcie leci teraz jedna linia mówiąca wprost, co dodatek zrobi:
+
+```
+! TRYB PRÓBNY: auto_register_dry_run=true — … NIE REZERWUJĘ NICZEGO.
+✓ Auto-rejestracja WŁĄCZONA: do 2 terminów na przebieg, kolejność „latest”, uczestnik „Jan Kowalski”.
+! Brak auto_register_name — serwer odrzuci KAŻDĄ rezerwację.
+```
+
 ## 0.24.0 — rozbicie wielkich funkcji, wspólny rdzeń rejestracji, testy panelu
 
 Refaktor z przeglądu kodu. **Zachowanie nie zmienia się w żadnym miejscu** — zmienia się
