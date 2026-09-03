@@ -31,7 +31,7 @@ przechodzisz normalne logowanie, łącznie z kodem z maila.
 
 | Opcja | Znaczenie | Przykład |
 |-------|-----------|----------|
-| `ntfy_topic` | temat ntfy (ten sam, co subskrybujesz w apce) | `your-ntfy-topic-here` |
+| `ntfy_topic` | temat ntfy — **traktuj jak hasło**, patrz niżej | `your-ntfy-topic-here` |
 | `check_interval` | bazowa częstotliwość sprawdzania w sekundach (10–3600) | `60` |
 | `log_level` | ile ma być w logu: `debug` / `info` / `warn` / `error` | `info` |
 | `filters` | godziny powiadomień; okna `;`, każde `DNI:HH:MM-HH:MM` | `mon-fri:15:00-02:00; sat-sun:00:00-24:00` |
@@ -586,6 +586,22 @@ interwału niczego nie zmieni.
 Jak ustalić własną porę publikacji: zostaw `intervals` na kilka sekund w szerokim oknie
 i sprawdź w Dzienniku, o której pierwszy raz pojawia się nowy dzień. Potem ustaw `burst`
 kilka sekund wcześniej i `intervals` możesz wyczyścić.
+
+## Temat ntfy to jedyne zabezpieczenie
+
+ntfy.sh nie ma kont ani haseł. **Kto zna nazwę tematu, czyta wszystkie Twoje
+powiadomienia i może wysyłać Ci własne.** Nazwa tematu jest jedynym zabezpieczeniem,
+jakie tam istnieje.
+
+Zostawiona wartość domyślna (`your-ntfy-topic-here`) znaczy, że Twoje powiadomienia
+o rezerwacjach czyta każdy inny użytkownik tego dodatku, który też jej nie zmienił —
+i że Ty czytasz jego. Dodatek ostrzega o tym przy starcie.
+
+Ustaw co najmniej 16 losowych znaków, na przykład:
+
+```bash
+python3 -c "import secrets; print('padel-' + secrets.token_urlsafe(16))"
+```
 
 ## Powiadomienia
 

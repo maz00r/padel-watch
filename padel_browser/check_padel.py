@@ -621,11 +621,11 @@ def open_url(req, timeout=30):
     raise urllib.error.URLError(f"za dużo przekierowań dla {req.full_url}")
 
 
-def http_get_json(url):
+def http_get_json(url, timeout=60):
     req = urllib.request.Request(
         url, headers={"User-Agent": UA, "Accept-Encoding": "gzip", "Accept": "application/json"}
     )
-    with open_url(req, timeout=60) as resp:
+    with open_url(req, timeout=timeout) as resp:
         raw = resp.read()
         if resp.headers.get("Content-Encoding") == "gzip":
             raw = gzip.decompress(raw)
@@ -637,9 +637,9 @@ def fetch_listing_light(listing_id):
     return http_get_json(LISTING_URL.format(id=listing_id))
 
 
-def fetch_listing(listing_id):
+def fetch_listing(listing_id, timeout=60):
     """Ciężki payload (~257 KB): kort + wszystkie terminy w included[]."""
-    return http_get_json(LISTING_DATES_URL.format(id=listing_id))
+    return http_get_json(LISTING_DATES_URL.format(id=listing_id), timeout=timeout)
 
 
 # ------------------------------------------------------------------ core logic
@@ -1086,19 +1086,57 @@ def plan_sleep(default_s, windows, burst, tz, elapsed=0.0, now=None):
 
 
 def fmt_price(price, listing_default):
-    p = price or listing_default
-    if not p or p.get("amount") in (None, 0):
+    """Cena do wyświetlenia. Nierozpoznany kształt opisujemy wprost, nie jako „za darmo"."""
+    p = price if price is not None else listing_default
+    kwota = price_amount({"price": p}, None)
+    if kwota == CENA_NIEZNANA:
+        return "cena nieznana"
+    if kwota == 0:
         return "za darmo"
-    return f"{p['amount'] / 100:.2f} {p.get('currency', '')}".strip()
+    waluta = p.get("currency", "") if isinstance(p, dict) else ""
+    return f"{kwota / 100:.2f} {waluta}".strip()
 
 
 def boolish(value):
     return str(value or "").strip().lower() in ("1", "true", "yes", "y", "on", "tak")
 
 
+# Kwota, której NIE UMIEMY odczytać. Nie zero — bo zero znaczy „za darmo" i przy
+# nierozpoznanym kształcie ceny puszczałoby płatny termin jako darmowy.
+CENA_NIEZNANA = -1
+
+
 def price_amount(slot, listing_default):
-    p = slot.get("price") or listing_default or {}
-    return p.get("amount") or 0
+    """Kwota w groszach, 0 dla darmowego, `CENA_NIEZNANA` gdy kształt jest nieznany.
+
+    `free_only` jest JEDYNĄ rzeczą stojącą między użytkownikiem a płaceniem za kort,
+    a poprzednia wersja (`p.get("amount") or 0`) zawodziła OTWARCIE: cena
+    `{"value": 3900}` albo `{"gross": 3900}` dawała 0, czyli „za darmo", i termin
+    zostałby zarezerwowany. Cena jako napis (`{"amount": "3900"}`) wywracała z kolei
+    porównanie `> 0` wyjątkiem TypeError.
+
+    Zasada: czego nie rozumiemy, uznajemy za PŁATNE. Przegapiony darmowy termin kosztuje
+    jedno polowanie; nieoczekiwana płatna rezerwacja kosztuje pieniądze i trzeba ją
+    ręcznie odkręcić.
+    """
+    p = slot.get("price")
+    if p is None:
+        p = listing_default
+    if p is None:
+        return 0                       # brak ceny w API = kort darmowy
+    if not isinstance(p, dict):
+        return CENA_NIEZNANA           # napis, liczba, cokolwiek innego
+    if "amount" not in p:
+        return CENA_NIEZNANA           # inny schemat niż znany nam
+    kwota = p["amount"]
+    if kwota is None:
+        return 0
+    if isinstance(kwota, bool):        # True/False to nie jest kwota
+        return CENA_NIEZNANA
+    try:
+        return int(float(kwota))       # akceptujemy też „3900" i 39.0
+    except (TypeError, ValueError):
+        return CENA_NIEZNANA
 
 
 # ------------------------------------------------------------------ register
@@ -1411,7 +1449,13 @@ def register_slot(slot, listing_price, cfg, speculative=False):
         return False, token_error
     if not name:
         return False, "brak imienia i nazwiska uczestnika (auto_register_name)"
-    if price_amount(slot, listing_price) > 0 and cfg.get("free_only", True):
+    kwota = price_amount(slot, listing_price)
+    if kwota != 0 and cfg.get("free_only", True):
+        # `!= 0`, nie `> 0`: obejmuje także `CENA_NIEZNANA`. Nierozpoznana cena to
+        # powód, żeby NIE rezerwować, a nie żeby zgadywać.
+        if kwota == CENA_NIEZNANA:
+            return False, (f"nie rozpoznaję ceny terminu ({slot.get('price') or listing_price!r}) "
+                           f"— nie rezerwuję, żeby nie zapłacić przez pomyłkę")
         return False, f"termin płatny ({fmt_price(slot.get('price'), listing_price)}) — pomijam"
     participant = {
         "name": name,
@@ -2633,6 +2677,27 @@ def notify_auth_problem(topic, detail, book_url=None):
     )
 
 
+# Temat z przykładu w konfiguracji. ntfy.sh nie ma haseł: KAŻDY, kto zna nazwę tematu,
+# czyta wszystkie wiadomości i może wysyłać własne. Zostawiona wartość domyślna znaczy
+# więc, że powiadomienia o Twoich rezerwacjach czyta każdy, kto też jej nie zmienił —
+# i że Ty czytasz jego.
+TEMATY_PRZYKLADOWE = ("your-ntfy-topic-here", "padel", "test", "changeme")
+
+
+def ostrzez_o_temacie(topic):
+    """Jednorazowe ostrzeżenie o temacie, który nie chroni niczego."""
+    czysty = (topic or "").strip().lower()
+    if not czysty:
+        return
+    if czysty in TEMATY_PRZYKLADOWE:
+        log(f"! Temat ntfy '{topic}' to wartość przykładowa. ntfy.sh nie ma haseł — "
+            f"kto zna nazwę tematu, czyta Twoje powiadomienia i może wysyłać własne. "
+            f"Ustaw długą, losową nazwę w opcji ntfy_topic.")
+    elif len(czysty) < 12:
+        log(f"! Temat ntfy '{topic}' jest krótki — na ntfy.sh nazwa tematu jest jedynym "
+            f"zabezpieczeniem. Zalecane co najmniej 16 losowych znaków.")
+
+
 def notify_startup(topic, count, tz, book_url=None):
     if not topic:
         log("! Brak NTFY_TOPIC — pomijam powiadomienie startowe (tryb testowy).")
@@ -2682,6 +2747,10 @@ def build_reg_cfg(cfg, state_doc):
     }
 
 
+# Ile najwyżej czekamy na jedno pobranie obserwatora. Patrz komentarz w `patrz()`.
+OBSERWATOR_TIMEOUT = 5
+
+
 def obserwuj_podczas_zapisu(lid, filters, tz, znane_ids):
     """Pobiera grafik BEZ PRZERW, dopóki trwa nasz własny zapis. Zwraca (stop, wynik).
 
@@ -2702,7 +2771,12 @@ def obserwuj_podczas_zapisu(lid, filters, tz, znane_ids):
     def patrz():
         while not stop.is_set():
             try:
-                doc = fetch_listing(lid)
+                # KRÓTKI timeout, nie domyślne 60 s. Obserwator pyta co ~100 ms, więc
+                # odpowiedź po dziesięciu sekundach jest dla niego bezwartościowa —
+                # a zawieszone pobranie trzyma wątek puli sprintu jeszcze długo po
+                # `stop.set()`. Przy 60 s jeden taki wątek blokowałby slot przez CAŁE
+                # okno zrywu, i to dokładnie w sekundzie publikacji.
+                doc = fetch_listing(lid, timeout=OBSERWATOR_TIMEOUT)
             except Exception:  # noqa: BLE001 - obserwacja nie może wywrócić polowania
                 stop.wait(0.05)
                 continue
@@ -2841,6 +2915,15 @@ def rejestruj_obserwujac(lid, sloty, ceny, cfg, registered, filters, tz, znane,
     """
     obserwator = (obserwuj_podczas_zapisu(lid, filters, tz, znane)
                   if obserwuj and lid else None)
+    # `auto_register_new_slots` liczy swój limit od zera przy KAŻDYM wywołaniu, a wołamy
+    # je tu dwa razy. Bez odjęcia zdobyczy `auto_register_max: 2` dałoby cztery
+    # rezerwacje — każda to zajęty kort i pieniądze.
+    limit_calkowity = cfg.get("max_per_run", 1)
+    try:
+        limit_calkowity = max(0, int(limit_calkowity))
+    except (TypeError, ValueError):
+        limit_calkowity = 1
+    przed = len(registered)
     try:
         wyniki, registered = auto_register_new_slots(sloty, ceny, cfg, registered)
     finally:
@@ -2859,11 +2942,24 @@ def rejestruj_obserwujac(lid, sloty, ceny, cfg, registered, filters, tz, znane,
             if doc else None)
     ceny_fala = dict(ceny)
     ceny_fala.update({sid: cena for sid in druga})
+    # Limit obejmuje OBIE fale. Zero znaczy: dalej tylko patrzymy.
+    cfg["max_per_run"] = max(0, limit_calkowity - (len(registered) - przed))
+    if cfg["max_per_run"] == 0:
+        cfg["max_per_run"] = limit_calkowity
+        log(f"= Limit {limit_calkowity} wykorzystany w pierwszej fali — "
+            f"drugiej nie rezerwuję")
+        return wyniki, registered, druga, doc
     # Strzelamy PRZED księgowaniem: dziennik, stan i powiadomienia kosztowały 03.09
     # kolejne ~470 ms, a to więcej, niż trwa cudzy zapis.
     cfg["seen_at"] = time.monotonic()
-    wyniki_fala, registered = auto_register_new_slots(
-        list(druga.values()), ceny_fala, cfg, registered)
+    try:
+        wyniki_fala, registered = auto_register_new_slots(
+            list(druga.values()), ceny_fala, cfg, registered)
+    finally:
+        # Przywracamy wartość wołającego. Pętla partii w Lambdzie i tak ustawia swoją
+        # przed każdą partią, ale zostawianie po sobie okrojonego limitu w cudzej
+        # konfiguracji to dokładnie ten rodzaj niespodzianki, który wraca po miesiącu.
+        cfg["max_per_run"] = limit_calkowity
     wyniki.update(wyniki_fala)
     return wyniki, registered, druga, doc
 
@@ -3267,6 +3363,7 @@ def main():
         run_once()
         return 0  # tryb jednorazowy — nie wywracaj wywołującego
 
+    ostrzez_o_temacie(opcja("NTFY_TOPIC", load_config(quiet=True), "ntfy_topic"))
     n = wczytaj_nastawy(interval)
     tz, windows, burst = n.tz, n.windows, n.burst
     salvo_size, warm_size, warm_url = n.salvo_size, n.warm_size, n.warm_url

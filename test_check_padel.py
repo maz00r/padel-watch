@@ -1587,7 +1587,7 @@ class SprintTest(unittest.TestCase):
         lock = threading.Lock()
         self.pobran = 0
 
-        def fake_fetch(lid):
+        def fake_fetch(lid, **kw):
             with lock:
                 self.pobran += 1
                 ids = kolejka.pop(0) if kolejka else kolejne_odpowiedzi[-1]
@@ -1631,7 +1631,7 @@ class SprintTest(unittest.TestCase):
         kolejka = [ValueError("padlo"), {"a"}, {"a", "b"}]
         lock = threading.Lock()
 
-        def fake_fetch(lid):
+        def fake_fetch(lid, **kw):
             with lock:
                 item = kolejka.pop(0) if kolejka else {"a", "b"}
             if isinstance(item, Exception):
@@ -1667,7 +1667,7 @@ class SprintPoolTest(unittest.TestCase):
         aktywne = {1: set(), 2: set()}
         szczyt = {1: 0, 2: 0}
 
-        def fetch(lid):
+        def fetch(lid, **kw):
             # Wątek liczy się do rundy, w której WYSTARTOWAŁ — inaczej maruder
             # z rundy 1 zawyżałby wynik rundy 2 i test mierzyłby bzdurę.
             moja = runda[0]
@@ -3938,7 +3938,7 @@ class WatchWhileWritingTest(unittest.TestCase):
         """`fale`: kolejne listy slotów oddawane przez kolejne pobrania."""
         kolejka, self.pobrania = list(fale), 0
 
-        def fake_fetch(lid):
+        def fake_fetch(lid, **kw):
             self.pobrania += 1
             biezaca = kolejka.pop(0) if len(kolejka) > 1 else kolejka[0]
             return {"__sloty": biezaca}
@@ -4040,7 +4040,7 @@ class SecondWaveIsShotAtTest(unittest.TestCase):
         # Pierwsze pobranie widzi 18:00. Kolejne — te z obserwatora — widzą też 19:00.
         widoki = [self.doc(18)] + [self.doc(18, 19)] * 50
 
-        def fetch(lid):
+        def fetch(lid, **kw):
             return widoki.pop(0) if len(widoki) > 1 else widoki[0]
 
         with mock.patch.object(cp, "resolve_current_id", side_effect=lambda x: self.LID), \
@@ -4077,7 +4077,7 @@ class SecondWaveIsShotAtTest(unittest.TestCase):
         """Ciągłe pobieranie ma sens tylko w zrywie — poza nim to zbędny ruch."""
         pobrania = []
 
-        def fetch(lid):
+        def fetch(lid, **kw):
             pobrania.append(1)
             return self.doc(18)
 
@@ -4237,7 +4237,7 @@ class SecondWaveWithTwoCourtsTest(unittest.TestCase):
         widoki_a = [self.doc(11, 18, prefiks="A")] + [self.doc(11, 18, 19, prefiks="A")] * 60
         ceny_uzyte, obserwowane = {}, []
 
-        def fetch(lid):
+        def fetch(lid, **kw):
             obserwowane.append(lid)
             if lid == self.A:
                 return widoki_a.pop(0) if len(widoki_a) > 1 else widoki_a[0]
@@ -4406,7 +4406,7 @@ class SharedRegistrationCoreTest(RemoteHandlerHelpers, unittest.TestCase):
         # Pierwsze pobranie widzi 18:00; kolejne — z obserwatora — także 19:00.
         widoki = [self.doc(18)] + [self.doc(18, 19)] * 80
 
-        def fetch(lid):
+        def fetch(lid, **kw):
             return widoki.pop(0) if len(widoki) > 1 else widoki[0]
 
         def zapis(slot, price, cfg, speculative=False):
@@ -4423,3 +4423,130 @@ class SharedRegistrationCoreTest(RemoteHandlerHelpers, unittest.TestCase):
                 self.zadanie(self.tresc()), None))
         self.assertIn("d19", strzelone, "Irlandia nie strzeliła w termin z drugiej fali")
         self.assertEqual(len({s["when"] for s in wynik["shots"]}), 2)
+
+
+class DailyLimitAcrossWavesTest(SalvoHelpers, unittest.TestCase):
+    """Limit rezerwacji musi obejmować OBIE fale, nie każdą z osobna.
+
+    `auto_register_new_slots` liczy `done` od zera przy każdym wywołaniu, a
+    `rejestruj_obserwujac` woła je DWA razy: pierwsza fala i druga fala. Bez odjęcia
+    zdobyczy `auto_register_max: 2` daje realnie cztery rezerwacje — a każda z nich
+    to zajęty kort i pieniądze.
+
+    Ten sam błąd wyłapałem wcześniej w pętli partii Lambdy; po zejściu obu stron
+    na wspólny rdzeń wrócił drugimi drzwiami.
+    """
+
+    def slot(self, h):
+        return {"id": f"s{h}", "date_id": f"d{h}", "name": "R",
+                "start_utc": datetime(2026, 9, 11, h, tzinfo=timezone.utc),
+                "count": 0, "limit": 1, "price": None}
+
+    def test_the_limit_covers_both_waves(self):
+        zapisane = []
+
+        def zapis(slot, price, cfg, speculative=False):
+            zapisane.append(slot["date_id"])
+            cfg["transaction_id"] = "tx-" + slot["date_id"]
+            return True, "accepted"
+
+        # Obserwator „znajduje" dwa nowe terminy w trakcie zapisu.
+        druga_fala = {"s20": self.slot(20), "s21": self.slot(21)}
+
+        def fake_obs(lid, filters, tz, znane):
+            return threading.Event(), {"nowe": druga_fala, "doc": None, "pobran": 3}
+
+        cfg = self.cfg(max_per_run=2, salvo=0)
+        with mock.patch.object(cp, "register_slot", side_effect=zapis), \
+                mock.patch.object(cp, "cancel_reservation", return_value=(True, "ok")), \
+                mock.patch.object(cp, "obserwuj_podczas_zapisu", side_effect=fake_obs), \
+                mock.patch("sys.stdout", io.StringIO()):
+            _wyn, zarejestrowane, _fala, _doc = cp.rejestruj_obserwujac(
+                "kort", [self.slot(17), self.slot(18)], {}, cfg, set(), [], TZ, set())
+        self.assertLessEqual(
+            len(zarejestrowane), 2,
+            f"limit 2, a zarezerwowano {len(zarejestrowane)}: {sorted(zarejestrowane)}")
+
+    def test_the_second_wave_gets_only_what_is_left(self):
+        """Limit 3, pierwsza fala bierze 2 → druga może wziąć najwyżej jeden."""
+        zapisane = []
+
+        def zapis(slot, price, cfg, speculative=False):
+            zapisane.append(slot["date_id"])
+            cfg["transaction_id"] = "tx-" + slot["date_id"]
+            return True, "accepted"
+
+        druga = {"s20": self.slot(20), "s21": self.slot(21)}
+        cfg = self.cfg(max_per_run=3, salvo=0)
+        with mock.patch.object(cp, "register_slot", side_effect=zapis), \
+                mock.patch.object(cp, "cancel_reservation", return_value=(True, "ok")), \
+                mock.patch.object(cp, "obserwuj_podczas_zapisu",
+                                  side_effect=lambda *a: (threading.Event(),
+                                                          {"nowe": druga, "doc": None, "pobran": 2})), \
+                mock.patch("sys.stdout", io.StringIO()):
+            _w, zarejestrowane, _f, _d = cp.rejestruj_obserwujac(
+                "kort", [self.slot(17), self.slot(18)], {}, cfg, set(), [], TZ, set())
+        self.assertEqual(len(zarejestrowane), 3)
+        self.assertEqual(cfg["max_per_run"], 3, "funkcja zostawiła okrojony limit w cfg")
+
+
+class PriceGuardTest(unittest.TestCase):
+    """`free_only` zawodziło OTWARCIE przy nieznanym kształcie ceny.
+
+    Te korty są zawsze darmowe (`price: None`), więc praktycznie to ubezpieczenie,
+    nie naprawa — zachowanie dla `None` jest bez zmian. Ale reguła „czego nie rozumiem,
+    uznaję za płatne" kosztuje zero i chroni, gdyby API zmieniło schemat.
+    """
+
+    def test_the_normal_case_is_unchanged(self):
+        self.assertEqual(cp.price_amount({"price": None}, None), 0)
+        self.assertEqual(cp.price_amount({"price": {"amount": 0}}, None), 0)
+        self.assertEqual(cp.price_amount({"price": {"amount": 3900}}, None), 3900)
+
+    def test_an_unknown_shape_counts_as_paid(self):
+        for ksztalt in ({"value": 3900}, {"gross": 3900}, "darmowy", {}, {"amount": True}):
+            self.assertEqual(cp.price_amount({"price": ksztalt}, None), cp.CENA_NIEZNANA,
+                             f"kształt {ksztalt!r} uznany za darmowy")
+
+    def test_a_numeric_string_no_longer_explodes(self):
+        """`{'amount': '3900'}` wywracało porównanie `> 0` wyjątkiem TypeError."""
+        self.assertEqual(cp.price_amount({"price": {"amount": "3900"}}, None), 3900)
+
+    def test_registration_refuses_an_unreadable_price(self):
+        cfg = {"name": "Jan", "free_only": True, "token": "x", "browser_mode": True}
+        with mock.patch("sys.stdout", io.StringIO()):
+            ok, msg = cp.register_slot({"id": "s1", "date_id": "d1",
+                                        "price": {"value": 3900}}, None, cfg)
+        self.assertFalse(ok)
+        self.assertIn("nie rozpoznaję ceny", msg)
+
+    def test_display_never_calls_an_unknown_price_free(self):
+        self.assertEqual(cp.fmt_price({"value": 3900}, None), "cena nieznana")
+        self.assertEqual(cp.fmt_price(None, None), "za darmo")
+
+
+class NtfyTopicWarningTest(unittest.TestCase):
+    """ntfy.sh nie ma haseł — nazwa tematu JEST zabezpieczeniem.
+
+    Domyślna wartość w `config.yaml` to `your-ntfy-topic-here`, czyli dokładnie ta,
+    którą zostawi każdy, kto nie doczyta. Skutek: powiadomienia o rezerwacjach czyta
+    każdy inny użytkownik tego dodatku, który też jej nie zmienił.
+    """
+
+    def ostrzez(self, topic):
+        with mock.patch("sys.stdout", io.StringIO()) as buf:
+            cp.ostrzez_o_temacie(topic)
+            return buf.getvalue()
+
+    def test_the_placeholder_from_the_readme_is_called_out(self):
+        self.assertIn("wartość przykładowa", self.ostrzez("your-ntfy-topic-here"))
+
+    def test_a_short_topic_is_called_out_too(self):
+        self.assertIn("krótki", self.ostrzez("padel123"))
+
+    def test_a_proper_topic_is_quiet(self):
+        self.assertEqual(self.ostrzez("k7Qm2xR9vLbT4nWpZs"), "")
+
+    def test_no_topic_means_no_noise(self):
+        """Puste = powiadomienia wyłączone świadomie, nie ma o czym ostrzegać."""
+        self.assertEqual(self.ostrzez(""), "")
