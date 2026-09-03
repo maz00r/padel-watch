@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.22.0 — zryw patrzy DALEJ, kiedy strzelamy
+
+Log z 03.09 pokazał ostatnie okno ślepoty, tym razem po stronie lokalnej:
+
+```
+11:00:23.856   widzimy 4 dostępne, 1 pasujący: 18:00 — START salwy
+11:00:25.162   salwa wraca po 1303 ms — 409, ktoś był pierwszy
+11:00:25.628   dziennik, grafik dnia, zapis stanu, kolejka powiadomień
+11:00:26.156   PIERWSZE spojrzenie po strzale: 10 dostępnych, 0 pasujących
+```
+
+**2,3 sekundy bez jednego pobrania.** W tym oknie liczba dostępnych skoczyła z 4 na 10 —
+sześć terminów pojawiło się, gdy byliśmy zajęci własnym strzałem. Potem 80 pobrań przez
+39 sekund i ani jedna wieczorna godzina nie wróciła jako wolna.
+
+Publikacja przychodzi partiami, a nasz zapis trwa dłużej niż odstęp między nimi. Zapis
+i obserwacja muszą więc dziać się **jednocześnie**.
+
+- **Obserwator zapisu:** w zrywie, na czas rejestracji, rusza wątek pobierający grafik
+  bez przerw. Zbiera terminy, które pojawiły się, gdy czekaliśmy na własną odpowiedź.
+- **Druga fala dostaje strzał NATYCHMIAST** — przed księgowaniem. Dziennik, grafik, stan
+  i kolejka powiadomień kosztowały 03.09 kolejne ~470 ms, a to więcej, niż trwa cudzy zapis.
+- **Strzały z obu fal trafiają do Dziennika.** `shots` jest zerowane przy każdej
+  rejestracji, więc bez sklejenia wpis pokazywałby wyłącznie drugą falę.
+- **Grafik dnia liczymy z najświeższego dokumentu.** Stąd brał się dziwny wpis
+  „4 wolne z 4" z 03.09 — grafik policzono ze zdjęcia sprzed publikacji, choć chwilę
+  później kort miał ich jedenaście.
+- **Tylko w zrywie.** Poza nim ciągłe pobieranie to zbędny ruch; jest na to test.
+- **Awaria obserwacji nie może wywrócić polowania** — wyjątek w wątku jest połykany,
+  a `stop` ustawiany w `finally`.
+
+To ten sam błąd, który 0.20.0 naprawiło w Irlandii, tylko po stronie lokalnej i cztery
+razy dłuższy — bo zapis z domu trwa 1303 ms zamiast ~100 ms z regionu.
+
 ## 0.21.1 — po logu nie dało się poznać, czy Lambda jest zaktualizowana
 
 Licznik partii pojawiał się w Dzienniku tylko wtedy, gdy był niezerowy. W logu z 03.09

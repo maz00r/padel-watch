@@ -3896,3 +3896,177 @@ class BatchCountAlwaysVisibleTest(unittest.TestCase):
     def test_batches_are_counted_in_polish(self):
         self.assertIn("2 partie", self.linia({"sprint_ms": 1, "total_ms": 2, "batches": 2}))
         self.assertIn("1 partia", self.linia({"sprint_ms": 1, "total_ms": 2, "batches": 1}))
+
+
+class WatchWhileWritingTest(unittest.TestCase):
+    """OBSERWATOR ZAPISU — sedno straty z 03.09.
+
+    Czekanie na odpowiedź serwera trwało 1303 ms i przez cały ten czas nikt nie patrzył
+    na grafik. W tym oknie liczba dostępnych skoczyła z 4 na 10 — sześć terminów
+    pojawiło się, gdy byliśmy zajęci własnym strzałem. Gdy spojrzeliśmy ponownie, żaden
+    nie pasował już do filtra, a przez 39 kolejnych sekund i 80 pobrań nie wróciła
+    ani jedna wieczorna godzina.
+    """
+
+    LID = "kort"
+
+    def slot(self, h, sid=None):
+        return {"id": sid or f"s{h}", "date_id": f"d{h}", "name": "Rezerwacja godzinna",
+                "start_utc": datetime(2026, 9, 10, h, 0, tzinfo=timezone.utc),
+                "count": 0, "limit": 1, "price": None}
+
+    def obserwuj(self, fale, znane=(), opoznienie=0.05):
+        """`fale`: kolejne listy slotów oddawane przez kolejne pobrania."""
+        kolejka, self.pobrania = list(fale), 0
+
+        def fake_fetch(lid):
+            self.pobrania += 1
+            biezaca = kolejka.pop(0) if len(kolejka) > 1 else kolejka[0]
+            return {"__sloty": biezaca}
+
+        with mock.patch.object(cp, "fetch_listing", side_effect=fake_fetch), \
+                mock.patch.object(cp, "free_slots", side_effect=lambda d, l, n: d["__sloty"]), \
+                mock.patch.object(cp, "passes_filter", return_value=True):
+            stop, wynik = cp.obserwuj_podczas_zapisu(self.LID, [], TZ, set(znane))
+            time.sleep(opoznienie)      # tyle, ile trwa nasz zapis
+            stop.set()
+            time.sleep(0.05)            # daj wątkowi dokończyć
+        return wynik
+
+    def test_a_slot_appearing_during_the_write_is_caught(self):
+        """SEDNO: 19:00 pojawia się, gdy czekamy na odpowiedź dla 18:00."""
+        wynik = self.obserwuj([[self.slot(18)], [self.slot(18), self.slot(19)]],
+                              znane={"s18"})
+        self.assertIn("s19", wynik["nowe"])
+        self.assertNotIn("s18", wynik["nowe"], "termin już znany zgłoszony jako nowy")
+
+    def test_it_really_polls_more_than_once(self):
+        """Jedno pobranie to nie obserwacja — okno zapisu trwa ponad sekundę."""
+        wynik = self.obserwuj([[self.slot(18)]], znane={"s18"}, opoznienie=0.15)
+        self.assertGreater(wynik["pobran"], 1)
+
+    def test_it_stops_when_told(self):
+        wynik = self.obserwuj([[self.slot(18)]], znane={"s18"})
+        po_stopie = wynik["pobran"]
+        time.sleep(0.1)
+        self.assertEqual(wynik["pobran"], po_stopie, "wątek pobiera po zatrzymaniu")
+
+    def test_it_keeps_the_freshest_document(self):
+        """Grafik dnia liczony ze zdjęcia sprzed publikacji dał wpis „4 wolne z 4"."""
+        wynik = self.obserwuj([[self.slot(18)], [self.slot(18), self.slot(19)]],
+                              znane={"s18"})
+        self.assertEqual(len(wynik["doc"]["__sloty"]), 2)
+
+    def test_a_broken_fetch_does_not_kill_the_hunt(self):
+        """Obserwacja jest dodatkiem — jej awaria nie może wywrócić polowania."""
+        with mock.patch.object(cp, "fetch_listing", side_effect=RuntimeError("padło")):
+            stop, wynik = cp.obserwuj_podczas_zapisu(self.LID, [], TZ, set())
+            time.sleep(0.08)
+            stop.set()
+            time.sleep(0.05)
+        self.assertEqual(wynik["nowe"], {})
+
+
+class SecondWaveIsShotAtTest(unittest.TestCase):
+    """Test od końca do końca: termin, który pojawia się W TRAKCIE naszego zapisu,
+    musi dostać strzał w TYM SAMYM biegu — zanim ruszy księgowanie.
+
+    03.09 księgowanie (dziennik, grafik, stan, kolejka powiadomień) zajęło ~470 ms,
+    a kolejne pobranie następne ~530 ms. Razem z 1303 ms zapisu dawało to 2,3 s
+    ślepoty. Cudzy zapis mieści się w tym z ogromnym zapasem.
+    """
+
+    LID = "aaaaaaaa-1111-2222-3333-444444444444"
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        for nazwa, sciezka in (("STATE_PATH", "s.json"), ("HUNTS_PATH", "h.json")):
+            patcher = mock.patch.object(cp, nazwa, os.path.join(self.dir.name, sciezka))
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.env = mock.patch.dict(os.environ, {
+            "LISTINGS": f"https://go.decathlon.pl/l/{self.LID}",
+            "NTFY_TOPIC": "", "FILTERS": "mon-sun:00:00-24:00",
+            "AUTO_REGISTER": "true", "AUTO_REGISTER_DRY_RUN": "false",
+            "AUTO_REGISTER_MAX": "5", "AUTO_REGISTER_SALVO": "0",
+            "AUTO_REGISTER_HEDGE": "1", "AUTO_REGISTER_NAME": "Jan",
+            "DECATHLON_TOKEN": jwt_with_exp(int(time.time()) + 3600),
+            "CONFIG_PATH": os.path.join(self.dir.name, "brak.json"),
+        })
+        self.env.start()
+        self.addCleanup(self.env.stop)
+        # Bez zapisanego stanu pierwszy bieg tylko ustala punkt odniesienia i NIC nie
+        # rezerwuje — musimy więc udawać, że dodatek już wcześniej patrzył.
+        with open(cp.STATE_PATH, "w", encoding="utf-8") as f:
+            json.dump({"free_ids": ["cos-innego"], "registered_ids": []}, f)
+
+    def doc(self, *godziny):
+        start = datetime.now(timezone.utc) + timedelta(days=7)
+        return {"data": {"attributes": {"title": "Kort", "price": None,
+                                        "datesStats": {"availableListingDates": len(godziny)}}},
+                "included": [TestFreeSlots.date_item(
+                    start.replace(hour=h, minute=0, second=0, microsecond=0).isoformat(),
+                    f"d{h}") for h in godziny]}
+
+    def test_a_slot_published_during_our_write_gets_a_shot(self):
+        strzelone = []
+
+        def wolny_zapis(slot, price, cfg, speculative=False):
+            strzelone.append(slot["start_utc"].hour)
+            time.sleep(0.12)          # tu 03.09 minęło 1303 ms
+            cfg["transaction_id"] = "tx"
+            return False, "Decathlon HTTP 409: No available seats"
+
+        # Pierwsze pobranie widzi 18:00. Kolejne — te z obserwatora — widzą też 19:00.
+        widoki = [self.doc(18)] + [self.doc(18, 19)] * 50
+
+        def fetch(lid):
+            return widoki.pop(0) if len(widoki) > 1 else widoki[0]
+
+        with mock.patch.object(cp, "resolve_current_id", side_effect=lambda x: self.LID), \
+                mock.patch.object(cp, "fetch_listing", side_effect=fetch), \
+                mock.patch.object(cp, "register_slot", side_effect=wolny_zapis), \
+                mock.patch("sys.stdout", io.StringIO()) as buf:
+            cp.run_once(skip_light=True)
+            out = buf.getvalue()
+
+        self.assertIn(18, strzelone)
+        self.assertIn(19, strzelone, "termin z drugiej fali nie dostał strzału")
+        self.assertIn("Druga fala", out)
+
+    def test_no_second_wave_means_no_extra_noise(self):
+        """Gdy nic się nie pojawia, nie ma dodatkowych strzałów ani linii w logu."""
+        strzelone = []
+
+        def zapis(slot, price, cfg, speculative=False):
+            strzelone.append(slot["start_utc"].hour)
+            time.sleep(0.05)
+            return False, "Decathlon HTTP 409: No available seats"
+
+        with mock.patch.object(cp, "resolve_current_id", side_effect=lambda x: self.LID), \
+                mock.patch.object(cp, "fetch_listing", return_value=self.doc(18)), \
+                mock.patch.object(cp, "register_slot", side_effect=zapis), \
+                mock.patch("sys.stdout", io.StringIO()) as buf:
+            cp.run_once(skip_light=True)
+            out = buf.getvalue()
+
+        self.assertEqual(strzelone, [18])
+        self.assertNotIn("Druga fala", out)
+
+    def test_outside_the_burst_we_do_not_poll_continuously(self):
+        """Ciągłe pobieranie ma sens tylko w zrywie — poza nim to zbędny ruch."""
+        pobrania = []
+
+        def fetch(lid):
+            pobrania.append(1)
+            return self.doc(18)
+
+        with mock.patch.object(cp, "resolve_current_id", side_effect=lambda x: self.LID), \
+                mock.patch.object(cp, "fetch_listing", side_effect=fetch), \
+                mock.patch.object(cp, "fetch_listing_light", return_value=self.doc(18)), \
+                mock.patch.object(cp, "register_slot",
+                                  side_effect=lambda *a, **k: (time.sleep(0.1), (False, "409"))[1]), \
+                mock.patch("sys.stdout", io.StringIO()):
+            cp.run_once(skip_light=False)
+        self.assertLessEqual(len(pobrania), 2, "poza zrywem obserwator nie powinien działać")

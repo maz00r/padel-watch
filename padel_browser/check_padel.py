@@ -2596,6 +2596,40 @@ def build_reg_cfg(cfg, state_doc):
     }
 
 
+def obserwuj_podczas_zapisu(lid, filters, tz, znane_ids):
+    """Pobiera grafik BEZ PRZERW, dopóki trwa nasz własny zapis. Zwraca (stop, wynik).
+
+    SEDNO (03.09): czekanie na odpowiedź serwera trwało 1303 ms i przez cały ten czas
+    nikt nie patrzył na grafik. W tym oknie liczba dostępnych terminów skoczyła z 4 na
+    10 — sześć terminów pojawiło się, gdy byliśmy zajęci własnym strzałem. Gdy
+    spojrzeliśmy ponownie, żaden z nich nie pasował już do filtra: wieczorne godziny
+    zdążyły zniknąć. Przez 39 kolejnych sekund i 80 pobrań nie wróciła ani jedna.
+
+    Publikacja przychodzi partiami, a zapis trwa dłużej niż odstęp między nimi — więc
+    strzelanie i patrzenie MUSZĄ dziać się jednocześnie.
+
+    `wynik["nowe"]` to sloty spoza `znane_ids`, które przeszły przez filtr.
+    """
+    stop = threading.Event()
+    wynik = {"nowe": {}, "doc": None, "pobran": 0}
+
+    def patrz():
+        while not stop.is_set():
+            try:
+                doc = fetch_listing(lid)
+            except Exception:  # noqa: BLE001 - obserwacja nie może wywrócić polowania
+                stop.wait(0.05)
+                continue
+            wynik["pobran"] += 1
+            wynik["doc"] = doc          # zawsze najświeższy — grafik dnia liczymy z niego
+            for s in free_slots(doc, lid, datetime.now(timezone.utc)):
+                if s["id"] not in znane_ids and passes_filter(s, filters, tz):
+                    wynik["nowe"].setdefault(s["id"], s)
+
+    sprint_pool().submit(patrz)
+    return stop, wynik
+
+
 def run_once(announce_startup=False, skip_light=False, prefetched=None, defer_push=False,
              remote=None):
     """Zwraca 0 przy powodzeniu, 2 przy błędzie sieci (stan nietknięty).
@@ -2628,6 +2662,9 @@ def run_once(announce_startup=False, skip_light=False, prefetched=None, defer_pu
     listing_price_by_id = {}
     docs_by_lid = {}   # do policzenia CAŁEGO grafiku dnia, nie tylko wolnych terminów
     seen_at_all = None  # chwila, w której zobaczyliśmy grafik — punkt zerowy wieku danych
+    # Ostatni przetworzony kort. Obserwator zapisu patrzy właśnie na niego — przy jednym
+    # korcie (a tak jest w praktyce) to po prostu ten jedyny.
+    lid = canon_url = listing_price = None
 
     for url in listings:
         # Podążaj za przekierowaniem -> aktualne ID kortu (do monitoringu i linku).
@@ -2749,12 +2786,48 @@ def run_once(announce_startup=False, skip_light=False, prefetched=None, defer_pu
             log(f"↻ Ponawiam auto-rejestrację dla {len(retried)} zapamiętanego(-ych) "
                 f"terminu(-ów) po wcześniejszym błędzie tokenu.")
         reg_cfg["seen_at"] = seen_at_all
-        wyniki_lokalne, registered_ids = auto_register_new_slots(
-            [current[i] for i in candidate_ids], listing_price_by_id, reg_cfg, registered_ids
-        )
+        # Patrzymy RÓWNOLEGLE do zapisu — tylko w zrywie, bo tylko tam publikacja
+        # sypie partiami i tylko tam warto płacić za ciągłe pobieranie.
+        obserwator = (obserwuj_podczas_zapisu(lid, filters, tz, set(current_ids))
+                      if skip_light and lid else None)
+        try:
+            wyniki_lokalne, registered_ids = auto_register_new_slots(
+                [current[i] for i in candidate_ids], listing_price_by_id, reg_cfg,
+                registered_ids
+            )
+        finally:
+            if obserwator:
+                obserwator[0].set()
         # update, nie podstawienie: wyniki z Irlandii muszą przetrwać, bo to one
         # trafiają do powiadomienia jako „co udało się zarezerwować".
         registration_results.update(wyniki_lokalne)
+        strzaly_lokalne = list(reg_cfg.get("shots") or [])
+
+        # DRUGA FALA: terminy, które pojawiły się W TRAKCIE zapisu. Strzelamy w nie
+        # NATYCHMIAST, przed księgowaniem — dziennik, stan i powiadomienia kosztowały
+        # 03.09 kolejne ~470 ms, a to więcej, niż trwa cudzy zapis.
+        if obserwator and obserwator[1]["nowe"]:
+            druga = obserwator[1]["nowe"]
+            log(f"⇉ Druga fala: {len(druga)} "
+                f"{plural(len(druga), 'termin', 'terminy', 'terminów')} pojawiło się "
+                f"w trakcie zapisu ({obserwator[1]['pobran']} pobrań) — strzelam od razu")
+            for sid, s in druga.items():
+                current[sid] = s
+                book_url_by_id[sid] = canon_url
+                listing_price_by_id[sid] = listing_price
+            current_ids |= set(druga)
+            new_ids |= set(druga)
+            if obserwator[1]["doc"] is not None:
+                # Grafik dnia liczony z dokumentu sprzed publikacji dał 03.09 wpis
+                # „4 wolne z 4", choć chwilę później kort miał ich jedenaście.
+                docs_by_lid[lid] = obserwator[1]["doc"]
+            reg_cfg["seen_at"] = time.monotonic()
+            wyniki_fala, registered_ids = auto_register_new_slots(
+                list(druga.values()), listing_price_by_id, reg_cfg, registered_ids)
+            registration_results.update(wyniki_fala)
+            # `shots` jest zerowane przy każdym wywołaniu — bez sklejenia dziennik
+            # pokazałby wyłącznie drugą falę i zgubił strzał, który ją poprzedził.
+            reg_cfg["shots"] = strzaly_lokalne + list(reg_cfg.get("shots") or [])
 
     # Alert o tokenie: raz na incydent (kasowany, gdy token znów działa).
     auth_error = reg_cfg.get("auth_error")

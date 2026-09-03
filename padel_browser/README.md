@@ -199,6 +199,25 @@ osiągalne — więc winna była informacja, nie prędkość. To drugi rodzaj po
 zupełnie innej poprawki niż przyspieszanie strzału.
 
 
+## Dlaczego zryw patrzy podczas strzelania
+
+Publikacja przychodzi **partiami**, a nasz zapis trwa dłużej niż odstęp między nimi.
+03.09 czekanie na odpowiedź serwera zajęło 1303 ms i przez cały ten czas nikt nie patrzył
+na grafik — liczba dostępnych terminów skoczyła w tym oknie z 4 na 10, a wszystkie
+wieczorne godziny zniknęły, zanim spojrzeliśmy ponownie.
+
+Dlatego w zrywie, na czas rejestracji, rusza osobny wątek pobierający grafik bez przerw.
+Terminy, które pojawią się w trakcie zapisu, dostają strzał **natychmiast** — przed
+zapisem stanu, dziennikiem i powiadomieniami, bo one kosztowały kolejne ~470 ms.
+
+W logu widać to jako:
+
+```
+⇉ Druga fala: 2 terminy pojawiły się w trakcie zapisu (7 pobrań) — strzelam od razu
+```
+
+Poza zrywem obserwator nie działa — tam ciągłe pobieranie to tylko zbędny ruch.
+
 ## Okno sprintu a rozrzut publikacji
 
 Pora publikacji **nie jest stała**. Zmierzone przez 11 dni (23.08–03.09):
