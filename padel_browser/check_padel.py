@@ -3276,7 +3276,12 @@ class Nastawy:
 
     __slots__ = ("tz", "tzname", "windows", "burst", "salvo_size", "hedge_size",
                  "warm_size", "warm_url", "first_listing", "remote_url", "remote_secret",
-                 "sprint", "sprint_threads")
+                 "sprint", "sprint_threads",
+                 # Temat ntfy potrzebny kontroli sesji przed zrywem. Wcześniej `main`
+                 # sięgała po `cfg_startowy` — zmienną, która przy wydzieleniu tej
+                 # funkcji przeniosła się do jej wnętrza. Efekt: NameError co 30 s
+                 # i kontrola sesji martwa przez cały dzień.
+                 "topic")
 
 
 def oglos_tryb_pracy():
@@ -3418,6 +3423,7 @@ def wczytaj_nastawy(interval):
 
 
     n.tz, n.tzname, n.windows, n.burst = tz, tzname, windows, burst
+    n.topic = opcja("NTFY_TOPIC", cfg_startowy, "ntfy_topic")
     n.salvo_size, n.hedge_size, n.warm_size = salvo_size, hedge_size, warm_size
     n.warm_url, n.first_listing = warm_url, first_listing
     n.remote_url, n.remote_secret = remote_url, remote_secret
@@ -3580,7 +3586,7 @@ def main():
         # Kontrola sesji na pół godziny przed zrywem — 27.08 martwa sesja kosztowała
         # cztery wolne terminy, a dowiedzieliśmy się o tym dopiero po polowaniu.
         try:
-            preflight_token(now_local, tz, opcja("NTFY_TOPIC", cfg_startowy, "ntfy_topic"),
+            preflight_token(now_local, tz, n.topic,
                             LISTING_PAGE_URL.format(id=listing_id_from_url(first_listing[0]))
                             if first_listing else "")
         except Exception as e:  # noqa: BLE001 - kontrola nie może wywrócić pętli

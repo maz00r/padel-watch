@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.24.1 — NameError zabijał kontrolę sesji przed zrywem
+
+Zaraz po wydaniu 0.24.0 w logu produkcyjnym pojawiło się:
+
+```
+! Kontrola sesji nieudana: NameError("name 'cfg_startowy' is not defined")
+```
+
+— i powtarzało się **co 30 sekund**. Kontrola sesji przed zrywem, czyli jedyne
+zabezpieczenie przed martwym tokenem o 11:00, była martwa.
+
+**Przyczyna to zderzenie dwóch zmian z dwóch sesji.** 0.23.0 wprowadziło `cfg_startowy`
+wewnątrz `main()`. 0.24.0 wydzieliło z `main()` funkcję `wczytaj_nastawy` — zmienna
+przeniosła się do jej wnętrza, a jedno użycie zostało na zewnątrz. Temat ntfy jedzie
+teraz w `Nastawy.topic`.
+
+**Dlaczego nic tego nie złapało — i co z tym zrobiono:**
+
+- `py_compile` sprawdza składnię, a ta była poprawna,
+- `main()` nie ma pokrycia testami, bo to nieskończona pętla,
+- błąd siedział w gałęzi odpalanej **raz na dobę**, pół godziny przed zrywem.
+
+Nowy `sprawdz_nazwy.py` — statyczny strażnik nieokreślonych nazw na samej bibliotece
+standardowej. Rozumie zasięgi zagnieżdżone, argumenty, importy, `global`/`nonlocal`
+i `except ... as`. Wpięty do CI **przed** sprawdzeniem składni i do zestawu testów,
+razem z testem dowodzącym, że łapie dokładnie ten błąd, dla którego powstał.
+
+Przy okazji sprawdzone dwie inne klasy kolizji między zmianami: zgodność sygnatur
+z wywołaniami między plikami (bez zastrzeżeń) i klucze stanu pisane przez jedną zmianę,
+a czytane przez drugą (bez zastrzeżeń).
+
 ## 0.24.0 (ciąg dalszy) — audyt powiadomień z perspektywy użytkownika
 
 Poprzedni audyt sprawdzał, czy kod jest poprawny. Nie zadał najprostszego pytania:

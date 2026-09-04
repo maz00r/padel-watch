@@ -4944,3 +4944,40 @@ class RemoteReportsItsDetectionAgeTest(RemoteHandlerHelpers, unittest.TestCase):
             wynik = self.rozpakuj(self.handler.lambda_handler(
                 self.zadanie(self.tresc(sprint_seconds=1)), None))
         self.assertIsNone(wynik["timings"].get("first_hit_ago_ms"))
+
+
+class NoUndefinedNamesTest(unittest.TestCase):
+    """STRAŻNIK: nieokreślona nazwa nie może dojść do produkcji.
+
+    04.09 poleciało `NameError("name 'cfg_startowy' is not defined")` co 30 sekund —
+    kontrola sesji przed zrywem była martwa przez cały dzień. Zmienna została wciągnięta
+    do wydzielanej funkcji, a jej użycie zostało w `main`. Zderzenie dwóch zmian z dwóch
+    różnych sesji.
+
+    Dlaczego nic tego nie złapało: `py_compile` sprawdza składnię, a ta była poprawna;
+    `main` nie ma pokrycia testami, bo to nieskończona pętla; a sam błąd siedział
+    w gałęzi odpalanej raz na dobę, pół godziny przed zrywem.
+    """
+
+    def test_no_module_uses_a_name_that_does_not_exist(self):
+        korzen = os.path.dirname(os.path.abspath(__file__))
+        sys.path.insert(0, korzen)
+        import sprawdz_nazwy
+        wszystkie = []
+        for plik in ("padel_browser/check_padel.py", "padel_browser/panel.py",
+                     "padel_browser/read_token.py", "aws_remote/handler.py"):
+            for linia, nazwa, gdzie in sprawdz_nazwy.sprawdz(os.path.join(korzen, plik)):
+                wszystkie.append(f"{plik}:{linia}: '{nazwa}' w {gdzie}()")
+        self.assertEqual(sorted(set(wszystkie)), [])
+
+    def test_the_guard_actually_catches_the_bug_it_was_written_for(self):
+        """Strażnik, który nigdy nie krzyczy, nie chroni przed niczym."""
+        korzen = os.path.dirname(os.path.abspath(__file__))
+        sys.path.insert(0, korzen)
+        import sprawdz_nazwy
+        with tempfile.TemporaryDirectory() as d:
+            zly = os.path.join(d, "zly.py")
+            with open(zly, "w", encoding="utf-8") as f:
+                f.write("def a():\n    x = 1\n    return x\n\n\ndef b():\n    return x\n")
+            znalezione = sprawdz_nazwy.sprawdz(zly)
+        self.assertEqual([(n, g) for _l, n, g in znalezione], [("x", "b")])

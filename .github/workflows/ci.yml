@@ -23,6 +23,10 @@ jobs:
         # Panel jest JEDYNYM miejscem, które potrafi anulować rezerwację, i jedynym
         # wystawionym przez Ingress. Do 0.24.0 nie miał ani jednego testu.
         run: python3 -m unittest -v test_panel
+      - name: Nieokreślone nazwy
+        # py_compile sprawdza SKŁADNIĘ. 04.09 na produkcji leciało co 30 s
+        # NameError('cfg_startowy') — składnia poprawna, kod martwy.
+        run: python3 sprawdz_nazwy.py padel_browser/check_padel.py padel_browser/panel.py padel_browser/read_token.py aws_remote/handler.py
       - name: Składnia silników
         run: python3 -m py_compile padel_browser/check_padel.py padel_browser/read_token.py padel_browser/panel.py cinema_watch/check_cinema.py
       - name: Paczka Lambdy jest aktualna
