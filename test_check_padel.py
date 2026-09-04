@@ -4836,3 +4836,32 @@ class CorruptApiRecordTest(unittest.TestCase):
     def test_a_clean_document_says_nothing(self):
         _sloty, out = self.parsuj(self.pozycja("a"), self.pozycja("b"))
         self.assertNotIn("Pominąłem", out)
+
+
+class SprintWindowCoversEveryObservedPublicationTest(unittest.TestCase):
+    """Okno sprintu musi obejmować WSZYSTKIE zaobserwowane pory publikacji.
+
+    Zmierzone (23.08–04.09, sekunda po 11:00):
+    15, 13, 13, 15, 36, 36, 36, 37, 37, 42, 25, **48**.
+
+    04.09 przyszła o 11:00:48 — poza oknem 11:00:05+40 s, które obowiązywało. Limit
+    `MAX_SPRINT_SEKUND` przycinał ustawienie użytkownika po cichu, więc dłuższego okna
+    nie dało się w ogóle włączyć.
+    """
+
+    PUBLIKACJE = [15, 13, 13, 15, 36, 36, 36, 37, 37, 42, 25, 48]
+
+    def test_the_cap_allows_a_window_that_covers_everything(self):
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "aws_remote"))
+        import handler
+        potrzebne = max(self.PUBLIKACJE) - 5 + 2      # start 11:00:05 + zapas
+        self.assertGreaterEqual(
+            handler.MAX_SPRINT_SEKUND, potrzebne,
+            f"limit {handler.MAX_SPRINT_SEKUND}s przycina okno potrzebne do pokrycia "
+            f"publikacji o 11:00:{max(self.PUBLIKACJE)}")
+
+    def test_the_addon_schema_allows_it_too(self):
+        """Limit w Lambdzie nic nie da, jeśli konfiguracja dodatku nie pozwoli tego ustawić."""
+        cfg = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                "padel_browser", "config.yaml"), encoding="utf-8").read()
+        self.assertIn("sprint_seconds: int(1,60)", cfg)

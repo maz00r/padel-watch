@@ -44,7 +44,11 @@ LAMBDA_PELNY_RDZEN_MB = 1769
 # zamiast 66-178 ms z regionu. Limit musi więc pozwolić na okno rzędu 40 s.
 # Timeout funkcji w konsoli AWS musi być WIĘKSZY niż to okno — inaczej Lambda zostanie
 # ubita w trakcie obserwacji i nie odda nawet tego, co zdążyła zarezerwować.
-MAX_SPRINT_SEKUND = 45
+# 04.09 publikacja przyszła o 11:00:48 — najpóźniej w całej historii pomiarów, poza
+# oknem 11:00:05+40 s. Zmierzone pory publikacji rozciągają się od 11:00:13 do 11:00:48,
+# więc pełne pokrycie wymaga ~55 s. Timeout funkcji w konsoli AWS musi być WIĘKSZY
+# (zalecane 90 s): po zamknięciu okna zostaje jeszcze rejestracja i powrót do domu.
+MAX_SPRINT_SEKUND = 60
 
 
 def _sekret_ok(event):
