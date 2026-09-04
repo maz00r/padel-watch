@@ -4865,3 +4865,82 @@ class SprintWindowCoversEveryObservedPublicationTest(unittest.TestCase):
         cfg = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 "padel_browser", "config.yaml"), encoding="utf-8").read()
         self.assertIn("sprint_seconds: int(1,60)", cfg)
+
+
+class RemoteDetectionTimeTest(HuntJournalHelpers, unittest.TestCase):
+    """Dziennik zapisywał moment POWROTU wyniku, nie moment publikacji.
+
+    Odkąd wywołanie Lambdy zostaje do końca okna (0.20.0), różnica sięga kilkudziesięciu
+    sekund. 04.09 Irlandia znalazła partię po 19 982 ms od startu pętli (~11:00:29),
+    a wynik wrócił do domu o 11:00:48.985 — i tę drugą godzinę wpisał Dziennik.
+
+    Na tej podstawie doradziłem przesunięcie okna sprintu, którego nie było potrzeba:
+    publikacja wypadła w jego środku, nie poza nim. Błąd pomiaru, który natychmiast
+    zamienił się w błędną decyzję.
+    """
+
+    def zapisz_zdalne(self, wykryto):
+        with mock.patch.object(cp, "notify_hunt"), mock.patch("sys.stdout", io.StringIO()):
+            return cp.record_hunt(
+                datetime(2026, 9, 4, 11, 0, 48, tzinfo=TZ), TZ,
+                new_slots=[self.slot(19)], wyniki={}, shots=[],
+                grid=("pt 11.09", 4, 4, [], date(2026, 9, 11)),
+                zdalnie=True, topic="temat", wykryto=wykryto)
+
+    def test_the_journal_records_when_ireland_saw_it(self):
+        wykryto = datetime(2026, 9, 4, 11, 0, 29, tzinfo=TZ)   # 11:00:29 czasu lokalnego
+        wpis = self.zapisz_zdalne(wykryto.astimezone(timezone.utc))
+        self.assertEqual(wpis["first_seen"], "11:00:29",
+                         "zapisano moment powrotu wyniku zamiast publikacji")
+
+    def test_without_the_remote_time_nothing_changes(self):
+        wpis = self.zapisz_zdalne(None)
+        self.assertEqual(wpis["first_seen"], "11:00:48")
+
+    def test_window_alignment_uses_the_real_moment(self):
+        """SEDNO: ocena „czy trafiliśmy w zryw" liczona z fałszywej godziny dawała
+        fałszywy alarm — i fałszywą rekomendację przesunięcia okna."""
+        with mock.patch.dict(os.environ, {"BURST": "mon-sun:11:00:05",
+                                          "BURST_SECONDS": "40"}):
+            poza = self.zapisz_zdalne(None)                       # 11:00:48 = poza oknem
+        self.assertFalse(poza["aligned"])
+        cp.save_hunts([])                                          # czysty dziennik
+        wykryto = datetime(2026, 9, 4, 11, 0, 29, tzinfo=TZ)
+        with mock.patch.dict(os.environ, {"BURST": "mon-sun:11:00:05",
+                                          "BURST_SECONDS": "40"}):
+            w_srodku = self.zapisz_zdalne(wykryto.astimezone(timezone.utc))
+        self.assertTrue(w_srodku["aligned"], "publikacja w środku okna uznana za spóźnioną")
+
+
+class RemoteReportsItsDetectionAgeTest(RemoteHandlerHelpers, unittest.TestCase):
+    """Irlandia musi odesłać WIEK wykrycia, nie znacznik czasu.
+
+    Zegary monotoniczne obu maszyn są nieporównywalne, a zegary ścienne mogą się
+    rozjeżdżać. Jedzie więc „ile temu to zobaczyłem", liczone w chwili budowania
+    odpowiedzi — dom odejmuje to od swojego „teraz".
+    """
+
+    def test_the_age_is_reported_and_grows_with_the_window(self):
+        widoki = [self.doc(19)] * 40
+
+        def fetch(lid, **kw):
+            return widoki[0]
+
+        with mock.patch.object(cp, "resolve_current_id", side_effect=lambda x: self.LID), \
+                mock.patch.object(cp, "fetch_listing", side_effect=fetch), \
+                mock.patch.object(cp, "register_slot", return_value=(False, "409")), \
+                mock.patch("sys.stdout", io.StringIO()):
+            wynik = self.rozpakuj(self.handler.lambda_handler(
+                self.zadanie(self.tresc(sprint_seconds=1)), None))
+        wiek = wynik["timings"]["first_hit_ago_ms"]
+        self.assertIsNotNone(wiek, "brak wieku wykrycia — dom zapisze moment powrotu")
+        self.assertGreaterEqual(wiek, 0)
+        self.assertLessEqual(wiek, wynik["timings"]["total_ms"])
+
+    def test_no_publication_means_no_age(self):
+        with mock.patch.object(cp, "resolve_current_id", side_effect=lambda x: self.LID), \
+                mock.patch.object(cp, "fetch_listing", return_value=self.doc()), \
+                mock.patch("sys.stdout", io.StringIO()):
+            wynik = self.rozpakuj(self.handler.lambda_handler(
+                self.zadanie(self.tresc(sprint_seconds=1)), None))
+        self.assertIsNone(wynik["timings"].get("first_hit_ago_ms"))

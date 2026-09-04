@@ -795,7 +795,8 @@ def okno_publikacji(wpis, now_local):
         return True
 
 
-def record_hunt(now_local, tz, new_slots, wyniki, shots, grid, zdalnie, topic):
+def record_hunt(now_local, tz, new_slots, wyniki, shots, grid, zdalnie, topic,
+                wykryto=None):
     """Dopisuje polowanie do dziennika i alarmuje, gdy coś wymaga uwagi.
 
     JEDEN wpis na dobę — publikacja przychodzi partiami, więc kolejne wykrycia tego
@@ -819,9 +820,14 @@ def record_hunt(now_local, tz, new_slots, wyniki, shots, grid, zdalnie, topic):
         wpisy.insert(0, wpis)
     if to_publikacja and not wpis.get("first_seen"):
         # Godzinę publikacji i ocenę okna zapisujemy TYLKO przy prawdziwej publikacji.
-        w_oknie, okno = hunt_window(now_local, tz)
-        wpis["first_seen"] = f"{now_local:%H:%M:%S}"
-        wpis["first_seen_iso"] = now_local.isoformat()
+        # `wykryto` to chwila, w której zobaczyła ją IRLANDIA — bez tego zapisywalibyśmy
+        # moment POWROTU wyniku. Odkąd wywołanie zostaje do końca okna (0.20.0), różnica
+        # sięga kilkudziesięciu sekund: 04.09 wpis mówił 11:00:48 przy publikacji
+        # o 11:00:29, a ja na tej podstawie doradzałem przesunięcie okna.
+        chwila = wykryto.astimezone(tz) if wykryto else now_local
+        w_oknie, okno = hunt_window(chwila, tz)
+        wpis["first_seen"] = f"{chwila:%H:%M:%S}"
+        wpis["first_seen_iso"] = chwila.isoformat()
         wpis["burst"], wpis["aligned"] = okno, w_oknie
 
     if grid:
@@ -2342,7 +2348,11 @@ def adopt_remote(wynik):
                if partie is not None else " (stara wersja funkcji — wgraj paczkę)"))
     if not wynik.get("doc"):
         return None, None
+    # Wiek pierwszego wykrycia -> chwila wykrycia w NASZYM zegarze.
+    wiek = czasy.get("first_hit_ago_ms")
     remote = {
+        "wykryto": (datetime.now(timezone.utc) - timedelta(milliseconds=wiek)
+                    if isinstance(wiek, (int, float)) else None),
         # klucze przychodzą jako listy (JSON nie ma krotek) — normalizujemy do (ok, msg)
         "results": {k: (bool(v[0]), v[1]) for k, v in (wynik.get("results") or {}).items()},
         "registered": set(wynik.get("registered") or []),
@@ -3214,7 +3224,8 @@ def run_once(announce_startup=False, skip_light=False, prefetched=None, defer_pu
             # z zapasu. Dziennik ma pokazać jedno i drugie.
             strzaly = list((remote or {}).get("shots") or []) + list(reg_cfg.get("shots") or [])
             record_hunt(datetime.now(tz), tz, new_slots, registration_results,
-                        strzaly, grid, bool(remote), topic)
+                        strzaly, grid, bool(remote), topic,
+                        wykryto=(remote or {}).get("wykryto"))
         except Exception as e:  # noqa: BLE001
             log(f"! Nie zapisałem polowania do dziennika: {e!r}")
         # grupuj powiadomienia per listing (book_url)

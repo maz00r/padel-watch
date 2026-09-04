@@ -175,6 +175,7 @@ def poluj(wejscie):
     widziane = set(baseline)
     wyniki, zapisane = {}, set()
     lid, doc, partie = None, None, 0
+    pierwsze_wykrycie = None   # monotonic chwili, gdy zobaczyliśmy PIERWSZĄ partię
 
     while time.monotonic() < koniec:
         runda = time.monotonic()
@@ -184,6 +185,8 @@ def poluj(wejscie):
             break                      # okno minęło bez nowych terminów
         lid, doc, zobaczone = trafienie
         partie += 1
+        if pierwsze_wykrycie is None:
+            pierwsze_wykrycie = zobaczone
         teraz = cp.datetime.now(cp.timezone.utc)
         wszystkie = cp.free_slots(doc, lid, teraz)
         sloty = [s for s in wszystkie if cp.passes_filter(s, filtry, tz)]
@@ -242,6 +245,17 @@ def poluj(wejscie):
         # `shots` doklada sie samo przez cale wywolanie — reg_cfg zyje ponad partiami.
         "shots": reg_cfg.get("shots") or [],
         "timings": {"sprint_ms": sprint_ms, "batches": partie,
+                    # ILE TEMU zobaczyliśmy pierwszą partię — liczone w chwili budowania
+                    # odpowiedzi. Zegary monotoniczne obu maszyn są nieporównywalne, więc
+                    # jedzie WIEK, nie znacznik: dom odejmie go od swojego „teraz".
+                    #
+                    # Bez tego Dziennik zapisywał jako godzinę publikacji moment POWROTU
+                    # wyniku. Odkąd wywołanie zostaje do końca okna (0.20.0), to różnica
+                    # rzędu kilkudziesięciu sekund: 04.09 zapisał 11:00:48 przy publikacji
+                    # o 11:00:29 — i na tej podstawie doradzałem przesunięcie okna,
+                    # którego nie było potrzeba.
+                    "first_hit_ago_ms": (None if pierwsze_wykrycie is None
+                                         else int((time.monotonic() - pierwsze_wykrycie) * 1000)),
                     "total_ms": int((time.monotonic() - started) * 1000)},
     }
 
