@@ -4981,3 +4981,64 @@ class NoUndefinedNamesTest(unittest.TestCase):
                 f.write("def a():\n    x = 1\n    return x\n\n\ndef b():\n    return x\n")
             znalezione = sprawdz_nazwy.sprawdz(zly)
         self.assertEqual([(n, g) for _l, n, g in znalezione], [("x", "b")])
+
+
+class RemoteWinsReachTheJournalTest(HuntJournalHelpers, unittest.TestCase):
+    """Dziennik gubił WIĘKSZOŚĆ zdobyczy — dokładnie tak jak wcześniej przegrane.
+
+    Prawdziwe dane: 06.09 log pokazał SIEDEM rezerwacji (09, 10, 11, 12, 13, 14, 20),
+    a wpis w Dzienniku CZTERY. 05.09: pięć w logu, JEDNA we wpisie. Zrzuty z panelu
+    potwierdzają log — rezerwacje istnieją.
+
+    Przyczyna ta sama, co naprawiona w 0.20.2 dla porażek: `registered` powstaje
+    z `new_slots`, czyli z terminów, które strona lokalna NADAL widzi jako wolne.
+    Termin zdobyty przez Irlandię wolny już nie jest, gdy dokument wraca do domu —
+    więc wypadał z listy. Naprawiłem wtedy `failed` i `never_seen`, a zwycięstwa
+    zostawiłem, bo szukałem przyczyny zgubionych PORAŻEK.
+
+    Skutek był gorszy niż kosmetyczny: „4 rezerwacje" zamiast siedmiu to zaniżona ocena
+    tego, czy polowanie w ogóle działa.
+    """
+
+    def strzal(self, godzina, ok=True):
+        return {"when": f"niedz 13.09 {godzina}", "ok": ok, "ms": 200, "start_ms": 0,
+                "seen_ms": 3, "salwa": True, "hedge": True,
+                "why": "" if ok else "zajęty (409)"}
+
+    def polowanie(self, shots, new_slots=(), wyniki=None):
+        with mock.patch.object(cp, "notify_hunt"), mock.patch("sys.stdout", io.StringIO()):
+            return cp.record_hunt(
+                datetime(2026, 9, 6, 11, 0, 28, tzinfo=TZ), TZ,
+                new_slots=list(new_slots), wyniki=wyniki or {}, shots=shots,
+                grid=("niedz 13.09", 4, 12, ["15:00"], date(2026, 9, 13)),
+                zdalnie=True, topic="temat")
+
+    def test_a_win_known_only_from_the_shot_is_recorded(self):
+        wpis = self.polowanie([self.strzal("09:00"), self.strzal("13:00"),
+                               self.strzal("14:00")])
+        self.assertEqual(sorted(wpis["registered"]),
+                         ["niedz 13.09 09:00", "niedz 13.09 13:00", "niedz 13.09 14:00"])
+
+    def test_the_real_day_from_06_09(self):
+        """SEDNO: siedem rezerwacji w logu ma dać siedem we wpisie, nie cztery."""
+        wpis = self.polowanie([self.strzal(g) for g in
+                               ("09:00", "10:00", "11:00", "12:00", "13:00", "14:00", "20:00")])
+        self.assertEqual(len(wpis["registered"]), 7)
+
+    def test_hedge_copies_of_one_win_count_once(self):
+        """Trzy kopie jednego zwycięstwa to jedna zdobycz, nie trzy."""
+        wpis = self.polowanie([self.strzal("20:00"), self.strzal("20:00", ok=False),
+                               self.strzal("20:00", ok=False)])
+        self.assertEqual(wpis["registered"], ["niedz 13.09 20:00"])
+        self.assertEqual(wpis["failed"], [], "odbita kopia zgłoszona jako przegrana")
+
+    def test_a_win_is_never_also_a_loss(self):
+        wpis = self.polowanie([self.strzal("16:00", ok=False), self.strzal("16:00")])
+        self.assertEqual(wpis["registered"], ["niedz 13.09 16:00"])
+        self.assertEqual(wpis["failed"], [])
+
+    def test_a_genuine_loss_is_still_a_loss(self):
+        """Nie zamieniamy wszystkiego w sukces — 16:00 z 06.09 naprawdę przepadło."""
+        wpis = self.polowanie([self.strzal("16:00", ok=False)])
+        self.assertEqual(wpis["registered"], [])
+        self.assertEqual([f["when"] for f in wpis["failed"]], ["niedz 13.09 16:00"])

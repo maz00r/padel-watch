@@ -851,13 +851,27 @@ def record_hunt(now_local, tz, new_slots, wyniki, shots, grid, zdalnie, topic,
             wpis["failed"].append({"when": kiedy, "why": skroc_powod(msg)})
     wpis["shots"].extend(shots or [])
 
-    # Przegrana ZDALNEGO strzału nie trafiała tu wcale. `failed` powstaje z `new_slots`,
-    # czyli z terminów, które strona lokalna NADAL widzi jako wolne — a termin przegrany
-    # w Irlandii jest już zajęty, gdy dokument wraca do domu. 02.09 dało to wpis, który
-    # twierdził „nigdy nie pokazane jako wolne: 17:00", choć strzelaliśmy w 17:00 DWA razy.
+    # Wynik ZDALNEGO strzału nie trafiał tu wcale. `registered` i `failed` powstają
+    # z `new_slots`, czyli z terminów, które strona lokalna NADAL widzi jako wolne —
+    # a termin rozstrzygnięty w Irlandii wolny już nie jest, gdy dokument wraca do domu.
+    #
+    # 02.09 dało to wpis „nigdy nie pokazane jako wolne: 17:00", choć strzelaliśmy tam
+    # dwa razy. Naprawiłem wtedy PORAŻKI i na tym poprzestałem — bo szukałem przyczyny
+    # zgubionych porażek. Zwycięstwa gubiły się dalej: 05.09 pięć rezerwacji w logu,
+    # JEDNA we wpisie; 06.09 siedem w logu, cztery we wpisie. Zaniżony wynik polowania
+    # to zaniżona ocena tego, czy cała maszyna w ogóle działa.
+    #
+    # Strzał jest źródłem prawdy dla OBU rozstrzygnięć. Zwycięstwo bije porażkę: przy
+    # strzale redundantnym jedna kopia wygrywa, a pozostałe odbijają się od naszej
+    # własnej rezerwacji.
     wygrane_strzalem = {s["when"] for s in wpis["shots"] if s.get("ok")}
-    znane = ({f["when"] for f in wpis["failed"]} | set(wpis["registered"])
-             | wygrane_strzalem)
+    for kiedy in sorted(wygrane_strzalem):
+        if kiedy not in wpis["registered"]:
+            wpis["registered"].append(kiedy)
+    # Termin, który gdziekolwiek wygraliśmy, nie może figurować jako przegrany.
+    wpis["failed"] = [f for f in wpis["failed"] if f["when"] not in wygrane_strzalem]
+
+    znane = {f["when"] for f in wpis["failed"]} | set(wpis["registered"])
     for s in wpis["shots"]:
         if s.get("ok") or s["when"] in znane:
             continue

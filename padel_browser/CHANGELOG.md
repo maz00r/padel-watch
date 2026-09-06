@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.24.2 — Dziennik gubił większość zdobyczy
+
+Zestawienie wpisu z logiem i panelem:
+
+| dzień | rezerwacji w logu | we wpisie |
+|-------|-------------------|-----------|
+| 05.09 | 5 | **1** |
+| 06.09 | 7 | **4** |
+
+Zrzuty z panelu potwierdzają log — rezerwacje istnieją.
+
+**Przyczyna jest ta sama, którą naprawiłem w 0.20.2 dla porażek.** `registered` powstaje
+z `new_slots`, czyli z terminów, które strona lokalna NADAL widzi jako wolne. Termin
+zdobyty przez Irlandię wolny już nie jest, gdy dokument wraca do domu — więc wypadał
+z listy. Wtedy poprawiłem `failed` i `never_seen` i na tym poprzestałem, bo szukałem
+przyczyny zgubionych **porażek**; zwycięstwa gubiły się dalej przez cztery dni.
+
+Strzał jest teraz źródłem prawdy dla obu rozstrzygnięć. Zwycięstwo bije porażkę —
+przy strzale redundantnym jedna kopia wygrywa, a pozostałe odbijają się od naszej
+własnej rezerwacji, więc nie mogą figurować jako przegrane.
+
+**Dlaczego to nie była kosmetyka:** „1 rezerwacja" zamiast pięciu to zaniżona ocena
+tego, czy cała maszyna działa. Przez cztery dni Dziennik pokazywał polowanie jako
+znacznie słabsze, niż było w rzeczywistości.
+
 ## 0.24.1 — NameError zabijał kontrolę sesji przed zrywem
 
 Zaraz po wydaniu 0.24.0 w logu produkcyjnym pojawiło się:
