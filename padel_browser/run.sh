@@ -117,5 +117,20 @@ sleep 1
     sleep 5
   done ) &
 
+# 6b) SONDA KONTEKSTÓW — jednorazowe sprawdzenie, czy dziesięć kont zmieści się
+#     w jednej przeglądarce. Ustawiasz `sonda_konta` w konfiguracji, restartujesz
+#     dodatek i czytasz wynik w tym logu; nie trzeba wchodzić do kontenera.
+#     W tle, żeby dziesięciominutowe czekanie na Twoje logowanie nie wstrzymywało monitora.
+SONDA_KONTA="$(opt sonda_konta)"
+SONDA_TRYB="$(opt sonda_tryb)"
+case "$SONDA_KONTA" in
+  "" | None) ;;
+  *) case "$SONDA_TRYB" in "" | None) SONDA_TRYB=zaloguj ;; esac
+     echo "[padel] SONDA kontekstów: --${SONDA_TRYB} ${SONDA_KONTA}"
+     ( python3 /app/konteksty.py "--${SONDA_TRYB}" "$SONDA_KONTA" \
+       || echo "[padel] sonda zakończona niepowodzeniem — patrz wyżej" ) &
+     ;;
+esac
+
 # 7) Monitor terminów (proces pierwszoplanowy — jego wyjście kończy kontener)
 exec python3 /app/check_padel.py

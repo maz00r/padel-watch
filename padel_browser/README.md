@@ -63,6 +63,8 @@ przechodzisz normalne logowanie, łącznie z kodem z maila.
 | `auto_register_hedge` | ile **równoległych zapisów w najcenniejszy termin** (1 = wyłączone, maks. 3) | `2` |
 | `auto_register_salvo` | ile prób rejestracji wysyłać **równolegle** (0–6); `0`/`1` = po kolei, jak dawniej | `6` |
 | `auto_register_stagger` | odstęp w ms między strzałami salwy (0–100); `0` = wszystkie naraz | `8` |
+| `sonda_konta` | id konta do sprawdzenia kontekstów (puste = wyłączone) | `marek` |
+| `sonda_tryb` | `zaloguj` albo `sprawdz` — patrz sekcja o wielu kontach | `zaloguj` |
 | `test_token` | jednorazowy test poświadczeń przy starcie (nic nie rezerwuje) | `false` |
 | `clear_state` | jednorazowe czyszczenie stanu: `registered` lub `all`; puste = nic nie rób | `` |
 
@@ -262,6 +264,33 @@ gdy problem przetrwał karencję. W logu widać to jako:
 ```
 ~ Problem z tokenem (brak tokenu…) — daję cichemu logowaniu 120s, zanim powiadomię.
 ```
+
+## Wiele kont — sprawdzenie przed wdrożeniem
+
+Dziesięć kont ma zmieścić się w **jednej** przeglądarce, w izolowanych kontekstach
+(osobne ciasteczka każdy). Konteksty nie przeżywają restartu, więc sesje zapisujemy sami
+— i to jedyne założenie, którego nie da się sprawdzić inaczej niż na żywym Decathlonie.
+
+Nie musisz wchodzić do kontenera. Wszystko robi się w konfiguracji dodatku.
+
+**Krok 1 — zaloguj konto.** Ustaw `sonda_konta: marek`, `sonda_tryb: zaloguj`, zapisz
+i zrestartuj dodatek. W logu pojawi się zaproszenie; wejdź w zakładkę **Przeglądarka**
+i zaloguj to konto normalnie, w prawdziwym formularzu Decathlona. Dodatek sam wykryje
+token i zapisze ciasteczka do `/data/cookies-marek.json`.
+
+**Krok 2 — sprawdź trwałość.** Zmień `sonda_tryb: sprawdz` i zrestartuj ponownie:
+
+```
+✓ SESJA ODTWORZONA z 14 ciasteczek — konteksty wystarczą, profile na dysku niepotrzebne.
+```
+
+albo
+
+```
+✗ Wstrzyknąłem 14 ciasteczek, ale token się nie pojawił — wracamy do osobnych profili.
+```
+
+**Krok 3.** Wyczyść `sonda_konta`, żeby sonda nie odpalała się przy każdym starcie.
 
 ## Poziomy logowania
 

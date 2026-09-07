@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.25.2 — sondę uruchamiasz z konfiguracji, nie z kontenera
+
+Poprzednia wersja kazała wejść do kontenera dodatku i uruchomić skrypt. To zła droga:
+dostęp do powłoki w kontenerze dodatku Home Assistanta wymaga osobnego dodatku SSH
+z wyłączoną ochroną albo Portainera, i nie ma powodu tego wymagać.
+
+Sonda działa teraz tak samo jak istniejąca opcja `test_token`: ustawiasz wartość,
+restartujesz dodatek, czytasz wynik w Dzienniku.
+
+- `sonda_konta` — identyfikator konta (puste = wyłączone).
+- `sonda_tryb` — `zaloguj` albo `sprawdz`.
+- Sonda pisze przez `log()` z `check_padel`, więc ma ten sam znacznik czasu i te same
+  poziomy co reszta dodatku — szukasz jej tam, gdzie wszystkiego innego.
+- Uruchamiana w tle: dziesięciominutowe czekanie na Twoje logowanie nie może wstrzymywać
+  monitora, bo monitor musi zdążyć na publikację.
+
 ## 0.25.1 — izolowane konteksty przeglądarki (sonda przed budową)
 
 Dziesięć kont miało wymagać dziesięciu przeglądarek (~3–4,5 GB RAM) albo dziesięciu

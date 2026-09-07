@@ -1,5 +1,5 @@
 name: Padel (Decathlon) — monitor + logowanie
-version: "0.25.1"
+version: "0.25.2"
 slug: padel_browser
 description: Monitoruje wolne terminy padla i (opcjonalnie) rejestruje automatycznie. Logujesz się raz w panelu, dodatek sam podtrzymuje sesję i token.
 url: https://github.com/maz00r/padel-watch
@@ -44,6 +44,8 @@ options:
   auto_register_stagger: 8
   clear_state: ""
   test_token: false
+  sonda_konta: ""
+  sonda_tryb: "zaloguj"
   start_url: "https://go.decathlon.pl"
   read_interval: 300
   decathlon_token: ""
@@ -79,6 +81,8 @@ schema:
   auto_register_stagger: int(0,100)
   clear_state: list(|registered|all)
   test_token: bool
+  sonda_konta: str?
+  sonda_tryb: list(zaloguj|sprawdz)
   start_url: url
   read_interval: int(60,3600)
   decathlon_token: str?

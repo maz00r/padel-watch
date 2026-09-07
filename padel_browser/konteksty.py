@@ -233,11 +233,17 @@ def sciezka_ciasteczek(kid):
 
 if __name__ == "__main__":
     import sys as _sys
+    # Wspolny log dodatku: ten sam znacznik czasu i te same poziomy co reszta.
+    # Sonda pisze do Dziennika HA, bo tam jej szukasz — nie w osobnym terminalu.
+    try:
+        from check_padel import log as _log
+    except Exception:  # noqa: BLE001 - sonda nie moze paść na imporcie
+        _log = print
     args = _sys.argv[1:]
     if len(args) >= 2 and args[0] == "--zaloguj":
-        _sys.exit(0 if zaloguj(args[1]) else 1)
+        _sys.exit(0 if zaloguj(args[1], log=_log) else 1)
     if len(args) >= 2 and args[0] == "--sprawdz":
-        _sys.exit(0 if sprawdz(args[1]) else 1)
+        _sys.exit(0 if sprawdz(args[1], log=_log) else 1)
     print("Użycie:\n"
           "  python3 konteksty.py --zaloguj <id>   # otwiera kontekst, logujesz się w noVNC\n"
           "  python3 konteksty.py --sprawdz <id>   # czy sesja wraca z samych ciasteczek")
