@@ -18,6 +18,8 @@ RUN apk add --no-cache \
 COPY read_token.py /app/read_token.py
 # Izolowane konteksty przeglądarki — dziesięć kont w jednym Chromium.
 COPY konteksty.py /app/konteksty.py
+# Zbieracz tokenów kont dodatkowych — jedna przeglądarka naraz.
+COPY zbieracz.py /app/zbieracz.py
 COPY check_padel.py /app/check_padel.py
 # Panel Ingressu: strona z zakładkami + API rezerwacji + tunel websocketu do noVNC.
 COPY panel.py /app/panel.py

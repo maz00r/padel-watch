@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.26.0 — rdzeń zbieracza tokenów
+
+Zasoby zmierzone u użytkownika: **13 784 MB wolnego na `/data`, 3 730 MB pamięci** —
+dziesięć profili Chromium mieści się z ogromnym zapasem. Profile będą trwałe, bez
+kasowania po każdej wizycie.
+
+Nowy `zbieracz.py` — na razie sam rdzeń decyzyjny, bez uruchamiania przeglądarki.
+Osiemnaście testów.
+
+### Odwiedzamy tylko konta z WYGASŁYM tokenem
+
+To sedno całego harmonogramu i najłatwiejsza rzecz do pomylenia. Strona Decathlon GO
+odnawia JWT **dopiero po jego wygaśnięciu**; wejście na stronę z żywym tokenem oddaje
+ten sam token, więc jest czystą stratą czasu i procesora.
+
+Zbieracz czeka więc, aż token konkretnego konta umrze, i dopiero wtedy je odwiedza —
+dokładnie jak `read_token.py` robi to od miesiąca dla konta głównego. Token żyje
+15 minut, więc dziesięć kont to jedno odnowienie co 90 sekund; przy wizycie ~20 s
+zbieracz jest zajęty **22% czasu**.
+
+### Zabezpieczenia wbudowane w rdzeń
+
+- **Cisza przed publikacją**: żadnego uruchamiania Chromium na 90 s przed zrywem. Start
+  przeglądarki to ~20 s — próba rozpoczęta później i tak by nie zdążyła, a zabrałaby
+  procesor monitorowi wtedy, gdy jest mu najbardziej potrzebny.
+- **Karencja 120 s na konto**: konto wylogowane nigdy nie odda tokenu; bez tego zbieracz
+  kręciłby się na nim w kółko i nie odwiedził pozostałych. Nieudana wizyta też liczy się
+  jako wizyta — inaczej karencja by nie działała.
+- **Kontrola tożsamości**: pierwszy odczyt zapamiętuje `user_id`, każdy kolejny musi się
+  z nim zgadzać. Pomyłka w mapowaniu profil → konto dałaby dziesięć tokenów **jednego**
+  konta: wygląda jak działający system, przynosi jeden kort dziennie i nic nie krzyczy.
+- **`ile_zywych`** — ile kont będzie miało ważny token w chwili publikacji. Bez tej liczby
+  nie da się odróżnić „wielokontowość nie pomaga" od „strzelały trzy konta z dziesięciu,
+  bo reszta miała martwe tokeny".
+- Konto główne nie jest nigdy odwiedzane przez zbieracz — ma własną, stale otwartą
+  przeglądarkę i tej maszynerii nie ruszamy.
+
 ## 0.25.4 — dodatek sam mierzy miejsce i pamięć
 
 Pytałem użytkownika o `df -h /data`, nie mówiąc, gdzie tę komendę uruchomić. Pytanie było
