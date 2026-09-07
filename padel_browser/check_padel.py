@@ -299,6 +299,32 @@ def burst_start_today(now_local, tz):
     return dzis if DAY_NAMES[now_local.weekday()] in burst["days"] else None
 
 
+def gotowosc_kont(publikacja):
+    """ „ Konta: 8/10 z żywym tokenem" — albo pusty napis przy jednym koncie.
+
+    Bez tej liczby nie da się odróżnić „wielokontowość nie pomaga" od „strzelały trzy
+    konta z dziesięciu, bo reszcie wygasły tokeny". Pierwsze jest wnioskiem, drugie
+    awarią zbieracza — i wyglądają w Dzienniku identycznie.
+
+    Liczymy PRZED zrywem, bo tylko wtedy zdążysz zareagować: zalogować konto, które
+    wypadło. Po publikacji ta sama liczba jest już tylko wyrzutem sumienia.
+    """
+    try:
+        import zbieracz
+        konta = konta_z_konfiguracji(load_config(quiet=True))
+        if len(konta) < 2:
+            return ""
+        status = zbieracz.wczytaj_status(zbieracz.STATUS_PATH)
+        zywe = zbieracz.ile_zywych(status, konta, publikacja.timestamp())
+    except Exception as e:  # noqa: BLE001 - diagnostyka nie może wywrócić kontroli sesji
+        log(f"! Nie policzyłem gotowości kont: {e!r}", level="debug")
+        return ""
+    opis = f" Konta: {zywe}/{len(konta)} z żywym tokenem."
+    if zywe < len(konta):
+        opis += " Brakujące zaloguj w panelu, w zakładce Konta."
+    return opis
+
+
 def preflight_token(now_local, tz, topic, book_url):
     """Na X minut przed zrywem sprawdza, czy sesja żyje. Raz na dobę.
 
@@ -366,7 +392,8 @@ def preflight_token(now_local, tz, topic, book_url):
                       f"Token znów działa. Nic nie musisz robić przed {start:%H:%M}.",
                       click=book_url, priority="default", tags="white_check_mark")
         log(f"🔑 Sesja Decathlon sprawdzona — polowanie o {start:%H:%M:%S} ma czym strzelać."
-            + (" Alarm odwołany." if _preflight_alarm else ""))
+            + (" Alarm odwołany." if _preflight_alarm else "")
+            + gotowosc_kont(start))
         _preflight_problem_od, _preflight_alarm = None, False
         return True
 

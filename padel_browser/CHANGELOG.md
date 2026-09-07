@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.27.1 — kontrola przed zrywem mówi, ile kont jest gotowych
+
+`ile_zywych` było zdefiniowane i przetestowane, ale nigdzie nie używane — czyli nie było
+jak sprawdzić, czy zbieracz naprawdę utrzymuje tokeny. Pół godziny przed zrywem
+w Dzienniku pojawia się teraz:
+
+```
+🔑 Sesja Decathlon sprawdzona — polowanie o 11:00:05 ma czym strzelać.
+   Konta: 8/10 z żywym tokenem. Brakujące zaloguj w panelu, w zakładce Konta.
+```
+
+Bez tej liczby nie da się odróżnić **„wielokontowość nie pomaga"** od **„strzelały trzy
+konta z dziesięciu, bo reszcie wygasły tokeny"**. Pierwsze jest wnioskiem, drugie awarią
+zbieracza — a w Dzienniku wyglądają identycznie.
+
+Liczone **przed** zrywem, bo tylko wtedy zdążysz zalogować konto, które wypadło. Po
+publikacji ta sama liczba jest już tylko wyrzutem sumienia.
+
+- Przy jednym koncie linia się nie pojawia — byłaby szumem.
+- Wezwanie do działania tylko wtedy, gdy czegoś brakuje.
+- Awaria diagnostyki nie wywraca kontroli sesji; kontrola jest ważniejsza.
+
 ## 0.27.0 — trwałe profile i logowanie kont dodatkowych
 
 - Opcja `accounts` przyjmuje do 10 kont. Pierwsze konto zachowuje dotychczasowy profil

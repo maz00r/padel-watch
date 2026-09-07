@@ -5280,3 +5280,60 @@ class ResourceReportTest(unittest.TestCase):
                 mock.patch("sys.stdout", io.StringIO()) as buf:
             self.assertEqual(cp.zmierz_zasoby(1), (None, None))
         self.assertIn("Nie zmierzyłem miejsca", buf.getvalue())
+
+
+class AccountReadinessBeforeBurstTest(unittest.TestCase):
+    """„Konta: 8/10 z żywym tokenem" w kontroli przed zrywem.
+
+    Bez tej liczby nie da się odróżnić „wielokontowość nie pomaga" od „strzelały trzy
+    konta z dziesięciu, bo reszcie wygasły tokeny". Pierwsze jest wnioskiem, drugie
+    awarią zbieracza — a w Dzienniku wyglądają identycznie.
+
+    Liczone PRZED zrywem, bo tylko wtedy zdążysz zalogować konto, które wypadło.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.publikacja = datetime(2026, 9, 8, 11, 0, 28, tzinfo=TZ)
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                        "padel_browser"))
+
+    def gotowosc(self, konta, status):
+        import zbieracz
+        plik = os.path.join(self.dir.name, "harvest.json")
+        with open(plik, "w", encoding="utf-8") as f:
+            json.dump(status, f)
+        with mock.patch.object(cp, "konta_z_konfiguracji", return_value=konta), \
+                mock.patch.object(zbieracz, "STATUS_PATH", plik), \
+                mock.patch("sys.stdout", io.StringIO()):
+            return cp.gotowosc_kont(self.publikacja)
+
+    def konta(self, *ids):
+        return [{"id": "glowne", "main": True}] + [{"id": i, "main": False} for i in ids]
+
+    def test_a_single_account_says_nothing(self):
+        """Przy jednym koncie ta liczba jest szumem — dodatek ma milczeć."""
+        self.assertEqual(self.gotowosc(self.konta(), {}), "")
+
+    def test_all_alive_is_reported_without_a_call_to_action(self):
+        zywy = self.publikacja.timestamp() + 600
+        opis = self.gotowosc(self.konta("a", "b"),
+                             {"a": {"exp": zywy}, "b": {"exp": zywy}})
+        self.assertIn("3/3", opis)
+        self.assertNotIn("zaloguj", opis.lower())
+
+    def test_a_missing_account_tells_you_what_to_do(self):
+        zywy = self.publikacja.timestamp() + 600
+        opis = self.gotowosc(self.konta("a", "b"),
+                             {"a": {"exp": zywy}, "b": {"exp": self.publikacja.timestamp() - 10}})
+        self.assertIn("2/3", opis)
+        self.assertIn("zakładce Konta", opis)
+
+    def test_a_broken_status_file_does_not_break_the_session_check(self):
+        """Diagnostyka nie może wywrócić kontroli sesji — ona jest ważniejsza."""
+        import zbieracz
+        with mock.patch.object(cp, "konta_z_konfiguracji",
+                               side_effect=RuntimeError("padło")), \
+                mock.patch("sys.stdout", io.StringIO()):
+            self.assertEqual(cp.gotowosc_kont(self.publikacja), "")
