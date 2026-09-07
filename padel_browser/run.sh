@@ -8,6 +8,7 @@ set -e
 
 OPT=/data/options.json
 opt() { python3 -c "import json;print(json.load(open('$OPT')).get('$1',''))" 2>/dev/null || true; }
+opt_json() { python3 -c "import json;print(json.dumps(json.load(open('$OPT')).get('$1', []), ensure_ascii=False))" 2>/dev/null || printf '[]'; }
 
 # --- opcje przeglądarki ---
 START_URL="$(opt start_url)"
@@ -48,6 +49,7 @@ export AUTO_REGISTER_LEAD="$(opt auto_register_lead)"
 export AUTO_REGISTER_HEDGE="$(opt auto_register_hedge)"
 export CLEAR_STATE="$(opt clear_state)"
 export TEST_TOKEN="$(opt test_token)"
+export ACCOUNTS_JSON="$(opt_json accounts)"
 export DECATHLON_TOKEN="$(opt decathlon_token)"
 export DECATHLON_COOKIE="$(opt decathlon_cookie)"
 # opcja pominięta w UI -> Python zwraca "None"; traktuj jak pustą

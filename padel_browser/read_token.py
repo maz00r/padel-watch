@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 
 import websocket  # websocket-client
 
-CDP_URL = "http://127.0.0.1:9222"
+CDP_URL = os.environ.get("CDP_URL") or "http://127.0.0.1:9222"
 START_URL = os.environ.get("START_URL") or "https://go.decathlon.pl"
 READ_INTERVAL = int(os.environ.get("READ_INTERVAL") or 300)
 JWT_KEY = "go-sdk-jwt"
@@ -150,17 +150,18 @@ def log(*args, level=None):
     print(f"[{ts}]", *args, flush=True)
 
 
-def write_token_file(jwt, exp):
+def write_token_file(jwt, exp, path=None):
     """Zapisuje świeży token atomowo (zapis do .tmp + rename), by monitor nie czytał połówki."""
-    if not TOKEN_FILE:
+    path = TOKEN_FILE if path is None else path
+    if not path:
         return
-    tmp = TOKEN_FILE + ".tmp"
+    tmp = path + ".tmp"
     try:
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump({"jwt": jwt, "exp": exp}, f)
-        os.replace(tmp, TOKEN_FILE)
+        os.replace(tmp, path)
     except OSError as e:
-        log(f"! Nie zapisałem pliku tokenu {TOKEN_FILE}: {e!r}")
+        log(f"! Nie zapisałem pliku tokenu {path}: {e!r}")
 
 
 def jwt_expiry(token):
@@ -176,16 +177,17 @@ def jwt_expiry(token):
         return 0
 
 
-def cdp_page_target(retries=30):
+def cdp_page_target(retries=30, cdp_url=None):
     """Czeka na Chromium i zwraca webSocketDebuggerUrl karty.
 
     Preferuje kartę z otwartym Decathlon GO — użytkownik może mieć w panelu więcej
     zakładek, a token siedzi w localStorage konkretnej domeny.
     """
+    cdp_url = cdp_url or CDP_URL
     for _ in range(retries):
         pages = []
         try:
-            with urllib.request.urlopen(f"{CDP_URL}/json/list", timeout=5) as r:
+            with urllib.request.urlopen(f"{cdp_url}/json/list", timeout=5) as r:
                 pages = [t for t in json.loads(r.read().decode("utf-8"))
                          if t.get("type") == "page" and t.get("webSocketDebuggerUrl")]
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError):
@@ -227,9 +229,9 @@ class Cdp:
             pass
 
 
-def read_jwt_once():
+def read_jwt_once(cdp_url=None, start_url=None):
     """Zwraca (jwt, exp, błąd). Nawiguje TYLKO gdy trzeba (token wygasł) i wolno (nie SSO)."""
-    ws_url = cdp_page_target()
+    ws_url = cdp_page_target(cdp_url=cdp_url)
     if not ws_url:
         return None, 0, "Chromium nie wystartował (brak CDP)"
     cdp = Cdp(ws_url)
@@ -247,7 +249,7 @@ def read_jwt_once():
             return jwt, exp, None  # bez przeładowania (nie przeszkadzamy)
         # Brak/wygasły -> wczytaj stronę: zalogowana sesja odnowi token przy ładowaniu.
         cdp.call("Page.enable")
-        cdp.call("Page.navigate", url=START_URL)
+        cdp.call("Page.navigate", url=start_url or START_URL)
         time.sleep(6)  # daj SPA czas na cichy SSO i zapis tokenu
         jwt = cdp.evaluate(f"localStorage.getItem({JWT_KEY!r})")
         url = cdp.evaluate("location.href") or ""

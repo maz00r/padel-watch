@@ -1282,15 +1282,17 @@ def newer_decathlon_token(config_token, state_token):
     return state_token if jwt_expiry(state_token) > jwt_expiry(config_token) else config_token
 
 
-def resolve_decathlon_token(cfg, state_doc):
+def resolve_decathlon_token(cfg, state_doc, konto=None):
     """Token z trzech źródeł: przeglądarka (plik), opcje dodatku, zapamiętany stan.
 
     Wygrywa ten o NAJDALSZYM exp — nie kolejność. Dzięki temu ręcznie wklejony świeży
     token działa nawet, gdy plik z przeglądarki trzyma stary (np. sesja padła), i odwrotnie.
     """
+    if konto and not konto.get("main"):
+        return token_from_file(konto.get("token_file"))
     return newer_decathlon_token(
         newer_decathlon_token(
-            token_from_file(),
+            token_from_file((konto or {}).get("token_file")),
             os.environ.get("DECATHLON_TOKEN") or cfg.get("decathlon_token") or "",
         ),
         (state_doc or {}).get("decathlon_jwt") or "",
@@ -1695,7 +1697,7 @@ def _rpc_error(e, what):
     return f"{what}: Decathlon niedostępny ({e!r})"
 
 
-def credentials_cfg():
+def credentials_cfg(konto=None):
     """Poświadczenia dla procesów spoza pętli monitora (panel rezerwacji).
 
     Ten sam wybór źródeł tokenu co w run_once: wygrywa token o najdalszym exp,
@@ -1704,16 +1706,11 @@ def credentials_cfg():
     cfg = load_config(quiet=True)  # panel woła to przy każdym zapytaniu — bez gadania do logu
     state_doc = load_state_doc()
     return {
-        "token": newer_decathlon_token(
-            newer_decathlon_token(
-                token_from_file(),
-                os.environ.get("DECATHLON_TOKEN") or cfg.get("decathlon_token") or "",
-            ),
-            (state_doc or {}).get("decathlon_jwt") or "",
-        ),
+        "token": resolve_decathlon_token(cfg, state_doc, konto),
         "refresh_cookie": os.environ.get("DECATHLON_COOKIE") or cfg.get("decathlon_cookie") or "",
         "refresh_token": (state_doc or {}).get("decathlon_rt") or "",
         "browser_mode": bool(TOKEN_FILE),
+        "token_file": (konto or {}).get("token_file") or TOKEN_FILE,
     }
 
 
@@ -2857,7 +2854,9 @@ def konta_z_konfiguracji(cfg):
     Pola opcjonalne (`filters`, `max_per_run`, `age`) spadają na wartości globalne, więc
     konta dodatkowe mogą mieć własne, węższe okno godzin, nie dotykając konta głównego.
     """
-    surowe = cfg.get("accounts") or []
+    surowe = cfg.get("accounts")
+    if surowe in (None, ""):
+        surowe = os.environ.get("ACCOUNTS_JSON") or []
     if isinstance(surowe, str):                 # ACCOUNTS_JSON z run.sh
         try:
             surowe = json.loads(surowe) or []
@@ -2915,7 +2914,7 @@ def build_reg_cfg(cfg, state_doc, konto=None):
     return {
         "enabled": boolish(os.environ.get("AUTO_REGISTER") or cfg.get("auto_register")),
         "speculative": boolish(os.environ.get("AUTO_REGISTER_DRY_RUN") or cfg.get("auto_register_dry_run")),
-        "token": resolve_decathlon_token(cfg, state_doc),
+        "token": resolve_decathlon_token(cfg, state_doc, konto),
         "refresh_cookie": os.environ.get("DECATHLON_COOKIE") or cfg.get("decathlon_cookie") or "",
         # rt bywa zwracany przez serwer przy odświeżaniu i zapisywany w stanie (rotacja).
         "refresh_token": (state_doc or {}).get("decathlon_rt") or "",
