@@ -1107,7 +1107,7 @@ class BrowserModeTokenTest(unittest.TestCase):
                "name": "Jan Kowalski", "free_only": True}
         with mock.patch.object(cp, "decathlon_rpc", fake_rpc), \
                 mock.patch.object(cp, "TOKEN_FILE", "/data/token.json"), \
-                mock.patch.object(cp, "token_from_file", lambda: fresh), \
+                mock.patch.object(cp, "token_from_file", lambda path=None: fresh), \
                 mock.patch.object(cp, "refresh_decathlon_token",
                                   side_effect=AssertionError("w trybie przeglądarki nie wolno odświeżać")):
             ok, msg = cp.register_slot(slot, None, cfg, speculative=True)
@@ -1126,7 +1126,7 @@ class BrowserModeTokenTest(unittest.TestCase):
                 "start_utc": datetime(2026, 7, 7, 10, 0, tzinfo=timezone.utc), "price": None}
         cfg = {"token": same, "browser_mode": True, "name": "Jan Kowalski", "free_only": True}
         with mock.patch.object(cp, "decathlon_rpc", fake_rpc), \
-                mock.patch.object(cp, "token_from_file", lambda: same), \
+                mock.patch.object(cp, "token_from_file", lambda path=None: same), \
                 mock.patch.object(cp.time, "sleep"), \
                 mock.patch.object(cp, "refresh_decathlon_token",
                                   side_effect=AssertionError("w trybie przeglądarki nie wolno odświeżać")):
@@ -2333,7 +2333,7 @@ class PanelRenewalDipTest(unittest.TestCase):
         # TOKEN_FILE musi być ustawiony: bez pliku funkcja słusznie wraca od razu,
         # a podstawianie token_from_file przy pustym TOKEN_FILE to stan niemożliwy.
         with mock.patch.object(cp, "TOKEN_FILE", "/data/token.json"), \
-                mock.patch.object(cp, "token_from_file", side_effect=lambda: next(tokens)), \
+                mock.patch.object(cp, "token_from_file", side_effect=lambda path=None: next(tokens)), \
                 mock.patch.object(cp.time, "sleep"):
             self.assertEqual(cp.wait_for_fresher_token("stary"), "nowy")
 
@@ -5042,3 +5042,145 @@ class RemoteWinsReachTheJournalTest(HuntJournalHelpers, unittest.TestCase):
         wpis = self.polowanie([self.strzal("16:00", ok=False)])
         self.assertEqual(wpis["registered"], [])
         self.assertEqual([f["when"] for f in wpis["failed"]], ["niedz 13.09 16:00"])
+
+
+class TokenFileIsPerAccountTest(unittest.TestCase):
+    """NAJCIĘŻSZY cichy błąd wielokontowości: rezerwacja na cudzym koncie.
+
+    `wait_for_fresher_token` czytał GLOBALNY `TOKEN_FILE`, bez parametru, a jest wołane
+    przy HTTP 401 w `register_slot`. Przy dziesięciu kontach konto nr 7, które dostanie
+    odmowę, wczytałoby token konta GŁÓWNEGO, ponowiło zapis i zarezerwowało kort na
+    cudzym koncie — z cudzym imieniem uczestnika.
+
+    Wygląda to jak udana rezerwacja. Dopiero po tygodniu widać, że wszystkie korty
+    wylądowały na jednym koncie.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.glowne = os.path.join(self.dir.name, "token-glowne.json")
+        self.marek = os.path.join(self.dir.name, "token-marek.json")
+        self._zapisz(self.glowne, "jwt-KONTA-GLOWNEGO")
+        self._zapisz(self.marek, "jwt-MARKA")
+        pat = mock.patch.object(cp, "TOKEN_FILE", self.glowne)
+        pat.start()
+        self.addCleanup(pat.stop)
+
+    def _zapisz(self, sciezka, jwt):
+        with open(sciezka, "w", encoding="utf-8") as f:
+            json.dump({"jwt": jwt, "exp": int(time.time()) + 3600}, f)
+
+    def test_reading_without_a_path_still_means_the_main_account(self):
+        """Zgodność wsteczna: bez ścieżki zachowanie jest dokładnie jak dotąd."""
+        self.assertEqual(cp.token_from_file(), "jwt-KONTA-GLOWNEGO")
+
+    def test_reading_with_a_path_takes_that_account(self):
+        self.assertEqual(cp.token_from_file(self.marek), "jwt-MARKA")
+
+    def test_the_401_rescue_never_reaches_for_another_account(self):
+        """SEDNO: ratunek po odmowie dla konta Marka NIE MOŻE wrócić z tokenem głównego."""
+        odzyskany = cp.wait_for_fresher_token("stary-token-marka", attempts=1, delay=0,
+                                              path=self.marek)
+        self.assertEqual(odzyskany, "jwt-MARKA")
+        self.assertNotEqual(odzyskany, "jwt-KONTA-GLOWNEGO")
+
+    def test_register_slot_rescues_with_its_own_account_file(self):
+        """Ścieżka pliku wędruje przez `cfg["token_file"]` aż do ratunku po 401."""
+        uzyte = []
+
+        def rpc(metoda, token, payload, **kw):
+            uzyte.append(token)
+            if len(uzyte) == 1:
+                raise urllib.error.HTTPError("u", 401, "Unauthorized", {}, io.BytesIO(b"{}"))
+            return {"data": {"id": "tx1"}}
+
+        cfg = {"name": "Marek", "token": "stary-token-marka", "browser_mode": True,
+               "token_file": self.marek, "free_only": True}
+        with mock.patch.object(cp, "decathlon_rpc", side_effect=rpc), \
+                mock.patch.object(cp, "wait_for_fresher_token",
+                                  side_effect=cp.wait_for_fresher_token) as czekaj, \
+                mock.patch("sys.stdout", io.StringIO()):
+            cp.register_slot({"id": "s1", "date_id": "d1", "price": None}, None, cfg)
+        self.assertEqual(czekaj.call_args.kwargs.get("path"), self.marek,
+                         "ratunek po 401 sięgnął po plik innego konta")
+        self.assertIn("jwt-MARKA", uzyte, "ponowienie poszło cudzym tokenem")
+        self.assertNotIn("jwt-KONTA-GLOWNEGO", uzyte)
+
+
+class AccountsFromConfigTest(unittest.TestCase):
+    """Lista kont. Bez opcji `accounts` wszystko ma działać dokładnie jak dotąd —
+    to jest kryterium przyjęcia całej Fazy 0."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        pat = mock.patch.object(cp, "TOKEN_FILE", os.path.join(self.dir.name, "token.json"))
+        pat.start()
+        self.addCleanup(pat.stop)
+        self.env = mock.patch.dict(os.environ, {"AUTO_REGISTER_NAME": "Patryk Mazurowski",
+                                                "AUTO_REGISTER_AGE": ""})
+        self.env.start()
+        self.addCleanup(self.env.stop)
+
+    def test_no_accounts_option_means_one_account_as_before(self):
+        konta = cp.konta_z_konfiguracji({})
+        self.assertEqual(len(konta), 1)
+        self.assertEqual(konta[0]["id"], cp.KONTO_GLOWNE)
+        self.assertEqual(konta[0]["name"], "Patryk Mazurowski")
+        self.assertEqual(konta[0]["token_file"], cp.TOKEN_FILE)
+        self.assertTrue(konta[0]["main"])
+
+    def test_the_main_account_keeps_its_existing_token_file(self):
+        """Nie wolno wymusić ponownego logowania sesji, która działa."""
+        konta = cp.konta_z_konfiguracji({"accounts": [
+            {"id": "glowne", "name": "Patryk", "main": True},
+            {"id": "marek", "name": "Marek"}]})
+        self.assertEqual(konta[0]["token_file"], cp.TOKEN_FILE)
+        self.assertTrue(konta[1]["token_file"].endswith("token-marek.json"))
+
+    def test_extra_accounts_can_have_their_own_filter_and_limit(self):
+        konta = cp.konta_z_konfiguracji({"accounts": [
+            {"id": "glowne", "name": "Patryk", "main": True},
+            {"id": "ania", "name": "Ania", "filters": "mon-sun:17:00-22:00",
+             "max_per_run": 1}]})
+        self.assertIsNone(konta[0]["filters"], "konto główne ma zostać przy globalnym filtrze")
+        self.assertEqual(konta[1]["filters"], "mon-sun:17:00-22:00")
+        self.assertEqual(konta[1]["max_per_run"], 1)
+
+    def test_a_duplicated_id_is_refused_loudly(self):
+        """Dwa konta o tym samym id dzieliłyby plik tokenu i gałąź stanu — byłyby
+        JEDNYM kontem udającym dwa, czyli dokładnie tym, co psuje cały pomysł."""
+        with mock.patch("sys.stdout", io.StringIO()) as buf:
+            konta = cp.konta_z_konfiguracji({"accounts": [
+                {"id": "marek", "name": "Marek"}, {"id": "marek", "name": "Marek II"}]})
+        self.assertEqual(len(konta), 1)
+        self.assertIn("powtórzonym id", buf.getvalue())
+
+    def test_accounts_as_json_string_from_run_sh(self):
+        """`run.sh` przekazuje listę jako JSON w zmiennej środowiskowej."""
+        konta = cp.konta_z_konfiguracji({"accounts": '[{"id":"ania","name":"Ania"}]'})
+        self.assertEqual([k["id"] for k in konta], ["ania"])
+
+    def test_broken_json_does_not_stop_the_hunt(self):
+        with mock.patch("sys.stdout", io.StringIO()) as buf:
+            konta = cp.konta_z_konfiguracji({"accounts": "{to nie jest JSON"})
+        self.assertEqual(len(konta), 1)
+        self.assertEqual(konta[0]["id"], cp.KONTO_GLOWNE)
+        self.assertIn("nie jest poprawnym JSON", buf.getvalue())
+
+    def test_reg_cfg_carries_the_account_identity(self):
+        konto = {"id": "marek", "name": "Marek Nowak", "age": None,
+                 "token_file": "/data/token-marek.json", "max_per_run": 2, "main": False}
+        cfg = cp.build_reg_cfg({}, None, konto)
+        self.assertEqual(cfg["konto"], "marek")
+        self.assertEqual(cfg["name"], "Marek Nowak")
+        self.assertEqual(cfg["token_file"], "/data/token-marek.json")
+        self.assertEqual(cfg["max_per_run"], 2)
+
+    def test_reg_cfg_without_an_account_is_unchanged(self):
+        """Zgodność wsteczna: dzisiejsze wywołanie dwuargumentowe działa jak dotąd."""
+        cfg = cp.build_reg_cfg({}, None)
+        self.assertEqual(cfg["konto"], cp.KONTO_GLOWNE)
+        self.assertEqual(cfg["name"], "Patryk Mazurowski")
+        self.assertEqual(cfg["token_file"], cp.TOKEN_FILE)

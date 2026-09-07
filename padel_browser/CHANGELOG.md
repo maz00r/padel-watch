@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.25.0 — fundament wielokontowy (bez zmiany zachowania)
+
+Pierwsza faza obsługi wielu kont Decathlon GO. **Dodatek nadal poluje jednym kontem
+i zachowuje się identycznie jak 0.24.2** — kryterium przyjęcia tej wersji było to, żeby
+wszystkie dotychczasowe testy przeszły bez modyfikacji.
+
+### Plik tokenu jest per konto — najcięższy błąd wielokontowości, naprawiony zanim wystrzelił
+
+`wait_for_fresher_token` czytał **globalny** `TOKEN_FILE`, bez parametru, a jest wołane
+przy HTTP 401 w `register_slot`. Przy wielu kontach konto, które dostanie odmowę,
+wczytałoby token konta **głównego**, ponowiło zapis i zarezerwowało kort **na cudzym
+koncie, z cudzym imieniem uczestnika**.
+
+Wyglądałoby to jak udana rezerwacja. Dopiero po tygodniu widać, że wszystkie korty
+wylądowały na jednym koncie.
+
+`token_from_file(path=None)` i `wait_for_fresher_token(..., path=None)` przyjmują teraz
+ścieżkę konta; wędruje ona przez `reg_cfg["token_file"]` aż do ratunku po 401. Bez ścieżki
+zachowanie jest dokładnie jak dotąd. Test sprawdzony mutacją — po cofnięciu poprawki pada.
+
+### Pojęcie konta
+
+- `konta_z_konfiguracji(cfg)` — lista kont, zawsze co najmniej jedno. **Bez opcji
+  `accounts` zwraca dokładnie jedno konto zbudowane z dzisiejszych opcji płaskich.**
+- Konto główne **zostaje przy dotychczasowym pliku tokenu i profilu** — nie wolno wymusić
+  ponownego logowania sesji, która działa.
+- Konta dodatkowe mogą mieć własny, węższy filtr godzin i własny limit, nie dotykając
+  konta głównego.
+- Powtórzone `id` jest odrzucane **głośno**: dwa konta o tym samym identyfikatorze
+  dzieliłyby plik tokenu i gałąź stanu, czyli byłyby jednym kontem udającym dwa.
+- Uszkodzony JSON w opcji `accounts` nie zatrzymuje polowania — spadamy na jedno konto.
+- `build_reg_cfg(cfg, state_doc, konto=None)` niesie tożsamość konta, jego plik tokenu,
+  imię uczestnika i limit.
+- `ACCOUNTS_TOTAL_MAX = 10` — łączny sufit kortów na bieg, uzgodniony z użytkownikiem.
+  Limit per konto przy dziesięciu kontach przestaje cokolwiek ograniczać.
+
 ## 0.24.2 — Dziennik gubił większość zdobyczy
 
 Zestawienie wpisu z logiem i panelem:

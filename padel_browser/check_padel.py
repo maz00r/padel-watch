@@ -1251,13 +1251,16 @@ def jwt_expiry(token):
         return 0
 
 
-def token_from_file():
+def token_from_file(path=None):
     """Czyta go-sdk-jwt zapisany przez przeglądarkę (scalony dodatek). Zwraca '' gdy brak.
 
     Format pliku: {"jwt": "...", "exp": 1721570000}. Plik może chwilowo nie istnieć
     (przeglądarka jeszcze nie zalogowana) — wtedy po prostu spadamy na token z configu.
+
+    `path` wskazuje plik KONKRETNEGO konta. Bez niego bierzemy globalny `TOKEN_FILE`,
+    czyli konto główne — i tak było przed wielokontowością.
     """
-    path = TOKEN_FILE
+    path = path or TOKEN_FILE
     if not path:
         return ""
     try:
@@ -1492,17 +1495,24 @@ TOKEN_WAIT_ATTEMPTS = 8
 TOKEN_WAIT_DELAY = 3
 
 
-def wait_for_fresher_token(token, attempts=TOKEN_WAIT_ATTEMPTS, delay=TOKEN_WAIT_DELAY):
+def wait_for_fresher_token(token, attempts=TOKEN_WAIT_ATTEMPTS, delay=TOKEN_WAIT_DELAY,
+                           path=None):
     """Czeka, aż przeglądarka zapisze token INNY niż podany. Zwraca '' gdy się nie doczekał.
 
     Bez pliku tokenu nie ma na co czekać — wracamy NATYCHMIAST. Inaczej czekalibyśmy
     pełne ~24 s na przeglądarkę, której w danym środowisku w ogóle nie ma (np. w Lambdzie
     w Irlandii), i to dokładnie w sekundzie publikacji.
+
+    `path` MUSI wskazywać plik tokenu TEGO konta, które dostało 401. Bez tego przy wielu
+    kontach ratunek po odmowie wczytywał token konta GŁÓWNEGO i ponawiał zapis nim —
+    czyli rezerwował kort na cudzym koncie, z cudzym imieniem uczestnika. Cichy błąd
+    najcięższego gatunku: wygląda jak udana rezerwacja, tylko nie tego konta.
     """
-    if not TOKEN_FILE:
+    plik = path or TOKEN_FILE
+    if not plik:
         return ""
     for _ in range(attempts):
-        got = token_from_file()
+        got = token_from_file(plik)
         if got and got != token:
             return got
         time.sleep(delay)
@@ -1594,7 +1604,7 @@ def register_slot(slot, listing_price, cfg, speculative=False):
                     # sekund) — dlatego czekamy chwilę na świeży token w pliku, zamiast
                     # oddawać gorący termin walkowerem. Czekanie jest ograniczone, żeby
                     # przy faktycznie martwej sesji nie wisieć w nieskończoność.
-                    fresh = wait_for_fresher_token(token)
+                    fresh = wait_for_fresher_token(token, path=cfg.get("token_file"))
                     if fresh:
                         token = fresh
                         cfg["token"] = fresh
@@ -1719,7 +1729,7 @@ def panel_rpc(method, cfg, token, payload, extend=None):
     except urllib.error.HTTPError as first:
         if first.code != 401 or not cfg.get("browser_mode"):
             raise
-        fresh = wait_for_fresher_token(token)
+        fresh = wait_for_fresher_token(token, path=cfg.get("token_file"))
         if not fresh:
             raise
         log(f"~ Panel: HTTP 401 w dołku odnowy — ponawiam {method} ze świeższym tokenem")
@@ -2829,7 +2839,73 @@ def notify_startup(topic, count, tz, book_url=None):
 
 # -------------------------------------------------------------------------- main
 
-def build_reg_cfg(cfg, state_doc):
+KONTO_GLOWNE = "glowne"
+# Ile kortów wolno zająć ŁĄCZNIE, wszystkimi kontami, w jednym biegu. Limit per konto
+# (`auto_register_max`) przy dziesięciu kontach przestaje cokolwiek ograniczać: dziesięć
+# kont po jednym korcie to dziesięć kortów. Decyzja użytkownika z 07.09: nie więcej niż 10.
+ACCOUNTS_TOTAL_MAX = 10
+
+
+def konta_z_konfiguracji(cfg):
+    """Lista kont do polowania. Zawsze co najmniej jedno.
+
+    Bez opcji `accounts` zwraca DOKŁADNIE jedno konto zbudowane z dzisiejszych opcji
+    płaskich — to jest ścieżka zgodności wstecznej i musi działać niezmiennie przez całe
+    wdrożenie wielokontowości.
+
+    Pola opcjonalne (`filters`, `max_per_run`, `age`) spadają na wartości globalne, więc
+    konta dodatkowe mogą mieć własne, węższe okno godzin, nie dotykając konta głównego.
+    """
+    surowe = cfg.get("accounts") or []
+    if isinstance(surowe, str):                 # ACCOUNTS_JSON z run.sh
+        try:
+            surowe = json.loads(surowe) or []
+        except ValueError:
+            log("! Opcja accounts nie jest poprawnym JSON-em — poluję jednym kontem.")
+            surowe = []
+    if not surowe:
+        return [{
+            "id": KONTO_GLOWNE,
+            "name": opcja("AUTO_REGISTER_NAME", cfg, "auto_register_name"),
+            "age": opcja("AUTO_REGISTER_AGE", cfg, "auto_register_age") or None,
+            "token_file": TOKEN_FILE,
+            "filters": None,                    # globalne
+            "max_per_run": None,                # globalne
+            "main": True,
+        }]
+    konta, widziane = [], set()
+    for i, wpis in enumerate(surowe):
+        if not isinstance(wpis, dict):
+            continue
+        kid = str(wpis.get("id") or "").strip() or f"konto{i + 1}"
+        if kid in widziane:
+            # Dwa konta o tym samym id dzieliłyby plik tokenu i gałąź stanu — czyli
+            # byłyby jednym kontem udającym dwa. Głośno, bo to psuje cały pomysł.
+            log(f"! Konto o powtórzonym id „{kid}” — pomijam drugie wystąpienie.")
+            continue
+        widziane.add(kid)
+        glowne = bool(wpis.get("main")) or (not konta and i == 0)
+        konta.append({
+            "id": kid,
+            "name": (wpis.get("name") or "").strip(),
+            "age": wpis.get("age") or None,
+            # Konto główne zostaje przy dotychczasowym pliku i profilu — nie wolno
+            # wymusić ponownego logowania sesji, która działa.
+            "token_file": TOKEN_FILE if glowne else plik_tokenu_konta(kid),
+            "filters": (wpis.get("filters") or "").strip() or None,
+            "max_per_run": wpis.get("max_per_run"),
+            "main": glowne,
+        })
+    return konta or konta_z_konfiguracji({})
+
+
+def plik_tokenu_konta(kid):
+    """Ścieżka pliku tokenu konta dodatkowego, obok pliku konta głównego."""
+    katalog = os.path.dirname(TOKEN_FILE) if TOKEN_FILE else (os.environ.get("STATE_DIR") or HERE)
+    return os.path.join(katalog, f"token-{kid}.json")
+
+
+def build_reg_cfg(cfg, state_doc, konto=None):
     """Ustawienia auto-rejestracji z opcji dodatku i stanu.
 
     Wspólne dla lokalnego biegu i dla żądania do Irlandii — gdyby liczyły się osobno,
@@ -2844,10 +2920,18 @@ def build_reg_cfg(cfg, state_doc):
         "refresh_token": (state_doc or {}).get("decathlon_rt") or "",
         # Scalony dodatek: token odnawia przeglądarka, więc monitor NIE próbuje /auth/refresh.
         "browser_mode": bool(TOKEN_FILE),
-        "name": os.environ.get("AUTO_REGISTER_NAME") or cfg.get("auto_register_name") or "",
-        "age": os.environ.get("AUTO_REGISTER_AGE") or cfg.get("auto_register_age") or None,
+        # Konto niesie własne imię uczestnika, własny plik tokenu i może mieć własny
+        # limit oraz filtr. Brak konta = zachowanie sprzed wielokontowości.
+        "konto": (konto or {}).get("id") or KONTO_GLOWNE,
+        "token_file": (konto or {}).get("token_file") or TOKEN_FILE,
+        "name": (konto or {}).get("name")
+                or os.environ.get("AUTO_REGISTER_NAME") or cfg.get("auto_register_name") or "",
+        "age": (konto or {}).get("age")
+               or os.environ.get("AUTO_REGISTER_AGE") or cfg.get("auto_register_age") or None,
         "free_only": not boolish(os.environ.get("AUTO_REGISTER_PAID") or cfg.get("auto_register_paid")),
-        "max_per_run": os.environ.get("AUTO_REGISTER_MAX") or cfg.get("auto_register_max") or 1,
+        "max_per_run": ((konto or {}).get("max_per_run")
+                        or os.environ.get("AUTO_REGISTER_MAX")
+                        or cfg.get("auto_register_max") or 1),
         "order": os.environ.get("AUTO_REGISTER_ORDER") or cfg.get("auto_register_order") or "earliest",
         "salvo": os.environ.get("AUTO_REGISTER_SALVO") or cfg.get("auto_register_salvo") or 0,
         "hedge": os.environ.get("AUTO_REGISTER_HEDGE") or cfg.get("auto_register_hedge") or 1,
