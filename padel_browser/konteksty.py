@@ -12,10 +12,20 @@ odświeżyć wszystko tuż przed publikacją grafiku.
 CZEGO TO NIE ROBI: nie wpisuje loginu ani hasła. Sesja bierze się z ciasteczek zapisanych
 po JEDNORAZOWYM, ręcznym zalogowaniu w panelu — dokładnie jak na koncie głównym.
 
-TRWAŁOŚĆ ROBIMY SAMI. Konteksty CDP żyją w pamięci i nie przeżywają restartu Chromium.
-Dlatego po zalogowaniu eksportujemy ciasteczka do pliku, a przy kolejnym starcie
-wstrzykujemy je z powrotem. To jest jedyne nieudowodnione założenie tej konstrukcji:
-czy sesja OAuth Decathlona odtwarza się z samych ciasteczek. Sprawdza to `sonda()`.
+WYNIK SONDY (07.09.2026): ŚCIEŻKA ODRZUCONA.
+
+    ✗ Wstrzyknąłem 18 ciasteczek, ale token się nie pojawił (URL: https://go.decathlon.pl/)
+
+Sesja OAuth Decathlona NIE odtwarza się z samych ciasteczek. Strona nawet nie próbowała
+cichego SSO — została po prostu wylogowana. Coś jeszcze trzyma tę sesję: `localStorage`
+na domenie dostawcy tożsamości, ciasteczka partycjonowane (CHIPS, których `setCookies`
+nie odtwarza bez klucza partycji), albo powiązanie z urządzeniem.
+
+Dlatego wielokontowość idzie ścieżką OSOBNYCH PROFILI na dysku, uruchamianych sekwencyjnie
+— czyli tym samym mechanizmem, który od miesiąca działa na koncie głównym.
+
+Ten moduł ZOSTAJE, bo sonda jest tania i warto móc powtórzyć pomiar, gdyby Decathlon
+zmienił sposób trzymania sesji. Nie jest natomiast używany w polowaniu.
 """
 
 import json

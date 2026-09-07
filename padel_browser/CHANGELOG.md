@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.25.3 — sonda odpowiedziała: konteksty odpadają, idziemy profilami
+
+Wynik pomiaru z 07.09:
+
+```
+✗ Wstrzyknąłem 18 ciasteczek, ale token się nie pojawił (URL: https://go.decathlon.pl/)
+```
+
+**Sesja OAuth Decathlona nie odtwarza się z samych ciasteczek.** Strona nawet nie
+próbowała cichego SSO — została po prostu wylogowana. Coś jeszcze trzyma tę sesję:
+`localStorage` na domenie dostawcy tożsamości, ciasteczka partycjonowane (CHIPS, których
+`Storage.setCookies` nie odtwarza bez klucza partycji), albo powiązanie z urządzeniem.
+
+Wielokontowość idzie więc **ścieżką osobnych profili na dysku**, uruchamianych
+sekwencyjnie — tym samym mechanizmem, który od miesiąca działa na koncie głównym.
+
+### Ile to naprawdę kosztuje
+
+| | konteksty (odpadły) | osobne profile |
+|---|---|---|
+| RAM szczytowo | ~400 MB | ~600 MB |
+| czas na konto | ~3–5 s | ~20 s |
+| miejsce na `/data` | kilka MB | **~3 GB** |
+
+Czas okazuje się nieistotny. Token żyje 15 minut, więc dziesięć kont to jedno odnowienie
+co 90 sekund — przy wizycie trwającej 20 s zbieracz jest zajęty **22% czasu**, resztę
+czeka. Jedynym realnym kosztem jest miejsce na dysku.
+
+`konteksty.py` zostaje w repozytorium: sonda jest tania i warto móc powtórzyć pomiar,
+gdyby Decathlon zmienił sposób trzymania sesji. Nie bierze udziału w polowaniu.
+
 ## 0.25.2 — sondę uruchamiasz z konfiguracji, nie z kontenera
 
 Poprzednia wersja kazała wejść do kontenera dodatku i uruchomić skrypt. To zła droga:
