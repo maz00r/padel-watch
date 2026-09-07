@@ -21,6 +21,7 @@ import io
 import json
 import os
 import re
+import shutil
 import socket
 import sys
 import threading
@@ -3382,6 +3383,48 @@ class Nastawy:
                  "topic")
 
 
+# Ile miejsca zajmuje profil Chromium jednego konta. Zmierzone na profilu konta głównego:
+# z cache'em rośnie do kilkuset MB, bez cache'u zostaje kilkanaście. Zbieracz uruchamia
+# przeglądarkę z --disk-cache-size=1, więc liczymy wariant chudy z zapasem.
+PROFIL_MB = 40
+
+
+def zmierz_zasoby(kont=1):
+    """Wolne miejsce na /data i pamięć — jedna linia do Dziennika przy starcie.
+
+    Bez tego użytkownik musiałby wejść do kontenera dodatku, żeby odpowiedzieć na pytanie
+    „czy zmieści się dziesięć profili Chromium". `/data` widziane z dodatku Terminal to
+    inny katalog niż `/data` tego dodatku, więc pytanie o `df` z zewnątrz i tak wprowadza
+    w błąd. Mierzy ten, kto wie — czyli my.
+    """
+    katalog = os.environ.get("STATE_DIR") or HERE
+    try:
+        uzycie = shutil.disk_usage(katalog)
+        wolne_mb = uzycie.free // (1024 * 1024)
+    except OSError as e:
+        log(f"! Nie zmierzyłem miejsca na {katalog}: {e}")
+        return None, None
+    ram_mb = None
+    try:
+        with open("/proc/meminfo", encoding="utf-8") as f:
+            for linia in f:
+                if linia.startswith("MemAvailable:"):
+                    ram_mb = int(linia.split()[1]) // 1024
+                    break
+    except (OSError, ValueError, IndexError):
+        pass
+    potrzeba = max(0, kont - 1) * PROFIL_MB       # konto główne ma już swój profil
+    opis_ram = f", wolna pamięć {ram_mb} MB" if ram_mb is not None else ""
+    log(f"= Zasoby: {wolne_mb} MB wolnego na {katalog}{opis_ram}.")
+    if potrzeba:
+        log(f"= Dziesięć profili Chromium bez cache'u to około {potrzeba} MB — "
+            f"{'starczy' if wolne_mb > potrzeba * 3 else 'CIASNO'}.")
+    if wolne_mb < 500:
+        log(f"! Mało miejsca na {katalog} ({wolne_mb} MB). Stan, dziennik i profile "
+            f"przeglądarki żyją właśnie tam — przy zapełnionym dysku polowanie stanie.")
+    return wolne_mb, ram_mb
+
+
 def oglos_tryb_pracy():
     """Mówi WPROST, co dodatek będzie robił. Raz, przy starcie.
 
@@ -3630,6 +3673,7 @@ def main():
     sprint, sprint_threads = n.sprint, n.sprint_threads
 
     oglos_tryb_pracy()
+    zmierz_zasoby(len(konta_z_konfiguracji(load_config(quiet=True))))
     log_rtt(urllib.parse.urlsplit(DECATHLON_API_URL).netloc)
 
     log(f"Tryb pętli: sprawdzam co {interval}s. Ctrl+C aby zakończyć.")

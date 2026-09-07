@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.25.4 — dodatek sam mierzy miejsce i pamięć
+
+Pytałem użytkownika o `df -h /data`, nie mówiąc, gdzie tę komendę uruchomić. Pytanie było
+zresztą źle postawione: `/data` widziane z dodatku Terminal to **inny katalog** niż `/data`
+tego dodatku, więc odpowiedź z zewnątrz i tak wprowadzałaby w błąd.
+
+Mierzy teraz ten, kto wie. Przy starcie, obok linii o trybie pracy:
+
+```
+= Zasoby: 4096 MB wolnego na /data, wolna pamięć 2100 MB.
+= Dziesięć profili Chromium bez cache'u to około 360 MB — starczy.
+```
+
+- Werdykt o profilach pojawia się dopiero przy więcej niż jednym koncie.
+- Poniżej 500 MB wolnego leci ostrzeżenie: stan, dziennik i profile przeglądarki żyją
+  właśnie na `/data`, a przy zapełnionym dysku polowanie po prostu stanie.
+- Awaria pomiaru nie zatrzymuje polowania.
+
 ## 0.25.3 — sonda odpowiedziała: konteksty odpadają, idziemy profilami
 
 Wynik pomiaru z 07.09:

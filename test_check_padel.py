@@ -5184,3 +5184,47 @@ class AccountsFromConfigTest(unittest.TestCase):
         self.assertEqual(cfg["konto"], cp.KONTO_GLOWNE)
         self.assertEqual(cfg["name"], "Patryk Mazurowski")
         self.assertEqual(cfg["token_file"], cp.TOKEN_FILE)
+
+
+class ResourceReportTest(unittest.TestCase):
+    """Dodatek sam mierzy miejsce i pamięć, zamiast kazać użytkownikowi wchodzić
+    do kontenera. `/data` widziane z dodatku Terminal to INNY katalog niż `/data`
+    tego dodatku, więc pytanie o `df` z zewnątrz wprowadza w błąd."""
+
+    def zmierz(self, wolne_mb, kont=1):
+        import collections
+        uzycie = collections.namedtuple("u", "total used free")(0, 0, wolne_mb * 1024 * 1024)
+        with mock.patch.object(cp.shutil, "disk_usage", return_value=uzycie), \
+                mock.patch.dict(os.environ, {"STATE_DIR": "/data"}), \
+                mock.patch("sys.stdout", io.StringIO()) as buf:
+            wynik = cp.zmierz_zasoby(kont)
+        return wynik, buf.getvalue()
+
+    def test_it_reports_free_space(self):
+        (wolne, _ram), out = self.zmierz(4096)
+        self.assertEqual(wolne, 4096)
+        self.assertIn("4096 MB wolnego", out)
+
+    def test_ten_accounts_get_a_verdict(self):
+        _w, out = self.zmierz(4096, kont=10)
+        self.assertIn("Dziesięć profili", out)
+        self.assertIn("starczy", out)
+
+    def test_a_tight_disk_is_called_out(self):
+        _w, out = self.zmierz(500, kont=10)
+        self.assertIn("CIASNO", out)
+
+    def test_a_nearly_full_disk_warns_loudly(self):
+        """Stan, dziennik i profile żyją na /data — przy zapełnionym dysku polowanie stanie."""
+        _w, out = self.zmierz(120, kont=1)
+        self.assertIn("! Mało miejsca", out)
+
+    def test_a_single_account_gets_no_profile_math(self):
+        _w, out = self.zmierz(4096, kont=1)
+        self.assertNotIn("profili Chromium", out)
+
+    def test_a_broken_filesystem_does_not_stop_the_hunt(self):
+        with mock.patch.object(cp.shutil, "disk_usage", side_effect=OSError("brak")), \
+                mock.patch("sys.stdout", io.StringIO()) as buf:
+            self.assertEqual(cp.zmierz_zasoby(1), (None, None))
+        self.assertIn("Nie zmierzyłem miejsca", buf.getvalue())
