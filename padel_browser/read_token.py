@@ -229,8 +229,12 @@ class Cdp:
             pass
 
 
-def read_jwt_once(cdp_url=None, start_url=None):
-    """Zwraca (jwt, exp, błąd). Nawiguje TYLKO gdy trzeba (token wygasł) i wolno (nie SSO)."""
+def read_jwt_once(cdp_url=None, start_url=None, navigate=True):
+    """Zwraca (jwt, exp, błąd).
+
+    `navigate=False` służy ekranowi ręcznego logowania kont dodatkowych: tylko podgląda
+    bieżącą kartę i nigdy nie wyrywa użytkownikowi formularza spod palców.
+    """
     ws_url = cdp_page_target(cdp_url=cdp_url)
     if not ws_url:
         return None, 0, "Chromium nie wystartował (brak CDP)"
@@ -247,6 +251,8 @@ def read_jwt_once(cdp_url=None, start_url=None):
             # To jedyne miejsce, które wyłapuje logowanie ręczne.
             zapomnij_nieudane_logowania()
             return jwt, exp, None  # bez przeładowania (nie przeszkadzamy)
+        if not navigate:
+            return None, 0, f"brak {JWT_KEY} w localStorage (URL: {url[:70]})"
         # Brak/wygasły -> wczytaj stronę: zalogowana sesja odnowi token przy ładowaniu.
         cdp.call("Page.enable")
         cdp.call("Page.navigate", url=start_url or START_URL)

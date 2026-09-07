@@ -2842,6 +2842,7 @@ KONTO_GLOWNE = "glowne"
 # (`auto_register_max`) przy dziesięciu kontach przestaje cokolwiek ograniczać: dziesięć
 # kont po jednym korcie to dziesięć kortów. Decyzja użytkownika z 07.09: nie więcej niż 10.
 ACCOUNTS_TOTAL_MAX = 10
+ACCOUNT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 
 
 def konta_z_konfiguracji(cfg):
@@ -2878,6 +2879,9 @@ def konta_z_konfiguracji(cfg):
         if not isinstance(wpis, dict):
             continue
         kid = str(wpis.get("id") or "").strip() or f"konto{i + 1}"
+        if not ACCOUNT_ID_RE.fullmatch(kid):
+            log(f"! Konto ma niedozwolone id „{kid}” — użyj liter, cyfr, kropki, _ lub -.")
+            continue
         if kid in widziane:
             # Dwa konta o tym samym id dzieliłyby plik tokenu i gałąź stanu — czyli
             # byłyby jednym kontem udającym dwa. Głośno, bo to psuje cały pomysł.
