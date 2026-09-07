@@ -137,5 +137,50 @@ class HuntsEndpointTest(unittest.TestCase):
                         f"panel nie poradził sobie z uszkodzonym dziennikiem: {odp[:120]}")
 
 
+class AccountsEndpointTest(unittest.TestCase):
+    def test_accounts_endpoint_returns_public_state(self):
+        with mock.patch.object(panel, "accounts_view", return_value=[{
+                "id": "ania", "name": "Ania", "alive": True}]):
+            odp = Zapytanie("GET", "/api/accounts").wykonaj()
+        self.assertIn('"id": "ania"', odp)
+        self.assertNotIn("jwt", odp.lower())
+
+    def test_login_request_is_written_atomically(self):
+        accounts = [{"id": "glowne", "main": True}, {"id": "ania", "main": False}]
+        with mock.patch.object(cp, "load_config", return_value={}), \
+                mock.patch.object(cp, "konta_z_konfiguracji", return_value=accounts), \
+                mock.patch.object(cp, "zapisz_json_atomowo") as write:
+            odp = Zapytanie("POST", "/api/account-login", {"id": "ania"}).wykonaj()
+        self.assertIn('"ok": true', odp)
+        self.assertEqual(write.call_args.args[1]["state"], "pending")
+        self.assertEqual(write.call_args.args[1]["id"], "ania")
+
+    def test_main_account_is_not_sent_to_the_extra_browser(self):
+        accounts = [{"id": "glowne", "main": True}]
+        with mock.patch.object(cp, "load_config", return_value={}), \
+                mock.patch.object(cp, "konta_z_konfiguracji", return_value=accounts), \
+                mock.patch.object(cp, "zapisz_json_atomowo") as write:
+            odp = Zapytanie("POST", "/api/account-login", {"id": "glowne"}).wykonaj()
+        self.assertIn("400", odp)
+        write.assert_not_called()
+
+    def test_another_active_login_is_not_overwritten(self):
+        accounts = [{"id": "glowne", "main": True}, {"id": "ania", "main": False}]
+        with mock.patch.object(cp, "load_config", return_value={}), \
+                mock.patch.object(cp, "konta_z_konfiguracji", return_value=accounts), \
+                mock.patch.object(panel.zbieracz, "wczytaj_json",
+                                  return_value={"id": "marek", "state": "active"}), \
+                mock.patch.object(cp, "zapisz_json_atomowo") as write:
+            odp = Zapytanie("POST", "/api/account-login", {"id": "ania"}).wykonaj()
+        self.assertIn("409", odp)
+        write.assert_not_called()
+
+    def test_extra_websocket_has_a_separate_port(self):
+        with mock.patch.object(panel, "WEBSOCKIFY_PORT", 6080), \
+                mock.patch.object(panel, "EXTRA_WEBSOCKIFY_PORT", 6081):
+            self.assertEqual(panel.websocket_port("/websockify"), 6080)
+            self.assertEqual(panel.websocket_port("/prefix/websockify-extra"), 6081)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -21,6 +21,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import unquote, urlparse
 
 import check_padel
+import zbieracz
 
 try:
     from zoneinfo import ZoneInfo
@@ -30,6 +31,7 @@ except ImportError:  # pragma: no cover - w obrazie zawsze jest
 HERE = os.path.dirname(os.path.abspath(__file__))
 PANEL_PORT = int(os.environ.get("PANEL_PORT") or 8099)
 WEBSOCKIFY_PORT = int(os.environ.get("WEBSOCKIFY_PORT") or 6080)
+EXTRA_WEBSOCKIFY_PORT = int(os.environ.get("EXTRA_WEBSOCKIFY_PORT") or 6081)
 NOVNC_DIR = os.environ.get("NOVNC_DIR") or "/usr/share/novnc"
 PANEL_HTML = os.path.join(HERE, "panel.html")
 # Lista rezerwacji zmienia się rzadko, a panel odpytywany jest przy każdym wejściu
@@ -46,6 +48,7 @@ MIME = {
 
 _cache = {"at": 0.0, "items": None, "error": None}
 _cache_lock = threading.Lock()
+_login_lock = threading.Lock()
 
 
 def log(*args):
@@ -100,6 +103,43 @@ def public_reservation(res):
     return out
 
 
+def accounts_view():
+    """Publiczny stan kont bez JWT, cookies i innych poświadczeń."""
+    konta = check_padel.konta_z_konfiguracji(check_padel.load_config(quiet=True))
+    status = zbieracz.wczytaj_status(zbieracz.STATUS_PATH)
+    zadanie = zbieracz.wczytaj_json(zbieracz.LOGIN_REQUEST_PATH)
+    now = time.time()
+    out = []
+    def liczba(value):
+        try:
+            return int(value or 0)
+        except (TypeError, ValueError):
+            return 0
+    for konto in konta:
+        wpis = status.get(konto["id"]) or {}
+        token_doc = zbieracz.wczytaj_json(konto.get("token_file") or "")
+        exp = max(liczba(wpis.get("exp")), liczba(token_doc.get("exp")))
+        aktywne = bool(wpis.get("aktywne")) or (
+            zadanie.get("id") == konto["id"] and zadanie.get("state") == "active"
+        )
+        out.append({
+            "id": konto["id"],
+            "name": konto.get("name") or konto["id"],
+            "main": bool(konto.get("main")),
+            "exp": exp or None,
+            "alive": exp > now,
+            "active": aktywne,
+            "error": wpis.get("blad") or "",
+            "request": zadanie.get("state") if zadanie.get("id") == konto["id"] else "",
+        })
+    return out
+
+
+def websocket_port(path):
+    return EXTRA_WEBSOCKIFY_PORT if urlparse(path).path.endswith("/websockify-extra") \
+        else WEBSOCKIFY_PORT
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "padel-panel"
@@ -149,6 +189,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.api_raw()
         if path == "/api/hunts":
             return self.api_hunts()
+        if path == "/api/accounts":
+            return self.api_accounts()
         if path.startswith("/cal/") and path.endswith(".ics"):
             return self.serve_ics(path[len("/cal/"):-len(".ics")])
         return self.serve_static(path)
@@ -156,8 +198,11 @@ class Handler(BaseHTTPRequestHandler):
     do_HEAD = do_GET
 
     def do_POST(self):
-        if urlparse(self.path).path == "/api/cancel":
+        path = urlparse(self.path).path
+        if path == "/api/cancel":
             return self.api_cancel()
+        if path == "/api/account-login":
+            return self.api_account_login()
         self._json({"ok": False, "error": "nieznany endpoint"}, 404)
 
     # --------------------------------------------------------------- zasoby
@@ -216,6 +261,36 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"ok": False, "error": f"nieoczekiwany błąd: {e!r}", "items": []})
         self._json({"ok": True, "error": None, "items": wpisy})
 
+    def api_accounts(self):
+        try:
+            self._json({"ok": True, "items": accounts_view()})
+        except Exception as e:  # noqa: BLE001 - stan kont nie może wywrócić panelu
+            self._json({"ok": False, "error": f"nie odczytałem kont: {e!r}", "items": []})
+
+    def api_account_login(self):
+        if "application/json" not in (self.headers.get("Content-Type") or ""):
+            return self._json({"ok": False, "error": "wymagany Content-Type: application/json"}, 415)
+        kid = str(self._body().get("id") or "").strip()
+        konta = check_padel.konta_z_konfiguracji(check_padel.load_config(quiet=True))
+        konto = next((k for k in konta if k["id"] == kid), None)
+        if not konto:
+            return self._json({"ok": False, "error": "nieznane konto"}, 404)
+        if konto.get("main"):
+            return self._json({"ok": False, "error": "konto główne jest w zakładce Przeglądarka"}, 400)
+        with _login_lock:
+            obecne = zbieracz.wczytaj_json(zbieracz.LOGIN_REQUEST_PATH)
+            if obecne.get("state") in ("pending", "active"):
+                if obecne.get("id") == kid:
+                    return self._json({"ok": True, "id": kid})
+                return self._json({"ok": False, "error": "inne konto jest właśnie otwierane"}, 409)
+            check_padel.zapisz_json_atomowo(zbieracz.LOGIN_REQUEST_PATH, {
+                "id": kid,
+                "state": "pending",
+                "requested": int(time.time()),
+            })
+        log(f"konto {kid}: zlecono ręczne logowanie")
+        self._json({"ok": True, "id": kid})
+
     def api_cancel(self):
         # Anulowanie jest nieodwracalne, więc przyjmujemy je tylko jako JSON. Formularz
         # z obcej strony nie ustawi tego nagłówka bez zgody CORS — a panel i tak siedzi
@@ -267,7 +342,8 @@ class Handler(BaseHTTPRequestHandler):
         interpretujemy ramek: dwa wątki przepychają dane, aż któraś strona zamknie.
         """
         try:
-            upstream = socket.create_connection(("127.0.0.1", WEBSOCKIFY_PORT), timeout=10)
+            upstream = socket.create_connection(
+                ("127.0.0.1", websocket_port(self.path)), timeout=10)
         except OSError as e:
             return self._send(502, f"noVNC jeszcze nie wystartował ({e})",
                               "text/plain; charset=utf-8")
@@ -314,7 +390,8 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     server = ThreadingHTTPServer(("0.0.0.0", PANEL_PORT), Handler)
     server.daemon_threads = True
-    log(f"panel na porcie {PANEL_PORT} (noVNC: {NOVNC_DIR}, websockify: {WEBSOCKIFY_PORT})")
+    log(f"panel na porcie {PANEL_PORT} (noVNC: {NOVNC_DIR}, "
+        f"websockify: {WEBSOCKIFY_PORT}/{EXTRA_WEBSOCKIFY_PORT})")
     server.serve_forever()
 
 

@@ -23,6 +23,7 @@
   .tab[aria-selected="true"] { background:var(--accent); color:#fff; }
   main { padding:12px; max-width:760px; margin:0 auto; }
   #browser { padding:0; max-width:none; }
+  #account-browser { margin-top:12px; border:1px solid var(--line); background:#000; }
   .bar { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:12px; }
   .bar .grow { flex:1; }
   button, .btn { font:inherit; border-radius:9px; border:1px solid var(--line);
@@ -59,7 +60,8 @@
 <header>
   <button class="tab" id="tab-res" aria-selected="true" onclick="showTab('res')">Rezerwacje</button>
   <button class="tab" id="tab-hunts" aria-selected="false" onclick="showTab('hunts')">Polowania</button>
-  <button class="tab" id="tab-browser" aria-selected="false" onclick="showTab('browser')">Przeglądarka</button>
+  <button class="tab" id="tab-accounts" aria-selected="false" onclick="showTab('accounts')">Konta</button>
+  <button class="tab" id="tab-browser" aria-selected="false" onclick="showTab('browser')">Główne</button>
 </header>
 
 <main id="res">
@@ -89,6 +91,17 @@
   <div id="hunts-list"></div>
 </main>
 
+<main id="accounts" class="hide">
+  <div class="bar">
+    <button class="btn primary" onclick="loadAccounts()">Odśwież</button>
+    <span class="grow"></span>
+    <span id="accounts-summary" class="sub"></span>
+  </div>
+  <div id="accounts-status" class="msg">Wczytuję konta…</div>
+  <div id="accounts-list"></div>
+  <div id="account-browser" class="hide"></div>
+</main>
+
 <main id="browser" class="hide"></main>
 
 <script>
@@ -97,12 +110,70 @@
 var reservations = [];
 
 function showTab(name) {
-  ["res", "hunts", "browser"].forEach(function (id) {
+  ["res", "hunts", "accounts", "browser"].forEach(function (id) {
     document.getElementById(id).classList.toggle("hide", id !== name);
     document.getElementById("tab-" + id).setAttribute("aria-selected", String(id === name));
   });
   if (name === "browser") mountBrowser();
   if (name === "hunts" && !huntsLoaded) loadHunts();
+  if (name === "accounts") loadAccounts();
+}
+
+// --------------------------------------------------------------- konta
+function accountState(a) {
+  if (a.active || a.request === "active") return '<span class="badge warn">otwarte</span>';
+  if (a.request === "pending") return '<span class="badge warn">oczekuje</span>';
+  if (a.alive) return '<span class="badge ok">token ważny</span>';
+  return '<span class="badge bad">wymaga logowania</span>';
+}
+
+function accountCard(a) {
+  var expiry = a.exp ? "Token do " + new Date(a.exp * 1000).toLocaleTimeString("pl-PL") : "Brak tokenu";
+  var error = a.error ? '<div class="sub bad">' + esc(a.error) + "</div>" : "";
+  var action = a.main
+    ? '<button class="btn" onclick="showTab(\'browser\')">Otwórz</button>'
+    : '<button class="btn primary" onclick="openAccount(\'' + a.id + '\')">Zaloguj</button>';
+  return '<div class="card"><div class="row"><div><b>' + esc(a.name) + "</b>"
+    + '<div class="sub">' + esc(expiry) + "</div>" + error + "</div>" + accountState(a)
+    + '</div><div class="actions">' + action + "</div></div>";
+}
+
+function loadAccounts() {
+  var status = document.getElementById("accounts-status");
+  fetch("api/accounts", { headers: { Accept: "application/json" } })
+    .then(function (r) { return r.json(); })
+    .then(function (doc) {
+      if (!doc.ok) throw new Error(doc.error || "nieznany błąd");
+      var items = doc.items || [];
+      document.getElementById("accounts-list").innerHTML = items.map(accountCard).join("");
+      document.getElementById("accounts-summary").textContent = items.filter(function (a) {
+        return a.alive;
+      }).length + " / " + items.length + " aktywnych";
+      status.classList.add("hide");
+    })
+    .catch(function (e) {
+      status.className = "msg error";
+      status.textContent = "Nie udało się wczytać kont: " + e.message;
+    });
+}
+
+function openAccount(id) {
+  fetch("api/account-login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id: id })
+  })
+    .then(function (r) { return r.json(); })
+    .then(function (doc) {
+      if (!doc.ok) throw new Error(doc.error || "nie uruchomiono konta");
+      mountAccountBrowser();
+      loadAccounts();
+    })
+    .catch(function (e) {
+      var status = document.getElementById("accounts-status");
+      status.className = "msg error";
+      status.textContent = e.message;
+    });
 }
 
 // ------------------------------------------------------------ dziennik polowań
@@ -205,10 +276,20 @@ function renderHunts(items) {
 // Ingressu — składamy go z bieżącej ścieżki. Ramkę wstawiamy dopiero przy wejściu
 // w zakładkę: obraz z Chromium to stały strumień, nie ma go po co ciągnąć w tle.
 function mountBrowser() {
-  var host = document.getElementById("browser");
+  mountVnc("browser", "websockify");
+}
+
+function mountAccountBrowser() {
+  var host = document.getElementById("account-browser");
+  host.classList.remove("hide");
+  mountVnc("account-browser", "websockify-extra");
+}
+
+function mountVnc(hostId, socketName) {
+  var host = document.getElementById(hostId);
   if (host.dataset.ready) return;
   var dir = location.pathname.replace(/[^/]*$/, "");
-  var path = (dir + "websockify").replace(/^\/+/, "");
+  var path = (dir + socketName).replace(/^\/+/, "");
   var frame = document.createElement("iframe");
   frame.src = "vnc.html?autoconnect=true&reconnect=true&resize=scale&path=" + encodeURIComponent(path);
   host.appendChild(frame);
@@ -370,6 +451,9 @@ function loadRaw() {
 
 restoreFilters();   // zanim cokolwiek narysujemy — inaczej mignąłby domyślny widok
 load(false);
+setInterval(function () {
+  if (!document.getElementById("accounts").classList.contains("hide")) loadAccounts();
+}, 5000);
 </script>
 </body>
 </html>

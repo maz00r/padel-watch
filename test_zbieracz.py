@@ -8,8 +8,10 @@ dziesięciu, a dziennik pokazuje dziesięć prób.
 import os
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "padel_browser"))
+sys.modules.setdefault("websocket", mock.MagicMock())
 import zbieracz as zb  # noqa: E402
 
 TERAZ = 1_800_000_000
@@ -86,6 +88,10 @@ class CiszaPrzedPublikacjaTest(unittest.TestCase):
         self.assertIsNotNone(zb.nastepne_konto(self.STATUS, konta("marek"), TERAZ,
                                                publikacja=TERAZ - 60))
 
+    def test_the_same_guard_is_available_for_manual_login(self):
+        self.assertTrue(zb.cisza_przed_publikacja(TERAZ, TERAZ + 30))
+        self.assertFalse(zb.cisza_przed_publikacja(TERAZ, TERAZ + 200))
+
 
 class TozsamoscTest(unittest.TestCase):
     """Pomyłka w mapowaniu profil → konto daje dziesięć tokenów JEDNEGO konta.
@@ -136,6 +142,102 @@ class IleZywychTest(unittest.TestCase):
 
     def test_the_main_account_always_counts(self):
         self.assertEqual(zb.ile_zywych({}, konta(), TERAZ), 1)
+
+
+class FakeProcess:
+    pid = 123
+
+    def __init__(self, code=None):
+        self.code = code
+
+    def poll(self):
+        return self.code
+
+
+class RuntimeZbieraczaTest(unittest.TestCase):
+    def konto(self):
+        return {"id": "marek", "main": False, "token_file": "/data/token-marek.json"}
+
+    def test_profile_and_command_are_isolated_per_account(self):
+        cmd = zb.komenda_chromium(self.konto(), cdp_port=9333, state_dir="/tmp/padel-test")
+        self.assertIn("--user-data-dir=/tmp/padel-test/chrome-profile-marek", cmd)
+        self.assertIn("--remote-debugging-port=9333", cmd)
+
+    def test_success_writes_only_the_account_file(self):
+        calls, writes = [], []
+
+        def read(**kwargs):
+            calls.append(kwargs)
+            return "jwt-marka", TERAZ + KWADRANS, None
+
+        ok, error = zb.czekaj_na_token(
+            self.konto(), {}, FakeProcess(), odczyt=read,
+            zapis=lambda jwt, exp, path: writes.append((jwt, exp, path)),
+            identyfikator=lambda konto, jwt: "user-marek", teraz=lambda: TERAZ,
+            sen=lambda _s: None)
+        self.assertTrue(ok)
+        self.assertEqual(error, "")
+        self.assertEqual(writes, [("jwt-marka", TERAZ + KWADRANS, "/data/token-marek.json")])
+        self.assertTrue(calls[0]["navigate"])
+
+    def test_manual_login_only_observes_the_page(self):
+        calls = []
+
+        def read(**kwargs):
+            calls.append(kwargs)
+            return "jwt-marka", TERAZ + KWADRANS, None
+
+        ok, _error = zb.czekaj_na_token(
+            self.konto(), {}, FakeProcess(), reczne=True, odczyt=read,
+            zapis=lambda *args, **kwargs: None,
+            identyfikator=lambda konto, jwt: "user-marek", teraz=lambda: TERAZ,
+            sen=lambda _s: None)
+        self.assertTrue(ok)
+        self.assertFalse(calls[0]["navigate"])
+
+    def test_identity_mismatch_is_not_written(self):
+        status = {"marek": {"user_id": "user-marek"}}
+        writes = []
+        ok, error = zb.czekaj_na_token(
+            self.konto(), status, FakeProcess(),
+            odczyt=lambda **kw: ("jwt-obcy", TERAZ + KWADRANS, None),
+            zapis=lambda *args, **kwargs: writes.append(args),
+            identyfikator=lambda konto, jwt: "user-obcy", teraz=lambda: TERAZ,
+            sen=lambda _s: None)
+        self.assertFalse(ok)
+        self.assertIn("inne konto", error)
+        self.assertEqual(writes, [])
+
+    def test_failed_file_write_is_not_reported_as_success(self):
+        status = {}
+        ok, error = zb.czekaj_na_token(
+            self.konto(), status, FakeProcess(),
+            odczyt=lambda **kw: ("jwt-marka", TERAZ + KWADRANS, None),
+            zapis=lambda *args, **kwargs: False,
+            identyfikator=lambda konto, jwt: "user-marek", teraz=lambda: TERAZ,
+            sen=lambda _s: None)
+        self.assertFalse(ok)
+        self.assertIn("nie zapisałem", error)
+
+    def test_browser_is_stopped_after_a_failed_visit(self):
+        proc, stopped = FakeProcess(code=7), []
+        ok, _error = zb.odwiedz_konto(
+            self.konto(), {}, uruchom=lambda konto: proc,
+            zatrzymaj=lambda p: stopped.append(p), teraz=lambda: TERAZ,
+            sen=lambda _s: None)
+        self.assertFalse(ok)
+        self.assertEqual(stopped, [proc])
+
+    def test_pending_login_selects_only_an_extra_account(self):
+        lista = konta("marek")
+        self.assertEqual(zb._konto_z_zadania(lista, {"state": "pending", "id": "marek"})["id"],
+                         "marek")
+        self.assertIsNone(zb._konto_z_zadania(lista, {"state": "pending", "id": "glowne"}))
+
+    def test_active_login_is_resumed_after_a_collector_restart(self):
+        lista = konta("marek")
+        self.assertEqual(zb._konto_z_zadania(lista, {"state": "active", "id": "marek"})["id"],
+                         "marek")
 
 
 if __name__ == "__main__":

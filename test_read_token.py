@@ -232,3 +232,49 @@ class SilentLoginRecoversAfterManualLoginTest(unittest.TestCase):
         with mock.patch("sys.stdout", io.StringIO()), mock.patch.object(rt.time, "sleep"):
             jwt, _exp = rt.try_silent_login(cdp)
         self.assertIsNone(jwt, "limit prób przestał chronić")
+
+
+class ParametryKontaTest(unittest.TestCase):
+    """Jeden czytnik obsługuje główny CDP i sekwencyjny CDP kont dodatkowych."""
+
+    def test_write_can_target_an_account_file(self):
+        import json, tempfile
+        with tempfile.TemporaryDirectory() as katalog:
+            path = os.path.join(katalog, "token-marek.json")
+            rt.write_token_file("jwt-marka", 123, path=path)
+            with open(path, encoding="utf-8") as f:
+                self.assertEqual(json.load(f), {"jwt": "jwt-marka", "exp": 123})
+
+    def test_write_failure_is_reported_to_the_caller(self):
+        with mock.patch("sys.stdout", io.StringIO()):
+            self.assertFalse(rt.write_token_file("jwt", 123, path="/nie-ma/katalogu/token.json"))
+
+    def test_custom_cdp_url_is_used(self):
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = (
+            b'[{"type":"page","url":"https://go.decathlon.pl/",'
+            b'"webSocketDebuggerUrl":"ws://marek"}]')
+        with mock.patch.object(rt.urllib.request, "urlopen", return_value=response) as open_url:
+            self.assertEqual(rt.cdp_page_target(cdp_url="http://127.0.0.1:9999"), "ws://marek")
+        self.assertEqual(open_url.call_args.args[0], "http://127.0.0.1:9999/json/list")
+
+    def test_custom_start_url_reaches_navigation(self):
+        cdp = FakeCdp(jwty=[None, jwt_wazny()])
+        with mock.patch.object(rt, "cdp_page_target", return_value="ws://x") as target, \
+                mock.patch.object(rt, "Cdp", return_value=cdp), \
+                mock.patch.object(rt.time, "sleep"):
+            jwt, _exp, error = rt.read_jwt_once(
+                cdp_url="http://127.0.0.1:9223", start_url="https://go.decathlon.pl/test")
+        self.assertIsNone(error)
+        self.assertIsNotNone(jwt)
+        target.assert_called_once_with(cdp_url="http://127.0.0.1:9223")
+        self.assertIn(("Page.navigate", {"url": "https://go.decathlon.pl/test"}), cdp.wykonane)
+
+    def test_observer_mode_never_navigates(self):
+        cdp = FakeCdp(jwty=[None])
+        with mock.patch.object(rt, "cdp_page_target", return_value="ws://x"), \
+                mock.patch.object(rt, "Cdp", return_value=cdp):
+            _jwt, _exp, error = rt.read_jwt_once(navigate=False)
+        self.assertIn("brak", error)
+        self.assertFalse(any(isinstance(x, tuple) and x[0] == "Page.navigate"
+                             for x in cdp.wykonane))

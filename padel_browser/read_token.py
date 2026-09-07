@@ -83,6 +83,15 @@ def zapomnij_nieudane_logowania():
     _auto_login_tries = 0
 
 
+def stan_cichego_logowania():
+    return _auto_login_tries, _auto_login_last
+
+
+def przywroc_stan_cichego_logowania(stan):
+    global _auto_login_tries, _auto_login_last
+    _auto_login_tries, _auto_login_last = stan
+
+
 def try_silent_login(cdp):
     """Klika „ZALOGUJ SIĘ” i czeka na powrót. Zwraca (jwt, exp) albo (None, 0).
 
@@ -154,14 +163,16 @@ def write_token_file(jwt, exp, path=None):
     """Zapisuje świeży token atomowo (zapis do .tmp + rename), by monitor nie czytał połówki."""
     path = TOKEN_FILE if path is None else path
     if not path:
-        return
+        return False
     tmp = path + ".tmp"
     try:
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump({"jwt": jwt, "exp": exp}, f)
         os.replace(tmp, path)
+        return True
     except OSError as e:
         log(f"! Nie zapisałem pliku tokenu {path}: {e!r}")
+        return False
 
 
 def jwt_expiry(token):

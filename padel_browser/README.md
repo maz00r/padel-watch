@@ -63,8 +63,9 @@ przechodzisz normalne logowanie, łącznie z kodem z maila.
 | `auto_register_hedge` | ile **równoległych zapisów w najcenniejszy termin** (1 = wyłączone, maks. 3) | `2` |
 | `auto_register_salvo` | ile prób rejestracji wysyłać **równolegle** (0–6); `0`/`1` = po kolei, jak dawniej | `6` |
 | `auto_register_stagger` | odstęp w ms między strzałami salwy (0–100); `0` = wszystkie naraz | `8` |
-| `sonda_konta` | id konta do sprawdzenia kontekstów (puste = wyłączone) | `marek` |
-| `sonda_tryb` | `zaloguj` albo `sprawdz` — patrz sekcja o wielu kontach | `zaloguj` |
+| `accounts` | lista kont; pierwsze jest główne, kolejne mają osobne profile i tokeny | `[]` |
+| `sonda_konta` | diagnostyczna sonda starego eksperymentu z kontekstami (zwykle puste) | `` |
+| `sonda_tryb` | tryb sondy diagnostycznej: `zaloguj` albo `sprawdz` | `zaloguj` |
 | `test_token` | jednorazowy test poświadczeń przy starcie (nic nie rezerwuje) | `false` |
 | `clear_state` | jednorazowe czyszczenie stanu: `registered` lub `all`; puste = nic nie rób | `` |
 
@@ -265,32 +266,35 @@ gdy problem przetrwał karencję. W logu widać to jako:
 ~ Problem z tokenem (brak tokenu…) — daję cichemu logowaniu 120s, zanim powiadomię.
 ```
 
-## Wiele kont — sprawdzenie przed wdrożeniem
+## Wiele kont — logowanie i tokeny
 
-Dziesięć kont ma zmieścić się w **jednej** przeglądarce, w izolowanych kontekstach
-(osobne ciasteczka każdy). Konteksty nie przeżywają restartu, więc sesje zapisujemy sami
-— i to jedyne założenie, którego nie da się sprawdzić inaczej niż na żywym Decathlonie.
+Konta dodatkowe korzystają z osobnych, trwałych profili Chromium. W danej chwili działa
+tylko jeden dodatkowy profil, więc pamięć nie rośnie wraz z liczbą kont. Przykład:
 
-Nie musisz wchodzić do kontenera. Wszystko robi się w konfiguracji dodatku.
-
-**Krok 1 — zaloguj konto.** Ustaw `sonda_konta: marek`, `sonda_tryb: zaloguj`, zapisz
-i zrestartuj dodatek. W logu pojawi się zaproszenie; wejdź w zakładkę **Przeglądarka**
-i zaloguj to konto normalnie, w prawdziwym formularzu Decathlona. Dodatek sam wykryje
-token i zapisze ciasteczka do `/data/cookies-marek.json`.
-
-**Krok 2 — sprawdź trwałość.** Zmień `sonda_tryb: sprawdz` i zrestartuj ponownie:
-
-```
-✓ SESJA ODTWORZONA z 14 ciasteczek — konteksty wystarczą, profile na dysku niepotrzebne.
-```
-
-albo
-
-```
-✗ Wstrzyknąłem 14 ciasteczek, ale token się nie pojawił — wracamy do osobnych profili.
+```yaml
+accounts:
+  - id: glowne
+    name: Patryk Mazurowski
+    main: true
+  - id: ania
+    name: Ania Nowak
+    filters: "mon-fri:17:00-22:00"
+    max_per_run: 1
+  - id: marek
+    name: Marek Nowak
 ```
 
-**Krok 3.** Wyczyść `sonda_konta`, żeby sonda nie odpalała się przy każdym starcie.
+Pierwszy wpis jest kontem głównym i zachowuje istniejącą sesję z zakładki
+**Główne**. Po restarcie dodatku wejdź w **Konta** i użyj **Zaloguj** przy każdym
+nowym koncie. Otworzy się jego własny ekran; po poprawnym logowaniu token zostanie
+wykryty, zapisany i przeglądarka zamknie się sama. Sesja pozostaje w `/data`.
+
+Zbieracz później wraca tylko do profili z wygasłym tokenem. Nie wpisuje ani nie zapisuje
+haseł. Na 90 sekund przed publikacją nie uruchamia Chromium, żeby nie odbierać zasobów
+monitorowi.
+
+W wersji 0.27 mechanizm utrzymuje tokeny wielu kont, ale rejestracja nadal strzela kontem
+głównym. Równoległe polowanie per konto jest kolejnym etapem wdrożenia.
 
 ## Poziomy logowania
 
@@ -355,7 +359,7 @@ Ikona **Padel** w menu bocznym otwiera panel z dwiema zakładkami:
 
 - **Rezerwacje** — wszystkie Twoje rezerwacje z konta Decathlon GO (nie tylko te
   zrobione przez dodatek): data, godziny, kort, adres, uczestnicy i stan.
-- **Przeglądarka** — Chromium z sesją, w którym się logujesz (jak dotąd).
+- **Główne** — Chromium z sesją konta głównego, w którym się logujesz (jak dotąd).
 
 Każda nadchodząca rezerwacja ma dwa przyciski:
 
@@ -396,7 +400,7 @@ bo aplikacje kalendarza reagują na niego pewniej niż na sam status.
 > (opis niżej).
 
 Gdy panel pokazuje `brak tokenu — zaloguj się w panelu Padel`, przejdź na zakładkę
-**Przeglądarka** i zaloguj się — lista pojawi się od razu po odświeżeniu.
+**Główne** i zaloguj się — lista pojawi się od razu po odświeżeniu.
 
 ### Zryw (`burst`) — polowanie na publikację grafiku
 

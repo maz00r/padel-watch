@@ -5162,12 +5162,64 @@ class AccountsFromConfigTest(unittest.TestCase):
         konta = cp.konta_z_konfiguracji({"accounts": '[{"id":"ania","name":"Ania"}]'})
         self.assertEqual([k["id"] for k in konta], ["ania"])
 
+    def test_accounts_are_read_from_the_environment(self):
+        with mock.patch.dict(os.environ, {"ACCOUNTS_JSON": '[{"id":"glowne"},{"id":"ania"}]'}):
+            konta = cp.konta_z_konfiguracji({})
+        self.assertEqual([k["id"] for k in konta], ["glowne", "ania"])
+
+    def test_extra_account_never_falls_back_to_the_main_token(self):
+        konto = {"id": "ania", "main": False, "token_file": "/data/token-ania.json"}
+        with mock.patch.object(cp, "token_from_file", return_value="jwt-ani") as token_file, \
+                mock.patch.dict(os.environ, {"DECATHLON_TOKEN": "jwt-glownego"}):
+            token = cp.resolve_decathlon_token({}, {"decathlon_jwt": "jwt-stanu"}, konto)
+        self.assertEqual(token, "jwt-ani")
+        token_file.assert_called_once_with("/data/token-ania.json")
+
+    def test_unsafe_account_id_is_refused(self):
+        with mock.patch("sys.stdout", io.StringIO()) as buf:
+            konta = cp.konta_z_konfiguracji({"accounts": [
+                {"id": "glowne", "main": True}, {"id": "../obce", "name": "Obce"}]})
+        self.assertEqual([k["id"] for k in konta], ["glowne"])
+        self.assertIn("niedozwolone id", buf.getvalue())
+
+    def test_only_the_first_account_uses_the_main_profile(self):
+        with mock.patch("sys.stdout", io.StringIO()):
+            konta = cp.konta_z_konfiguracji({"accounts": [
+                {"id": "glowne", "main": True}, {"id": "ania", "main": True}]})
+        self.assertTrue(konta[0]["main"])
+        self.assertFalse(konta[1]["main"])
+        self.assertTrue(konta[1]["token_file"].endswith("token-ania.json"))
+
+    def test_account_count_is_capped_at_ten(self):
+        wpisy = [{"id": f"konto-{i}"} for i in range(12)]
+        with mock.patch("sys.stdout", io.StringIO()) as buf:
+            konta = cp.konta_z_konfiguracji({"accounts": wpisy})
+        self.assertEqual(len(konta), cp.ACCOUNTS_TOTAL_MAX)
+        self.assertIn("pierwszych 10", buf.getvalue())
+
+    def test_extra_account_never_inherits_main_refresh_credentials(self):
+        konto = {"id": "ania", "name": "Ania", "main": False,
+                 "token_file": "/data/token-ania.json"}
+        with mock.patch.object(cp, "resolve_decathlon_token", return_value="jwt-ani"), \
+                mock.patch.dict(os.environ, {"DECATHLON_COOKIE": "cookie-glownego"}):
+            cfg = cp.build_reg_cfg({}, {"decathlon_rt": "rt-glownego"}, konto)
+        self.assertEqual(cfg["refresh_cookie"], "")
+        self.assertEqual(cfg["refresh_token"], "")
+
     def test_broken_json_does_not_stop_the_hunt(self):
         with mock.patch("sys.stdout", io.StringIO()) as buf:
             konta = cp.konta_z_konfiguracji({"accounts": "{to nie jest JSON"})
         self.assertEqual(len(konta), 1)
         self.assertEqual(konta[0]["id"], cp.KONTO_GLOWNE)
         self.assertIn("nie jest poprawnym JSON", buf.getvalue())
+
+    def test_json_object_does_not_recurse_forever(self):
+        with mock.patch.dict(os.environ, {"ACCOUNTS_JSON": '{"id":"ania"}'}), \
+                mock.patch("sys.stdout", io.StringIO()) as buf:
+            konta = cp.konta_z_konfiguracji({})
+        self.assertEqual(len(konta), 1)
+        self.assertEqual(konta[0]["id"], cp.KONTO_GLOWNE)
+        self.assertIn("musi być listą", buf.getvalue())
 
     def test_reg_cfg_carries_the_account_identity(self):
         konto = {"id": "marek", "name": "Marek Nowak", "age": None,

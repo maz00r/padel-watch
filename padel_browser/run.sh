@@ -64,6 +64,10 @@ done
 export STATE_DIR="/data"                       # stan (state.json) trwały między restartami
 export CONFIG_PATH="/data/__none__.json"       # brak pliku -> check_padel bierze wszystko z ENV
 export DECATHLON_TOKEN_FILE="/data/token.json" # wymiana tokenu: przeglądarka -> monitor
+export EXTRA_DISPLAY=":2"
+export EXTRA_CDP_PORT=9223
+export EXTRA_WEBSOCKIFY_PORT=6081
+EXTRA_ACCOUNTS="$(python3 -c 'import json,os; a=json.loads(os.environ.get("ACCOUNTS_JSON") or "[]"); print(max(0,len(a)-1))' 2>/dev/null || printf '0')"
 case "$LOG_LEVEL" in "" | None) LOG_LEVEL=info ;; esac
 export LOG_LEVEL
 case "$CHECK_INTERVAL" in "" | None) CHECK_INTERVAL=60 ;; esac
@@ -106,8 +110,23 @@ sleep 1
 websockify 127.0.0.1:6080 localhost:5900 &
 sleep 1
 
-# 5) Panel przez Ingress: zakładka „Rezerwacje" (lista, anulowanie, kalendarz .ics)
-#    i „Przeglądarka" (noVNC). Autorestart — panel to jedyne okno na dodatek.
+# 4b) Drugi ekran jest wspólnym oknem dla kont dodatkowych. Zbieracz uruchamia na nim
+#     tylko jeden trwały profil naraz; osobny most pozwala zalogować go w zakładce Konta.
+if [ "$EXTRA_ACCOUNTS" -gt 0 ]; then
+  Xvfb "$EXTRA_DISPLAY" -screen 0 1280x900x24 -nolisten tcp &
+  sleep 2
+  x11vnc -display "$EXTRA_DISPLAY" -forever -shared -nopw -quiet -localhost -rfbport 5901 &
+  sleep 1
+  websockify 127.0.0.1:"$EXTRA_WEBSOCKIFY_PORT" localhost:5901 &
+  sleep 1
+  ( while true; do
+      python3 /app/zbieracz.py || echo "[zbieracz] proces zakończony — restart za 5s"
+      sleep 5
+    done ) &
+fi
+
+# 5) Panel przez Ingress: rezerwacje, konta i oba ekrany noVNC.
+#    Autorestart — panel to jedyne okno na dodatek.
 ( while true; do
     python3 /app/panel.py || echo "[panel] proces zakończony — restart za 5s"
     sleep 5

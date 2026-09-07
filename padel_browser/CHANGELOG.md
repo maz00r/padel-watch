@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.27.0 — trwałe profile i logowanie kont dodatkowych
+
+- Opcja `accounts` przyjmuje do 10 kont. Pierwsze konto zachowuje dotychczasowy profil
+  `/data/chrome-profile` i plik `/data/token.json`; każde następne dostaje własny profil
+  i plik `token-<id>.json`.
+- `zbieracz.py` jest pełnym procesem: uruchamia na ekranie `:2` tylko jeden profil naraz,
+  odwiedza wyłącznie konta z wygasłym JWT i kończy całe drzewo Chromium po odczycie.
+- Nowa zakładka **Konta** pokazuje ważność tokenów. Przycisk **Zaloguj** otwiera właściwy
+  profil przez osobny tunel noVNC i daje 10 minut na ręczne logowanie.
+- Token konta dodatkowego nigdy nie spada awaryjnie na token konta głównego. Id kont są
+  walidowane przed użyciem w nazwach plików, a `users.getMe` pilnuje, czy profil nadal
+  należy do tej samej osoby.
+- Zbieracz milknie 90 sekund przed publikacją, wznawia przerwane logowanie po restarcie
+  i nie uznaje wizyty za udaną, jeśli pliku tokenu nie udało się zapisać.
+
+Ta wersja dostarcza i utrzymuje tokeny wielu kont. Równoległe strzały rejestracyjne per
+konto są następnym etapem; samo polowanie nadal używa dotychczasowego konta głównego.
+
 ## 0.26.0 — rdzeń zbieracza tokenów
 
 Zasoby zmierzone u użytkownika: **13 784 MB wolnego na `/data`, 3 730 MB pamięci** —

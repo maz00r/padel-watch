@@ -1705,10 +1705,12 @@ def credentials_cfg(konto=None):
     """
     cfg = load_config(quiet=True)  # panel woła to przy każdym zapytaniu — bez gadania do logu
     state_doc = load_state_doc()
+    dodatkowe = bool(konto and not konto.get("main"))
     return {
         "token": resolve_decathlon_token(cfg, state_doc, konto),
-        "refresh_cookie": os.environ.get("DECATHLON_COOKIE") or cfg.get("decathlon_cookie") or "",
-        "refresh_token": (state_doc or {}).get("decathlon_rt") or "",
+        "refresh_cookie": "" if dodatkowe else (
+            os.environ.get("DECATHLON_COOKIE") or cfg.get("decathlon_cookie") or ""),
+        "refresh_token": "" if dodatkowe else (state_doc or {}).get("decathlon_rt") or "",
         "browser_mode": bool(TOKEN_FILE),
         "token_file": (konto or {}).get("token_file") or TOKEN_FILE,
     }
@@ -2864,6 +2866,9 @@ def konta_z_konfiguracji(cfg):
         except ValueError:
             log("! Opcja accounts nie jest poprawnym JSON-em — poluję jednym kontem.")
             surowe = []
+    if not isinstance(surowe, list):
+        log("! Opcja accounts musi być listą — poluję jednym kontem.")
+        surowe = []
     if not surowe:
         return [{
             "id": KONTO_GLOWNE,
@@ -2874,6 +2879,9 @@ def konta_z_konfiguracji(cfg):
             "max_per_run": None,                # globalne
             "main": True,
         }]
+    if len(surowe) > ACCOUNTS_TOTAL_MAX:
+        log(f"! Skonfigurowano {len(surowe)} kont — używam pierwszych {ACCOUNTS_TOTAL_MAX}.")
+        surowe = surowe[:ACCOUNTS_TOTAL_MAX]
     konta, widziane = [], set()
     for i, wpis in enumerate(surowe):
         if not isinstance(wpis, dict):
@@ -2888,7 +2896,9 @@ def konta_z_konfiguracji(cfg):
             log(f"! Konto o powtórzonym id „{kid}” — pomijam drugie wystąpienie.")
             continue
         widziane.add(kid)
-        glowne = bool(wpis.get("main")) or (not konta and i == 0)
+        glowne = not konta
+        if wpis.get("main") and not glowne:
+            log(f"! Konto „{kid}” nie może być drugim kontem głównym — traktuję je jako dodatkowe.")
         konta.append({
             "id": kid,
             "name": (wpis.get("name") or "").strip(),
@@ -2915,13 +2925,15 @@ def build_reg_cfg(cfg, state_doc, konto=None):
     Wspólne dla lokalnego biegu i dla żądania do Irlandii — gdyby liczyły się osobno,
     zdalna strona mogłaby np. dostać inny limit niż lokalna i zarezerwować za dużo.
     """
+    dodatkowe = bool(konto and not konto.get("main"))
     return {
         "enabled": boolish(os.environ.get("AUTO_REGISTER") or cfg.get("auto_register")),
         "speculative": boolish(os.environ.get("AUTO_REGISTER_DRY_RUN") or cfg.get("auto_register_dry_run")),
         "token": resolve_decathlon_token(cfg, state_doc, konto),
-        "refresh_cookie": os.environ.get("DECATHLON_COOKIE") or cfg.get("decathlon_cookie") or "",
+        "refresh_cookie": "" if dodatkowe else (
+            os.environ.get("DECATHLON_COOKIE") or cfg.get("decathlon_cookie") or ""),
         # rt bywa zwracany przez serwer przy odświeżaniu i zapisywany w stanie (rotacja).
-        "refresh_token": (state_doc or {}).get("decathlon_rt") or "",
+        "refresh_token": "" if dodatkowe else (state_doc or {}).get("decathlon_rt") or "",
         # Scalony dodatek: token odnawia przeglądarka, więc monitor NIE próbuje /auth/refresh.
         "browser_mode": bool(TOKEN_FILE),
         # Konto niesie własne imię uczestnika, własny plik tokenu i może mieć własny
