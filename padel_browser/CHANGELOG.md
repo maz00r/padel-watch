@@ -1,5 +1,54 @@
 # Changelog
 
+## 0.25.1 — izolowane konteksty przeglądarki (sonda przed budową)
+
+Dziesięć kont miało wymagać dziesięciu przeglądarek (~3–4,5 GB RAM) albo dziesięciu
+profili na dysku (~3 GB na `/data`). Chrome potrafi jednak trzymać w **jednym procesie**
+wiele izolowanych kontekstów — osobne ciasteczka i `localStorage` każdy.
+
+| | dziesięć przeglądarek | sekwencyjne profile | **konteksty** |
+|---|---|---|---|
+| RAM szczytowo | 3–4,5 GB | ~600 MB | **~400 MB** |
+| czas na konto | — | ~20 s (start przeglądarki) | **~3–5 s (nowa karta)** |
+| miejsce na `/data` | ~3 GB | ~3 GB | **kilka MB** |
+
+Zbiórka dziesięciu tokenów skraca się z ~200 s do ~40 s — a to decyduje, czy zdążymy
+odświeżyć wszystko tuż przed publikacją.
+
+Nowy `konteksty.py`: `Target.createBrowserContext` → `Target.createTarget` → odczyt →
+`Target.disposeBrowserContext`. Klient CDP z `read_token.py` jest generyczny, więc
+obsługuje polecenia poziomu przeglądarki bez przepisywania.
+
+### Czego to NIE robi
+
+Nie wpisuje loginu ani hasła. Sesja bierze się z ciasteczek zapisanych po **jednorazowym,
+ręcznym** zalogowaniu w panelu — dokładnie tak, jak działa dziś konto główne.
+
+### Sprzątanie kontekstów jest obowiązkowe
+
+Porzucony kontekst zostaje w pamięci Chromium do końca życia procesu. Przy dziesięciu
+kontach odświeżanych co kilka minut wyciek urósłby w ciągu doby do setek kontekstów
+i zabił przeglądarkę **akurat w sekundzie publikacji**. Stąd menedżer kontekstu
+sprzątający również po wyjątku, z osobnymi testami na oba przypadki.
+
+### Sonda — jedyne nieudowodnione założenie
+
+Konteksty CDP żyją w pamięci i nie przeżywają restartu, więc trwałość robimy sami:
+eksport ciasteczek do pliku po zalogowaniu, wstrzyknięcie po restarcie. **Czy sesja OAuth
+Decathlona odtwarza się z samych ciasteczek — tego nie wiemy.** Dostawca tożsamości może
+trzymać coś w `localStorage` na swojej domenie.
+
+Dlatego zamiast budować całość na wiarę, `konteksty.py` ma dwa tryby do sprawdzenia tego
+w pół godziny:
+
+```bash
+python3 /app/konteksty.py --zaloguj marek   # otwiera kontekst, logujesz się w noVNC
+python3 /app/konteksty.py --sprawdz marek   # czy sesja wraca z samych ciasteczek
+```
+
+Jeśli sonda odpowie „nie", wracamy do osobnych profili na dysku — wolniej i grubiej,
+ale to sprawdzony mechanizm konta głównego.
+
 ## 0.25.0 — fundament wielokontowy (bez zmiany zachowania)
 
 Pierwsza faza obsługi wielu kont Decathlon GO. **Dodatek nadal poluje jednym kontem

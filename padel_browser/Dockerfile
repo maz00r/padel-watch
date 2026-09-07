@@ -16,6 +16,8 @@ RUN apk add --no-cache \
     && pip3 install --no-cache-dir --break-system-packages websocket-client
 
 COPY read_token.py /app/read_token.py
+# Izolowane konteksty przeglądarki — dziesięć kont w jednym Chromium.
+COPY konteksty.py /app/konteksty.py
 COPY check_padel.py /app/check_padel.py
 # Panel Ingressu: strona z zakładkami + API rezerwacji + tunel websocketu do noVNC.
 COPY panel.py /app/panel.py
