@@ -73,12 +73,13 @@ class CiszaPrzedPublikacjaTest(unittest.TestCase):
 
     STATUS = {"marek": {"exp": TERAZ - 900, "odwiedzone": 0}}
 
-    def test_no_browser_launch_right_before_publication(self):
+    def test_only_expired_sessions_are_recovered_during_the_hunt(self):
         for ile_przed in (10, 60, 89):
-            self.assertIsNone(
+            self.assertIsNotNone(
                 zb.nastepne_konto(self.STATUS, konta("marek"), TERAZ,
-                                  publikacja=TERAZ + ile_przed),
-                f"uruchomiono przeglądarkę {ile_przed} s przed publikacją")
+                                  publikacja=TERAZ + ile_przed))
+            self.assertIsNone(zb.nastepne_konto({}, konta("marek"), TERAZ,
+                                               publikacja=TERAZ + ile_przed))
 
     def test_earlier_than_the_stop_is_fine(self):
         self.assertIsNotNone(zb.nastepne_konto(self.STATUS, konta("marek"), TERAZ,

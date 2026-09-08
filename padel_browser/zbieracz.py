@@ -79,8 +79,7 @@ def nastepne_konto(status, konta, teraz, publikacja=None,
 
     Konta z żywym tokenem pomijamy świadomie: strona i tak oddałaby ten sam token.
     """
-    if cisza_przed_publikacja(teraz, publikacja, stop_przed):
-        return None                      # cisza przed publikacją, procesor dla monitora
+    quiet = cisza_przed_publikacja(teraz, publikacja, stop_przed)
     kandydaci = []
     for konto in konta:
         if konto.get("main"):
@@ -89,6 +88,10 @@ def nastepne_konto(status, konta, teraz, publikacja=None,
         if teraz - (wpis.get("odwiedzone") or 0) < cooldown:
             continue
         exp = wpis.get("exp")
+        # W oknie polowania dopuszczamy tylko ratunek wygaslej, znanej sesji.
+        # Nowe profile i reczne logowanie czekaja do konca zrywu.
+        if quiet and (exp is None or exp > teraz):
+            continue
         if exp is None:
             kandydaci.append((0, float("-inf"), konto))   # nic nie wiemy — najpilniejsze
         elif exp <= teraz:
@@ -100,7 +103,11 @@ def nastepne_konto(status, konta, teraz, publikacja=None,
 
 
 def cisza_przed_publikacja(teraz, publikacja, stop_przed=STOP_PRZED_PUBLIKACJA):
-    return publikacja is not None and 0 <= publikacja - teraz <= stop_przed
+    try:
+        after = max(1, min(int(os.environ.get("BURST_SECONDS") or 75), 120))
+    except ValueError:
+        after = 75
+    return publikacja is not None and -after < publikacja - teraz <= stop_przed
 
 
 def zapisz_status(sciezka, status, zapis=None):

@@ -1200,6 +1200,8 @@ class FakeConnection:
     def __init__(self, host, timeout=None):
         FakeConnection.created += 1
         self.host = host
+        self.sock = None
+        self.timeout = timeout
         self.sent = []
         self.closed = False
 
@@ -5534,11 +5536,16 @@ class AccountReadinessBeforeBurstTest(unittest.TestCase):
             json.dump(status, f)
         with mock.patch.object(cp, "konta_z_konfiguracji", return_value=konta), \
                 mock.patch.object(zbieracz, "STATUS_PATH", plik), \
+                mock.patch.object(cp.time, "time", return_value=self.publikacja.timestamp()), \
+                mock.patch.object(cp, "token_from_file", side_effect=lambda path: jwt_with_exp(
+                    self.publikacja.timestamp() + 600 if path == "glowne" else
+                    (status.get(path) or {}).get("exp", 0))), \
                 mock.patch("sys.stdout", io.StringIO()):
             return cp.gotowosc_kont(self.publikacja)
 
     def konta(self, *ids):
-        return [{"id": "glowne", "main": True}] + [{"id": i, "main": False} for i in ids]
+        return [{"id": "glowne", "main": True, "token_file": "glowne"}] + [
+            {"id": i, "main": False, "token_file": i} for i in ids]
 
     def test_a_single_account_says_nothing(self):
         """Przy jednym koncie ta liczba jest szumem — dodatek ma milczeć."""
@@ -5556,7 +5563,7 @@ class AccountReadinessBeforeBurstTest(unittest.TestCase):
         opis = self.gotowosc(self.konta("a", "b"),
                              {"a": {"exp": zywy}, "b": {"exp": self.publikacja.timestamp() - 10}})
         self.assertIn("2/3", opis)
-        self.assertIn("zakładce Konta", opis)
+        self.assertIn("Sprawdź odnawianie", opis)
 
     def test_a_broken_status_file_does_not_break_the_session_check(self):
         """Diagnostyka nie może wywrócić kontroli sesji — ona jest ważniejsza."""

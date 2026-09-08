@@ -88,7 +88,7 @@ def _odpowiedz(dane, kod=200):
     }
 
 
-def poluj(wejscie):
+def poluj(wejscie, budget_seconds=None):
     """Sprint + salwa. Zwraca słownik wyniku; nie podnosi wyjątków sieciowych."""
     started = time.monotonic()
     # Przydział pamięci = przydział CPU. Raportujemy go ZAWSZE, bo bez tej liczby
@@ -108,6 +108,8 @@ def poluj(wejscie):
         filtry = cp.parse_filters_env(surowe_filtry)
 
     sekundy = max(1, min(float(wejscie.get("sprint_seconds") or 50), MAX_SPRINT_SEKUND))
+    hard_end = started + min(sekundy + 5, budget_seconds if budget_seconds is not None else sekundy + 5)
+    hunt_end = min(started + sekundy, hard_end - 3)
     watki = int(wejscie.get("sprint_threads") or 3)
     baseline = set(wejscie.get("baseline_ids") or [])
 
@@ -127,6 +129,8 @@ def poluj(wejscie):
             # Czekania na świeższy token z pliku nie ma się co bać: bez TOKEN_FILE
             # `wait_for_fresher_token` wraca natychmiast.
             "browser_mode": True,
+            "hunt_deadline": hunt_end,
+            "request_deadline": hard_end - 1,
             "refresh_cookie": "", "refresh_token": "",
             "konto": raw.get("id") or cp.KONTO_GLOWNE,
             "account_name": (raw.get("account_name") or raw.get("name")
@@ -180,7 +184,7 @@ def poluj(wejscie):
     # Teraz jedno wywołanie obserwuje do końca okna i rejestruje każdą partię, jaka
     # się pojawi. Powrót do domu następuje raz, po wszystkim.
     szukanie = time.monotonic()
-    koniec = szukanie + sekundy
+    koniec = hunt_end
     widziane = set(baseline)
     wyniki, zapisane, uzyte = {}, set(), {}
     lid, doc, partie = None, None, 0
@@ -248,11 +252,17 @@ def poluj(wejscie):
     sprint_ms = int((time.monotonic() - szukanie) * 1000)
     if doc is None:
         return {"ok": True, "doc": None, "listing_id": None,
+                "protocol_version": 2, "multi_account": True,
+                "seen_ids": sorted(widziane), "pending_ids": [],
                 "timings": {"sprint_ms": sprint_ms, "batches": 0,
                             "total_ms": int((time.monotonic() - started) * 1000)}}
 
     return {
         "ok": True,
+        "protocol_version": 2,
+        "multi_account": True,
+        "seen_ids": sorted(widziane),
+        "pending_ids": sorted({sid for c in reg_cfgs for sid in c.get("pending_ids", [])}),
         "listing_id": lid,
         "doc": doc,
         "results": {k: [bool(v[0]), v[1]] for k, v in wyniki.items()},
@@ -294,7 +304,8 @@ def lambda_handler(event, context):   # noqa: ARG001 - kontrakt AWS
         # Bez tego pierwsze wywołanie dnia płaci zimny start (~165 ms na init
         # plus ~75 ms na import silnika) dokładnie w chwili, gdy liczy się najbardziej.
         print("rozgrzewka")
-        return _odpowiedz({"ok": True, "warm": True})
+        return _odpowiedz({"ok": True, "warm": True, "protocol_version": 2,
+                          "multi_account": True})
     if not wejscie.get("listing_url"):
         return _odpowiedz({"ok": False, "blad": "brak listing_url"}, 400)
 
@@ -307,7 +318,9 @@ def lambda_handler(event, context):   # noqa: ARG001 - kontrakt AWS
     bufor = io.StringIO()
     try:
         with contextlib.redirect_stdout(bufor):
-            wynik = poluj(wejscie)
+            remaining = (context.get_remaining_time_in_millis() / 1000 - 2
+                         if context is not None else None)
+            wynik = poluj(wejscie, budget_seconds=remaining)
     except Exception as e:  # noqa: BLE001 - błąd tutaj nie może zostać bez odpowiedzi
         print(bufor.getvalue())
         print(f"BŁĄD polowania: {e!r}")

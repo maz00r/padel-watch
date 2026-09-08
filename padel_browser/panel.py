@@ -12,6 +12,7 @@ Cała logika rozmowy z Decathlon GO siedzi w check_padel.py — tutaj tylko HTTP
 """
 
 import json
+import concurrent.futures
 import os
 import socket
 import threading
@@ -70,11 +71,22 @@ def reservations(force=False):
         fresh = _cache["at"] > time.time() - ttl
         if not force and fresh and (_cache["items"] is not None or _cache["error"]):
             return _cache["items"], _cache["error"]
-    cfg = check_padel.credentials_cfg()
-    try:
-        items, error = check_padel.reservations_view(cfg, _tz())
-    except Exception as e:  # noqa: BLE001 - panel ma pokazać błąd, nie paść
-        items, error = None, f"nieoczekiwany błąd: {e!r}"
+    accounts = check_padel.konta_z_konfiguracji(check_padel.load_config(quiet=True))
+    def fetch(account):
+        cfg = (check_padel.credentials_cfg(account) if len(accounts) > 1
+               else check_padel.credentials_cfg())
+        try:
+            rows, error = check_padel.reservations_view(cfg, _tz())
+        except Exception as e:  # pojedyncze konto nie ukrywa rezerwacji pozostalych
+            rows, error = [], f"nieoczekiwany błąd: {e!r}"
+        label = account.get("name") or account["id"]
+        return [dict(row, account_id=account["id"], account_name=label) for row in rows or []], (
+            f"{label}: {error}" if error else "")
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(4, len(accounts))) as pool:
+        parts = list(pool.map(fetch, accounts))
+    items = [row for rows, _ in parts for row in rows]
+    items.sort(key=lambda row: row.get("start_utc") or datetime.max.replace(tzinfo=timezone.utc))
+    error = "; ".join(error for _, error in parts if error) or None
     if error:
         # Bez tego czerwony komunikat w panelu nie zostawiał ŻADNEGO śladu w Dzienniku
         # i nie dało się dojść, co właściwie się stało.
@@ -98,6 +110,7 @@ def public_reservation(res):
     out = {k: res.get(k) for k in (
         "id", "state", "cancelled", "past", "when", "date_label", "day", "hours",
         "title", "slot_name", "address", "participants", "minutes", "book_url",
+        "account_id", "account_name",
     )}
     out["start"] = res["start_utc"].isoformat() if res.get("start_utc") else None
     return out
@@ -233,11 +246,12 @@ class Handler(BaseHTTPRequestHandler):
     def api_reservations(self):
         force = "refresh=1" in (urlparse(self.path).query or "")
         items, error = reservations(force=force)
-        if error:
+        if error and not items:
             return self._json({"ok": False, "error": error})
         self._json({
             "ok": True,
             "items": [public_reservation(r) for r in items],
+            "warning": error,
             "generated": datetime.now(_tz()).strftime("%H:%M:%S"),
         })
 
@@ -297,11 +311,18 @@ class Handler(BaseHTTPRequestHandler):
         # za tokenem Ingressu, którego obcy nie zna.
         if "application/json" not in (self.headers.get("Content-Type") or ""):
             return self._json({"ok": False, "message": "wymagany Content-Type: application/json"}, 415)
-        tx_id = str(self._body().get("id") or "").strip()
+        body = self._body()
+        tx_id = str(body.get("id") or "").strip()
         if not tx_id:
             return self._json({"ok": False, "message": "brak identyfikatora rezerwacji"}, 400)
         log(f"żądanie anulowania rezerwacji {tx_id}")
-        ok, message = check_padel.cancel_reservation(tx_id, check_padel.credentials_cfg())
+        accounts = check_padel.konta_z_konfiguracji(check_padel.load_config(quiet=True))
+        kid = str(body.get("account_id") or "")
+        account = next((a for a in accounts if a["id"] == kid), None)
+        if len(accounts) > 1 and account is None:
+            return self._json({"ok": False, "message": "wybierz konto właściciela rezerwacji"}, 400)
+        cfg = check_padel.credentials_cfg(account) if account else check_padel.credentials_cfg()
+        ok, message = check_padel.cancel_reservation(tx_id, cfg)
         if not ok:
             log(f"! anulowanie nieudane: {message}")
         if ok:

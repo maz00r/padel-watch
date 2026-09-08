@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.28.1 — naprawa audytu: kolejka celów na bieżąco, wspólny budżet czasu, odnowienie tokenu w trakcie sprintu
+
+Audyt `AUDYT_PADEL.md` (kod `7a19d61`, 0.28.0) wskazał pięć problemów klasy P1/P2
+w wielokontowej rejestracji. Ta wersja je zamyka.
+
+- **Kolejna godzina nie czeka na najwolniejsze konto.** `auto_register_accounts`
+  przetwarza wyniki strumieniowo: sukces jednego konta zwalnia kolejny cel od razu,
+  zamiast czekać na całą rundę. Ewidencja prób jest teraz per `(konto, termin)`,
+  więc porażka jednego konta nie blokuje próby innego z inną listą filtrów.
+- **Obserwator działa przez całe okno zapisów**, nie tylko do końca pierwszej partii —
+  nowe terminy trafiają do wspólnej kolejki i dostają strzał natychmiast, bez
+  zatrzymywania obserwacji na granicy partii.
+- **Wspólny budżet czasu** między klientem, Lambdą i połączeniami HTTP: `_http_budget`
+  niesie termin ważny dla wątku, `open_url` aktualizuje timeout istniejącego gniazda
+  (wcześniej ustawiał go tylko przy tworzeniu połączenia), a Lambda liczy swój koniec
+  z pozostałego czasu wykonania funkcji (`context.get_remaining_time_in_millis`).
+- **Token wygasający w trakcie sprintu jest odnawiany zdalnie**: `remote_with_fresh_tokens`
+  dzieli wywołanie na krótsze odcinki, gdy JWT który z kont skończy się przed końcem
+  okna, i wznawia zbieranie wyników z nowym tokenem — bez tego Lambda traciła konto
+  na resztę wywołania po jednej odmowie.
+- **Kontrola gotowości rozdziela stan bieżący od prognozy**: „Konta: N/M z żywym tokenem
+  teraz" osobno od „JWT ważny do końca polowania" — poprzednia wersja mieszała te dwie
+  liczby i przy 15-minutowym życiu tokenu prognoza wychodziła fałszywie niska.
+- **Zbieracz nie startuje Chromium w środku zrywu.** Cisza obejmuje teraz cały czas
+  trwania burstu, nie tylko chwilę startu; w oknie polowania ratujemy wyłącznie znaną,
+  wygasłą sesję — nowe profile i ręczne logowania czekają do końca zrywu.
+- **Panel pokazuje rezerwacje wszystkich kont** i anuluje poświadczeniami właściwego
+  właściciela (`account_id` w żądaniu), zamiast działać wyłącznie na koncie głównym.
+- Lambda zgłasza `protocol_version: 2`; stara paczka nadal odpowiada (zgodność wsteczna),
+  ale bez wielokontowego payloadu obsłuży tylko konto główne — dodatek to teraz loguje.
+
 ## 0.28.0 — wiele kont strzela równolegle
 
 - Wszystkie skonfigurowane konta biorą udział w rejestracji lokalnej i w zdalnym

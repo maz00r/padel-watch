@@ -222,7 +222,7 @@ function huntShots(shots) {
     // Kopie tego samego terminu mają identyczne „when" — bez znacznika wyglądałyby
     // na błąd w dzienniku zamiast na celowy strzał redundantny.
     var kopia = s.hedge ? " \u29c9" : "";
-    return esc(s.when) + kopia + " " + (s.ok ? "\u2713" : "\u2717") + " " + start
+    return (s.account_name ? esc(s.account_name) + ": " : "") + esc(s.when) + kopia + " " + (s.ok ? "\u2713" : "\u2717") + " " + start
       + s.ms + "\u2009ms" + wiek;
   }).join(" · ");
   return '<div class="sub">Strzały: ' + opis + "</div>";
@@ -317,6 +317,7 @@ function card(res) {
   var sub = [res.title, res.address].filter(Boolean).map(esc).join(" · ");
   var who = res.participants && res.participants.length
     ? '<div class="sub">Uczestnicy: ' + esc(res.participants.join(", ")) + "</div>" : "";
+  if (res.account_name) who += '<div class="sub">Konto: ' + esc(res.account_name) + '</div>';
   var actions = "";
   if (!res.cancelled && !res.past) {
     actions = '<div class="actions">'
@@ -412,7 +413,8 @@ function load(force) {
       }
       reservations = doc.items;
       var upcoming = reservations.filter(function (r) { return !r.past && !r.cancelled; }).length;
-      status("Nadchodzące rezerwacje: " + upcoming + " (stan na " + doc.generated + ")", false);
+      status("Nadchodzące rezerwacje: " + upcoming + " (stan na " + doc.generated + ")"
+        + (doc.warning ? ". Niepełna lista: " + doc.warning : ""), Boolean(doc.warning));
       document.getElementById("all-ics").classList.toggle("hide", upcoming === 0);
       render();
     })
@@ -428,7 +430,7 @@ function cancelRes(id) {
   fetch("api/cancel", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ id: id })
+    body: JSON.stringify({ id: id, account_id: res.account_id })
   })
     .then(function (r) { return r.json(); })
     .then(function (doc) {
