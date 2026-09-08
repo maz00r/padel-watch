@@ -5250,6 +5250,13 @@ class AccountsFromConfigTest(unittest.TestCase):
             konta = cp.konta_z_konfiguracji({})
         self.assertEqual([k["id"] for k in konta], ["glowne", "ania"])
 
+    def test_ordinary_monitoring_uses_only_the_main_account(self):
+        cfg = {"accounts": [{"id": "glowne"}, {"id": "ania"}]}
+        konta = cp.konta_z_konfiguracji(cfg)
+        self.assertEqual([k["id"] for k in cp.konta_do_biegu(konta)], ["glowne"])
+        self.assertEqual([k["id"] for k in cp.konta_do_biegu(konta, True)],
+                         ["glowne", "ania"])
+
     def test_extra_account_never_falls_back_to_the_main_token(self):
         konto = {"id": "ania", "main": False, "token_file": "/data/token-ania.json"}
         with mock.patch.object(cp, "token_from_file", return_value="jwt-ani") as token_file, \
@@ -5460,7 +5467,7 @@ class MultiAccountRunOnceTest(SalvoHelpers, unittest.TestCase):
                     mock.patch.object(cp, "notify_new", return_value=set()), \
                     mock.patch.object(cp, "record_hunt"), \
                     mock.patch("sys.stdout", io.StringIO()):
-                self.assertEqual(cp.run_once(), 0)
+                self.assertEqual(cp.run_once(use_extra_accounts=True), 0)
             with open(state_path, encoding="utf-8") as f:
                 state = json.load(f)
         self.assertEqual(set(state["registered_ids"]), {"s17", "s18"})

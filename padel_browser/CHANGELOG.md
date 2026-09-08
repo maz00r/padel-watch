@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.28.3 — konta dodatkowe tylko na codzienny rzut
+
+- Konto główne nadal monitoruje i rezerwuje przez całą dobę. Konta dodatkowe biorą
+  udział wyłącznie podczas skonfigurowanego sprintu/zrywu; zwykłe zwolnienie miejsca
+  kilka godzin później obsługuje tylko konto główne.
+- Zbieracz profili dodatkowych śpi poza oknem rzutu. Zaczyna przygotowanie 30 minut
+  przed godziną `burst`, odnawia wyłącznie wygasłe JWT i kończy automatyczną pracę
+  wraz ze zrywem. Zamiast 24 godzin działa około pół godziny dziennie.
+- Ręczne logowanie dodatkowego konta z panelu pozostaje dostępne poza samym krytycznym
+  oknem polowania. Profile i sesje pozostają na dysku, więc nie trzeba logować ich
+  ponownie każdego dnia.
+
 ## 0.28.2 — poprawki po polowaniu 8 września
 
 - Konta z JWT ważnym przez całe okno pracują w jednym wywołaniu AWS, bez restartów

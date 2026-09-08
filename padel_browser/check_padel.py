@@ -3088,6 +3088,11 @@ def plik_tokenu_konta(kid):
     return os.path.join(katalog, f"token-{kid}.json")
 
 
+def konta_do_biegu(konta, use_extra_accounts=False):
+    """Poza rzutem publikacyjnym zwykły monitoring używa tylko konta głównego."""
+    return konta if use_extra_accounts else konta[:1]
+
+
 def build_reg_cfg(cfg, state_doc, konto=None):
     """Ustawienia auto-rejestracji z opcji dodatku i stanu.
 
@@ -3680,7 +3685,7 @@ def zarejestruj_kontami_z_obserwacja(grafik, kandydaci_per_konto, reg_cfgs,
 
 
 def run_once(announce_startup=False, skip_light=False, prefetched=None, defer_push=False,
-             remote=None):
+             remote=None, use_extra_accounts=False):
     """Zwraca 0 przy powodzeniu, 2 przy błędzie sieci (stan nietknięty).
 
     `defer_push=True` (tylko w zrywie/sprincie) odkłada powiadomienia do kolejki
@@ -3693,8 +3698,11 @@ def run_once(announce_startup=False, skip_light=False, prefetched=None, defer_pu
     cfg = load_config()
     state_doc = load_state_doc()
     topic = opcja("NTFY_TOPIC", cfg, "ntfy_topic")
-    konta = konta_z_konfiguracji(cfg)
-    if len(konta) == 1:
+    # Dziewięć kont pomocniczych istnieje wyłącznie dla rzutu publikacyjnego.
+    # Zwykłe pojawienie się miejsca lub odwołanie w ciągu dnia obsługuje główne.
+    wszystkie_konta = konta_z_konfiguracji(cfg)
+    konta = konta_do_biegu(wszystkie_konta, use_extra_accounts)
+    if len(wszystkie_konta) == 1:
         # Dokładnie stare wywołanie dwuargumentowe — ważne także dla integracji,
         # które podmieniają `build_reg_cfg` w testach lub własnych nakładkach.
         reg_cfgs = [build_reg_cfg(cfg, state_doc)]
@@ -4447,7 +4455,7 @@ def main():
         try:
             rc = run_once(announce_startup=first, skip_light=active,
                           prefetched=prefetched, defer_push=active or in_sprint,
-                          remote=remote_result)
+                          remote=remote_result, use_extra_accounts=active or in_sprint)
             if rc != 2:  # 2 = błąd sieci; ponów próbę startowego powiadomienia później
                 first = False
         except Exception as e:  # noqa: BLE001 - pętla ma przetrwać każdy błąd

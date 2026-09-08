@@ -2,8 +2,8 @@
 
 Monitoruje wolne terminy padla na Decathlon GO, wysyła **push przez ntfy.sh** i
 (opcjonalnie) **rejestruje automatycznie**. W środku działa prawdziwa przeglądarka
-(Chromium) w panelu — **logujesz się w niej raz**, a dodatek sam podtrzymuje sesję i
-odświeża token, więc auto-rejestracja działa bezobsługowo.
+(Chromium) w panelu — **logujesz się w niej raz**, a dodatek sam przygotowuje sesje
+przed rzutem, więc auto-rejestracja działa bezobsługowo.
 
 ## Dlaczego przeglądarka
 
@@ -63,7 +63,7 @@ przechodzisz normalne logowanie, łącznie z kodem z maila.
 | `auto_register_hedge` | kopie najcenniejszego terminu przy jednym koncie (1–3); wiele kont zawsze używa jednej kopii na konto/termin | `1` |
 | `auto_register_salvo` | ile prób rejestracji wysyłać **równolegle** (0–6); `0`/`1` = po kolei, jak dawniej | `6` |
 | `auto_register_stagger` | odstęp w ms między strzałami salwy (0–100); `0` = wszystkie naraz | `8` |
-| `accounts` | lista kont; pierwsze jest główne, kolejne mają osobne profile, tokeny i równoległe strzały | `[]` |
+| `accounts` | lista kont; pierwsze działa całą dobę, kolejne tylko podczas rzutu i mają osobne profile | `[]` |
 | `sonda_konta` | diagnostyczna sonda starego eksperymentu z kontekstami (zwykle puste) | `` |
 | `sonda_tryb` | tryb sondy diagnostycznej: `zaloguj` albo `sprawdz` | `zaloguj` |
 | `test_token` | jednorazowy test poświadczeń przy starcie (nic nie rezerwuje) | `false` |
@@ -264,8 +264,13 @@ gdy problem przetrwał karencję. W logu widać to jako:
 
 ## Wiele kont — logowanie i tokeny
 
-Konta dodatkowe korzystają z osobnych, trwałych profili Chromium. W danej chwili działa
-tylko jeden dodatkowy profil, więc pamięć nie rośnie wraz z liczbą kont. Przykład:
+Konta dodatkowe korzystają z osobnych, trwałych profili Chromium. Konto główne
+monitoruje i rezerwuje przez całą dobę. Pozostałe budzą się 30 minut przed godziną
+`burst`, biorą udział w sprincie/zrywie i przestają działać wraz z jego końcem.
+Zwykłe zwolnienie miejsca później obsługuje tylko konto główne.
+
+W danej chwili działa tylko jeden dodatkowy profil, więc pamięć nie rośnie wraz
+z liczbą kont. Przykład:
 
 ```yaml
 accounts:
@@ -284,9 +289,10 @@ Pierwszy wpis jest kontem głównym i zachowuje istniejącą sesję z zakładki
 nowym koncie. Otworzy się jego własny ekran; po poprawnym logowaniu token zostanie
 wykryty, zapisany i przeglądarka zamknie się sama. Sesja pozostaje w `/data`.
 
-Zbieracz później wraca tylko do profili z wygasłym tokenem. Nie wpisuje ani nie zapisuje
-haseł. Na 90 sekund przed publikacją nie uruchamia Chromium, żeby nie odbierać zasobów
-monitorowi.
+Zbieracz wraca tylko do profili z wygasłym tokenem i tylko w półgodzinnym oknie przed
+rzutem oraz podczas zrywu. Nie wpisuje ani nie zapisuje haseł. Ręczne logowanie z panelu
+pozostaje dostępne poza samym krytycznym oknem polowania. Profile pozostają na `/data`,
+więc nie trzeba logować kont ponownie każdego dnia.
 
 Podczas publikacji wszystkie gotowe konta strzelają **jednocześnie w ten sam najlepszy
 termin**. Potem wszystkie, łącznie ze zwycięzcą poprzedniej godziny, przechodzą do

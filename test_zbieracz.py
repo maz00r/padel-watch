@@ -31,40 +31,55 @@ class WyborKontaTest(unittest.TestCase):
     def test_a_live_token_is_left_alone(self):
         """SEDNO HARMONOGRAMU: nie ma po co odwiedzać konta, które ma żywy token."""
         status = {"marek": {"exp": TERAZ + 600, "odwiedzone": TERAZ - 1000}}
-        self.assertIsNone(zb.nastepne_konto(status, konta("marek"), TERAZ))
+        self.assertIsNone(zb.nastepne_konto(
+            status, konta("marek"), TERAZ, publikacja=TERAZ + 200))
 
     def test_an_expired_token_is_picked_up(self):
         status = {"marek": {"exp": TERAZ - 10, "odwiedzone": TERAZ - 1000}}
-        wybrane = zb.nastepne_konto(status, konta("marek"), TERAZ)
+        wybrane = zb.nastepne_konto(status, konta("marek"), TERAZ,
+                                    publikacja=TERAZ + 200)
         self.assertEqual(wybrane["id"], "marek")
 
     def test_an_unknown_account_is_the_most_urgent(self):
         """Konto bez wpisu może być wylogowane — trzeba to sprawdzić, zanim zacznie się
         polowanie, a nie dowiedzieć się o tym w sekundzie publikacji."""
         status = {"marek": {"exp": TERAZ - 500, "odwiedzone": TERAZ - 1000}}
-        wybrane = zb.nastepne_konto(status, konta("marek", "ania"), TERAZ)
+        wybrane = zb.nastepne_konto(status, konta("marek", "ania"), TERAZ,
+                                    publikacja=TERAZ + 200)
         self.assertEqual(wybrane["id"], "ania")
 
     def test_the_longest_dead_token_goes_first(self):
         status = {"a": {"exp": TERAZ - 60, "odwiedzone": 0},
                   "b": {"exp": TERAZ - 900, "odwiedzone": 0},
                   "c": {"exp": TERAZ - 300, "odwiedzone": 0}}
-        self.assertEqual(zb.nastepne_konto(status, konta("a", "b", "c"), TERAZ)["id"], "b")
+        self.assertEqual(zb.nastepne_konto(
+            status, konta("a", "b", "c"), TERAZ, publikacja=TERAZ + 200)["id"], "b")
 
     def test_the_main_account_is_never_visited(self):
         """Konto główne ma własną, stale otwartą przeglądarkę — zbieracz jej nie dotyka."""
         status = {"glowne": {"exp": TERAZ - 900, "odwiedzone": 0}}
-        self.assertIsNone(zb.nastepne_konto(status, konta(), TERAZ))
+        self.assertIsNone(zb.nastepne_konto(
+            status, konta(), TERAZ, publikacja=TERAZ + 200))
 
     def test_cooldown_stops_hammering_a_logged_out_account(self):
         """Konto wylogowane nigdy nie odda tokenu. Bez karencji zbieracz kręciłby się
         na nim w kółko i nie odwiedził pozostałych."""
         status = {"marek": {"exp": None, "odwiedzone": TERAZ - 10}}
-        self.assertIsNone(zb.nastepne_konto(status, konta("marek"), TERAZ))
+        self.assertIsNone(zb.nastepne_konto(
+            status, konta("marek"), TERAZ, publikacja=TERAZ + 200))
 
     def test_after_the_cooldown_it_tries_again(self):
         status = {"marek": {"exp": None, "odwiedzone": TERAZ - zb.COOLDOWN - 1}}
-        self.assertEqual(zb.nastepne_konto(status, konta("marek"), TERAZ)["id"], "marek")
+        self.assertEqual(zb.nastepne_konto(
+            status, konta("marek"), TERAZ, publikacja=TERAZ + 200)["id"], "marek")
+
+    def test_extra_accounts_sleep_outside_the_daily_hunt_window(self):
+        status = {"marek": {"exp": TERAZ - 900, "odwiedzone": 0}}
+        self.assertIsNone(zb.nastepne_konto(status, konta("marek"), TERAZ))
+        self.assertIsNone(zb.nastepne_konto(
+            status, konta("marek"), TERAZ, publikacja=TERAZ + 31 * 60))
+        self.assertIsNone(zb.nastepne_konto(
+            status, konta("marek"), TERAZ, publikacja=TERAZ - 76))
 
 
 class CiszaPrzedPublikacjaTest(unittest.TestCase):
@@ -85,9 +100,11 @@ class CiszaPrzedPublikacjaTest(unittest.TestCase):
         self.assertIsNotNone(zb.nastepne_konto(self.STATUS, konta("marek"), TERAZ,
                                                publikacja=TERAZ + 200))
 
-    def test_after_the_publication_work_resumes(self):
+    def test_work_continues_only_until_the_burst_ends(self):
         self.assertIsNotNone(zb.nastepne_konto(self.STATUS, konta("marek"), TERAZ,
                                                publikacja=TERAZ - 60))
+        self.assertIsNone(zb.nastepne_konto(self.STATUS, konta("marek"), TERAZ,
+                                            publikacja=TERAZ - 76))
 
     def test_the_same_guard_is_available_for_manual_login(self):
         self.assertTrue(zb.cisza_przed_publikacja(TERAZ, TERAZ + 30))

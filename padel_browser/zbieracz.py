@@ -5,18 +5,20 @@ Konto główne ma własną, stale otwartą przeglądarkę i nic tu nie zmieniamy
 dodatkowe dostają profile na dysku, a ten proces odwiedza je po kolei na DRUGIM ekranie
 (`:2`, CDP 9223), czyta token i zabija przeglądarkę.
 
-## Dlaczego odwiedzamy tylko konta z WYGASŁYM tokenem
+## Kiedy uruchamiamy konta dodatkowe
 
 To jest sedno całego harmonogramu i najłatwiejsza rzecz do pomylenia. Strona Decathlon GO
 odnawia JWT **dopiero po jego wygaśnięciu** — udokumentowane w `read_token.next_sleep`
 i `check_padel.BROWSER_RENEW_GRACE`. Wejście na stronę z żywym tokenem oddaje ten sam
 token, więc jest czystą stratą czasu i procesora.
 
-Zbieracz czeka więc, aż token konkretnego konta umrze, i dopiero wtedy je odwiedza —
-dokładnie tak, jak `read_token.py` robi to od miesiąca dla konta głównego.
+Konta dodatkowe służą wyłącznie do codziennego rzutu o godzinie skonfigurowanej
+w `burst`. Zbieracz budzi je 30 minut przed startem i kończy pracę wraz ze zrywem.
+Poza tym oknem nie uruchamia ich profili i nie odnawia JWT. Konto główne ma osobny,
+stale działający mechanizm i przez całą dobę obsługuje zwykły monitoring.
 
-Rachunek: token żyje 15 minut, więc dziesięć kont to jedno odnowienie co 90 sekund.
-Przy wizycie trwającej ~20 s zbieracz jest zajęty 22% czasu. Reszta to czekanie.
+W aktywnym oknie odwiedzamy tylko konto z wygasłym tokenem. Strona Decathlon GO
+odnawia JWT dopiero po jego wygaśnięciu; wcześniejsza wizyta oddałaby ten sam token.
 
 ## Czego zbieracz NIE robi
 
@@ -40,6 +42,9 @@ except ImportError:  # pragma: no cover - obraz dodatku ma współczesnego Pytho
 # załadowanie SPA to ~15-25 s; próba rozpoczęta później i tak by nie zdążyła, a zabrałaby
 # procesor monitorowi dokładnie wtedy, gdy jest mu najbardziej potrzebny.
 STOP_PRZED_PUBLIKACJA = 90
+# Dziewięć profili otwieranych kolejno potrzebuje zwykle około 3–4 minut. Zaczynamy
+# wcześniej, ponieważ pierwszy JWT może wygasnąć przed 11 i wymagać drugiej wizyty.
+PRZYGOTOWANIE_PRZED_PUBLIKACJA = 30 * 60
 # Najkrótszy odstęp między dwiema wizytami u TEGO SAMEGO konta. Chroni przed pętlą
 # dobijania się do konta, które jest wylogowane i nigdy nie odda tokenu.
 COOLDOWN = 120
@@ -69,7 +74,8 @@ def wczytaj_status(sciezka):
 
 
 def nastepne_konto(status, konta, teraz, publikacja=None,
-                   cooldown=COOLDOWN, stop_przed=STOP_PRZED_PUBLIKACJA):
+                   cooldown=COOLDOWN, stop_przed=STOP_PRZED_PUBLIKACJA,
+                   przygotowanie=PRZYGOTOWANIE_PRZED_PUBLIKACJA):
     """Które konto odwiedzić TERAZ. None, gdy nie ma czego robić.
 
     Kolejność pilności:
@@ -79,6 +85,8 @@ def nastepne_konto(status, konta, teraz, publikacja=None,
 
     Konta z żywym tokenem pomijamy świadomie: strona i tak oddałaby ten sam token.
     """
+    if not okno_kont_dodatkowych(teraz, publikacja, przygotowanie):
+        return None
     quiet = cisza_przed_publikacja(teraz, publikacja, stop_przed)
     kandydaci = []
     for konto in konta:
@@ -108,6 +116,18 @@ def cisza_przed_publikacja(teraz, publikacja, stop_przed=STOP_PRZED_PUBLIKACJA):
     except ValueError:
         after = 75
     return publikacja is not None and -after < publikacja - teraz <= stop_przed
+
+
+def okno_kont_dodatkowych(teraz, publikacja,
+                          przygotowanie=PRZYGOTOWANIE_PRZED_PUBLIKACJA):
+    """Profile automatyczne działają tylko przed rzutem i podczas zrywu."""
+    if publikacja is None:
+        return False
+    try:
+        after = max(1, min(int(os.environ.get("BURST_SECONDS") or 75), 120))
+    except ValueError:
+        after = 75
+    return publikacja - przygotowanie <= teraz < publikacja + after
 
 
 def zapisz_status(sciezka, status, zapis=None):
