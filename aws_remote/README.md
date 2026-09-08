@@ -49,6 +49,11 @@ dopiero po przegranym terminie.
 **Po każdej aktualizacji dodatku** wróć tu, pobierz paczkę ponownie i wgraj
 (punkt 3) — Lambda nie aktualizuje się sama.
 
+Od wersji dodatku **0.28.0** paczka obsługuje wiele kont. Wszystkie konta strzelają
+równolegle w ten sam preferowany termin, a potem wszystkie — także zwycięzca — próbują
+kolejnej godziny. Po aktualizacji z 0.27.x wgranie nowego ZIP-a jest więc konieczne,
+aby wiele kont działało także w Irlandii, a nie tylko w lokalnym zapasie.
+
 ## 2. Utwórz funkcję
 
 Konsola AWS, **region `eu-west-1` (Ireland)** — sprawdź prawy górny róg.
@@ -73,7 +78,7 @@ Konsola AWS, **region `eu-west-1` (Ireland)** — sprawdź prawy górny róg.
 | ustawienie | wartość | dlaczego |
 |---|---|---|
 | Memory | **1769 MB** | pamięć w Lambdzie to suwak od **procesora**; pełny rdzeń zaczyna się tutaj. Przy 512 MB samo TLS zajmowało 17 ms zamiast 3 ms. RAM-u zużywa się i tak ~55 MB |
-| Timeout | **30 s** | okno sprintu to kilka sekund, reszta to zapas |
+| Timeout | **60 s** | sprint trwa do 50 s; pozostałe 10 s to zapas na rejestrację i odpowiedź |
 
 **Configuration → Concurrency → Reserve concurrency: `1`**
 
@@ -136,11 +141,11 @@ wyłączył** zdalny strzał, żeby nie wysyłać Twojego tokenu pod adres bez �
 
 ## Jak to wygląda w działaniu
 
-O 11:00:51 zamiast lokalnego sprintu leci jedno żądanie do Irlandii. Dziennik dodatku
+O 11:00:00 zamiast lokalnego sprintu leci jedno żądanie do Irlandii. Dziennik dodatku
 pokazuje przepisany dziennik zdalny (linie z `☁`):
 
 ```
-[11:00:51.9] 🏁 Sprint START — 3 wątków bez przerw do 11:00:56
+[11:00:00.0] 🏁 Sprint START — 3 wątków bez przerw do 11:00:50
 [11:00:54.6]    ☁ Sprint: nowe terminy po 2244 ms — 3 pasujących do filtra
 [11:00:54.6]    ☁ ⇉ Salwa: 3 prób równolegle (wt 18.08 20:00, 19:00, 15:00)
 [11:00:54.7]    ☁ ✓ Auto-rejestracja: wt 18.08 20:00 — accepted [24 ms]
@@ -148,7 +153,8 @@ pokazuje przepisany dziennik zdalny (linie z `☁`):
 [11:00:54.8] 📋 Grafik na wt 18.08: 4 wolne z 4
 ```
 
-Rezerwacja, powiadomienie, kalendarz i stan działają dokładnie jak dotąd.
+Przy wielu kontach obok strzału pojawia się nazwa zwycięskiego konta. Powiadomienie,
+kalendarz i stan działają dalej tak samo.
 
 ## Bezpieczeństwo
 
@@ -198,6 +204,7 @@ najlepsze godziny pojawiły się i zniknęły — bez jednego strzału z naszej 
 Skutki dla działania funkcji:
 
 - wywołanie trwa zwykle **pełne okno sprintu** (`sprint_seconds`), a nie do pierwszego
-  trafienia; wyjątkiem jest wyczerpanie limitu rezerwacji, które kończy je od razu,
+  trafienia; tylko w trybie jednego konta wyczerpanie limitu kończy je od razu,
 - `timings.batches` w odpowiedzi mówi, ile partii złapano,
-- `max_per_run` obowiązuje **całe wywołanie**, nie pojedynczą partię.
+- przy jednym koncie `max_per_run` obowiązuje **całe wywołanie**, nie pojedynczą partię;
+  przy wielu kontach wszystkie sprawne konta próbują każdej pasującej godziny.

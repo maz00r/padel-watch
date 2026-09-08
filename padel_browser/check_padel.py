@@ -280,7 +280,7 @@ def zryw_z_otoczenia():
         return None
     try:
         burst = parse_burst_env(surowy)
-        burst["seconds"] = max(1, min(int(os.environ.get("BURST_SECONDS") or 15),
+        burst["seconds"] = max(1, min(int(os.environ.get("BURST_SECONDS") or 75),
                                       BURST_MAX_SECONDS))
         return burst
     except Exception:  # noqa: BLE001 - zły zryw nie może wywrócić niczego
@@ -471,7 +471,7 @@ def write_state_doc(doc):
 
 def save_state(free_ids, registered_ids=None, decathlon_jwt=None, pending_ids=None,
                auth_alert_sent=None, decathlon_rt=None, auth_error_since="",
-               startup_push_at=""):
+               startup_push_at="", account_states=None):
     old = load_state_doc() or {}
     if registered_ids is None:
         registered_ids = set(old.get("registered_ids", []))
@@ -483,6 +483,8 @@ def save_state(free_ids, registered_ids=None, decathlon_jwt=None, pending_ids=No
         pending_ids = old.get("pending_ids", [])
     if auth_alert_sent is None:
         auth_alert_sent = old.get("auth_alert_sent", False)
+    if account_states is None:
+        account_states = old.get("accounts", {})
     doc = {"free_ids": sorted(free_ids), "registered_ids": sorted(registered_ids)}
     if decathlon_jwt:
         doc["decathlon_jwt"] = clean_decathlon_token(decathlon_jwt)
@@ -498,6 +500,24 @@ def save_state(free_ids, registered_ids=None, decathlon_jwt=None, pending_ids=No
         # Odkąd token nie działa. Bez tego karencja liczyłaby się od nowa przy KAŻDEJ
         # iteracji i powiadomienie nie przyszłoby nigdy.
         doc["auth_error_since"] = auth_error_since
+    if account_states:
+        # Tokeny kont dodatkowych żyją w osobnych, atomowo zapisywanych plikach.
+        # Stan przechowuje wyłącznie informacje sterujące ponowieniem i alertami.
+        czyste = {}
+        for kid, stan in account_states.items():
+            if not isinstance(stan, dict):
+                continue
+            wpis = {}
+            if stan.get("pending_ids"):
+                wpis["pending_ids"] = sorted(set(stan["pending_ids"]))
+            if stan.get("auth_alert_sent"):
+                wpis["auth_alert_sent"] = True
+            if stan.get("auth_error_since"):
+                wpis["auth_error_since"] = stan["auth_error_since"]
+            if wpis:
+                czyste[str(kid)] = wpis
+        if czyste:
+            doc["accounts"] = czyste
     if old.get("clear_state_applied"):
         doc["clear_state_applied"] = old["clear_state_applied"]  # znacznik musi przetrwać zapis
     write_state_doc(doc)
@@ -1172,7 +1192,7 @@ def plan_sleep(default_s, windows, burst, tz, elapsed=0.0, now=None, sprint=None
       1. w trwającym zrywie obowiązuje jego własny, gęsty takt,
       2. tuż przed zrywem śpimy DOKŁADNIE do jego początku, żeby go nie przespać,
       3. TO SAMO dotyczy sprintu — bez tego dawało się go przespać W CAŁOŚCI: przy
-         domyślnej konfiguracji (sprint 11:00:05–11:00:45, zryw dopiero 11:00:45) pętla
+         ówczesnej konfiguracji (sprint 11:00:05–11:00:45, zryw dopiero 11:00:45) pętla
          budziła się o 10:59:50, liczyła sen do startu zrywu i spała 55 s. Irlandia nie
          była wywoływana ani razu, a w logu nie było śladu, bo z punktu widzenia pętli
          wszystko poszło zgodnie z planem,
@@ -2008,22 +2028,37 @@ SALVO_MAX = 6
 # podwójnej rezerwacji bez żadnych danych, że pomaga — to osobny eksperyment.
 HEDGE_MAX = 3
 _salvo_pool = None
+_salvo_pools = {}
+_salvo_pools_lock = threading.Lock()
 
 
-def salvo_pool(size):
+def salvo_pool(size, konto=None):
     """Pula TRWAŁYCH wątków — każdy trzyma własne, ciepłe połączenie (threading.local).
 
     Świeży wątek oznaczałby świeże połączenie i ~160 ms na uzgodnienie TLS, czyli
     dokładnie to, co salwa ma wyeliminować. Dlatego pula żyje przez cały proces.
     """
     global _salvo_pool
-    if _salvo_pool is None:
-        # Miejsce także na kopie czołowego strzału. Gdyby pula była mniejsza,
-        # kopie czekałyby w KOLEJCE PULI zamiast lecieć równolegle — czyli dokładnie
-        # odwrotnie, niż wymaga eksperyment.
-        _salvo_pool = concurrent.futures.ThreadPoolExecutor(
-            max_workers=SALVO_MAX + HEDGE_MAX - 1, thread_name_prefix="salwa")
-    return _salvo_pool
+    kid = str(konto or "glowne")
+    with _salvo_pools_lock:
+        if kid == "glowne":
+            if _salvo_pool is None:
+                # Miejsce także na kopie czołowego strzału. Gdyby pula była mniejsza,
+                # kopie czekałyby w KOLEJCE PULI zamiast lecieć równolegle — czyli
+                # dokładnie odwrotnie, niż wymaga eksperyment.
+                _salvo_pool = concurrent.futures.ThreadPoolExecutor(
+                    max_workers=SALVO_MAX + HEDGE_MAX - 1, thread_name_prefix="salwa")
+            return _salvo_pool
+        pool = _salvo_pools.get(kid)
+        if pool is None:
+            # Osobna pula jest konieczna: jedna wspólna pula o ośmiu wątkach
+            # kolejkowałaby konta 2..10 po stronie klienta, zamiast pozwolić im trafić
+            # równolegle do niezależnych kolejek serwera.
+            pool = concurrent.futures.ThreadPoolExecutor(
+                max_workers=SALVO_MAX + HEDGE_MAX - 1,
+                thread_name_prefix=f"salwa-{kid[:16]}")
+            _salvo_pools[kid] = pool
+        return pool
 
 
 def warm_connections(pool, size, url):
@@ -2149,7 +2184,7 @@ def fire_salvo(targets, listing_price_by_id, cfg, speculative, size, ranks=None)
                 "tx": local.get("transaction_id") or "",
                 "token": local.get("token") or ""}
 
-    pool = salvo_pool(size)
+    pool = salvo_pool(size, cfg.get("konto"))
     pary = list(zip(ranks, fired)) if ranks else list(enumerate(fired))
     return list(pool.map(strzal, pary))
 
@@ -2347,10 +2382,32 @@ def call_remote(url, secret, payload, timeout):
         return None, f"zła odpowiedź: {e!r}"
 
 
-def remote_payload(listing_url, baseline_ids, tz_name, seconds, threads, reg_cfg):
+def _remote_account_cfg(reg_cfg):
+    return {
+        "id": reg_cfg.get("konto") or KONTO_GLOWNE,
+        "account_name": _account_label(reg_cfg),
+        "token": reg_cfg.get("token") or "",
+        "filters": reg_cfg.get("filters_spec") or "",
+        "salvo": reg_cfg.get("salvo") or 0,
+        "stagger": reg_cfg.get("stagger", SALVO_STAGGER_MS),
+        "lead": boolish(reg_cfg.get("lead")),
+        "hedge": reg_cfg.get("hedge") or 1,
+        "max_per_run": (reg_cfg.get("max_per_run")
+                        if reg_cfg.get("max_per_run") is not None else 1),
+        "order": reg_cfg.get("order") or "earliest",
+        "name": reg_cfg.get("name") or "",
+        "age": reg_cfg.get("age"),
+        "free_only": bool(reg_cfg.get("free_only", True)),
+        "speculative": bool(reg_cfg.get("speculative")),
+        "enabled": bool(reg_cfg.get("enabled")),
+    }
+
+
+def remote_payload(listing_url, baseline_ids, tz_name, seconds, threads, reg_cfg,
+                   reg_cfgs=None):
     """Treść żądania do Irlandii. Filtry idą SUROWYM napisem z env, żeby zdalna
     strona sparsowała je tą samą funkcją — inaczej ryzykujemy dwie różne interpretacje."""
-    return {
+    payload = {
         "token": reg_cfg.get("token") or "",
         "listing_url": listing_url,
         "filters": os.environ.get("FILTERS", ""),
@@ -2366,7 +2423,8 @@ def remote_payload(listing_url, baseline_ids, tz_name, seconds, threads, reg_cfg
         # Strzał redundantny musi działać po TEJ stronie, która naprawdę strzela
         # w sekundzie publikacji — czyli w Irlandii.
         "hedge": reg_cfg.get("hedge") or 1,
-        "max_per_run": reg_cfg.get("max_per_run") or 1,
+        "max_per_run": (reg_cfg.get("max_per_run")
+                        if reg_cfg.get("max_per_run") is not None else 1),
         "order": reg_cfg.get("order") or "earliest",
         "name": reg_cfg.get("name") or "",
         "age": reg_cfg.get("age"),
@@ -2374,6 +2432,9 @@ def remote_payload(listing_url, baseline_ids, tz_name, seconds, threads, reg_cfg
         "speculative": bool(reg_cfg.get("speculative")),
         "enabled": bool(reg_cfg.get("enabled")),
     }
+    if reg_cfgs and len(reg_cfgs) > 1:
+        payload["accounts"] = [_remote_account_cfg(c) for c in reg_cfgs]
+    return payload
 
 
 def adopt_remote(wynik):
@@ -2409,6 +2470,8 @@ def adopt_remote(wynik):
         "registered": set(wynik.get("registered") or []),
         "transactions": wynik.get("transactions") or {},
         "shots": wynik.get("shots") or [],
+        "used_by_account": wynik.get("used_by_account") or {},
+        "auth_errors": wynik.get("auth_errors") or {},
     }
     return (wynik["listing_id"], wynik["doc"]), remote
 
@@ -2425,7 +2488,15 @@ def resolve_filters(cfg):
             return parse_filters_env(filters_env)
         except Exception as e:  # noqa: BLE001 - błędny env nie może wywrócić procesu
             log(f"! Błędny FILTERS '{filters_env}': {e} — używam filtrów z config.json")
-    return cfg.get("filters", [])
+    configured = cfg.get("filters", [])
+    if isinstance(configured, str):
+        try:
+            return parse_filters_env(configured) if configured.strip() else []
+        except Exception as e:  # noqa: BLE001
+            log(f"! Błędny filtr w config.json „{configured}”: {e} — żaden termin "
+                "nie przejdzie, popraw konfigurację.")
+            return [{"days": [], "start": "00:00", "end": "24:00"}]
+    return configured
 
 
 def oddaj_salwe(fired, listing_price_by_id, cfg, speculative, salvo):
@@ -2867,9 +2938,8 @@ def notify_startup(topic, count, tz, book_url=None):
 # -------------------------------------------------------------------------- main
 
 KONTO_GLOWNE = "glowne"
-# Ile kortów wolno zająć ŁĄCZNIE, wszystkimi kontami, w jednym biegu. Limit per konto
-# (`auto_register_max`) przy dziesięciu kontach przestaje cokolwiek ograniczać: dziesięć
-# kont po jednym korcie to dziesięć kortów. Decyzja użytkownika z 07.09: nie więcej niż 10.
+# Maksymalna liczba skonfigurowanych kont. W trybie wielokontowym nie ma limitu liczby
+# rezerwacji; w ten sam termin wszystkie sprawne konta strzelają równolegle.
 ACCOUNTS_TOTAL_MAX = 10
 ACCOUNT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 
@@ -2881,8 +2951,10 @@ def konta_z_konfiguracji(cfg):
     płaskich — to jest ścieżka zgodności wstecznej i musi działać niezmiennie przez całe
     wdrożenie wielokontowości.
 
-    Pola opcjonalne (`filters`, `max_per_run`, `age`) spadają na wartości globalne, więc
-    konta dodatkowe mogą mieć własne, węższe okno godzin, nie dotykając konta głównego.
+    Pola opcjonalne (`filters`, `age`) spadają na wartości globalne, więc konta dodatkowe
+    mogą mieć własne, węższe okno godzin, nie dotykając konta głównego. `max_per_run`
+    pozostaje czytany dla zgodności konfiguracji, ale przy wielu kontach nie zatrzymuje
+    zwycięzcy przed strzałem w kolejną godzinę.
     """
     surowe = cfg.get("accounts")
     if surowe in (None, ""):
@@ -2953,6 +3025,13 @@ def build_reg_cfg(cfg, state_doc, konto=None):
     zdalna strona mogłaby np. dostać inny limit niż lokalna i zarezerwować za dużo.
     """
     dodatkowe = bool(konto and not konto.get("main"))
+    limit_konta = (konto or {}).get("max_per_run")
+    limit_globalny = os.environ.get("AUTO_REGISTER_MAX")
+    if limit_globalny in (None, ""):
+        limit_globalny = cfg.get("auto_register_max")
+    max_per_run = limit_konta if limit_konta is not None else limit_globalny
+    if max_per_run in (None, ""):
+        max_per_run = 1
     return {
         "enabled": boolish(os.environ.get("AUTO_REGISTER") or cfg.get("auto_register")),
         "speculative": boolish(os.environ.get("AUTO_REGISTER_DRY_RUN") or cfg.get("auto_register_dry_run")),
@@ -2963,18 +3042,18 @@ def build_reg_cfg(cfg, state_doc, konto=None):
         "refresh_token": "" if dodatkowe else (state_doc or {}).get("decathlon_rt") or "",
         # Scalony dodatek: token odnawia przeglądarka, więc monitor NIE próbuje /auth/refresh.
         "browser_mode": bool(TOKEN_FILE),
-        # Konto niesie własne imię uczestnika, własny plik tokenu i może mieć własny
-        # limit oraz filtr. Brak konta = zachowanie sprzed wielokontowości.
+        # Konto niesie własne imię uczestnika, plik tokenu i filtr. Limit pozostaje
+        # w payloadzie dla zgodności ze starą ścieżką jednego konta.
         "konto": (konto or {}).get("id") or KONTO_GLOWNE,
+        "account_name": (konto or {}).get("name") or (konto or {}).get("id") or KONTO_GLOWNE,
         "token_file": (konto or {}).get("token_file") or TOKEN_FILE,
+        "filters_spec": (konto or {}).get("filters"),
         "name": (konto or {}).get("name")
                 or os.environ.get("AUTO_REGISTER_NAME") or cfg.get("auto_register_name") or "",
         "age": (konto or {}).get("age")
                or os.environ.get("AUTO_REGISTER_AGE") or cfg.get("auto_register_age") or None,
         "free_only": not boolish(os.environ.get("AUTO_REGISTER_PAID") or cfg.get("auto_register_paid")),
-        "max_per_run": ((konto or {}).get("max_per_run")
-                        or os.environ.get("AUTO_REGISTER_MAX")
-                        or cfg.get("auto_register_max") or 1),
+        "max_per_run": max_per_run,
         "order": os.environ.get("AUTO_REGISTER_ORDER") or cfg.get("auto_register_order") or "earliest",
         "salvo": os.environ.get("AUTO_REGISTER_SALVO") or cfg.get("auto_register_salvo") or 0,
         "hedge": os.environ.get("AUTO_REGISTER_HEDGE") or cfg.get("auto_register_hedge") or 1,
@@ -2984,6 +3063,185 @@ def build_reg_cfg(cfg, state_doc, konto=None):
         "stagger": os.environ.get("AUTO_REGISTER_STAGGER")
                    or cfg.get("auto_register_stagger", SALVO_STAGGER_MS),
     }
+
+
+def _account_limit(reg_cfg):
+    try:
+        return max(0, min(int(reg_cfg.get("max_per_run", 1)), ACCOUNTS_TOTAL_MAX))
+    except (TypeError, ValueError):
+        return 1
+
+
+def _account_label(reg_cfg):
+    return str(reg_cfg.get("account_name") or reg_cfg.get("konto") or KONTO_GLOWNE)
+
+
+def _account_filters(reg_cfg, fallback):
+    spec = reg_cfg.get("filters_spec")
+    if not spec:
+        return fallback
+    try:
+        return parse_filters_env(spec)
+    except Exception as e:  # noqa: BLE001 - zły filtr wyłącza konto, nie cały monitor
+        if not reg_cfg.get("filters_error_logged"):
+            log(f"! Konto {_account_label(reg_cfg)}: błędny filtr „{spec}” ({e}) "
+                "— to konto nie będzie rezerwować.")
+            reg_cfg["filters_error_logged"] = True
+        return None
+
+
+def _merge_registration_results(target, source, reg_cfg):
+    """Scala wyniki wielu kont; sukces jest lepki i niesie nazwę zwycięzcy."""
+    label = _account_label(reg_cfg)
+    for sid, (ok, msg) in source.items():
+        opis = f"{label}: {msg}"
+        if ok or not (target.get(sid) or (False,))[0]:
+            target[sid] = (bool(ok), opis)
+
+
+def auto_register_accounts(slots, listing_price_by_id, reg_cfgs, already_registered, tz,
+                           filters=None, used_by_account=None,
+                           candidate_ids_by_account=None):
+    """Równoległe polowanie wielu kont w te same najbardziej pożądane terminy.
+
+    W jednej rundzie każde konto wybiera swój najlepszy termin, więc kilka kont może
+    uderzyć w ten sam kort jednocześnie. Serwer przepuszcza jedno, a konta odbite na
+    409 przechodzą w kolejnej rundzie do następnego terminu. Konto, które wygrało,
+    także bierze udział w następnej rundzie. W tym trybie nie zatrzymujemy kont po
+    limicie rezerwacji; naturalnym sufitem jest liczba pasujących godzin.
+    """
+    reg_cfgs = [c for c in reg_cfgs if c.get("enabled")]
+    registered = set(already_registered)
+    results = {}
+    used = dict(used_by_account or {})
+    if not reg_cfgs or not slots:
+        return results, registered, used
+    queues, stopped = {}, set()
+    for reg_cfg in reg_cfgs:
+        kid = reg_cfg.get("konto") or KONTO_GLOWNE
+        account_filters = _account_filters(reg_cfg, filters or [])
+        if account_filters is None:
+            queues[kid] = []
+            continue
+        allowed = None
+        if candidate_ids_by_account is not None:
+            allowed = set(candidate_ids_by_account.get(kid, ()))
+        latest = str(reg_cfg.get("order") or "earliest").strip().lower() in LATEST_FIRST_VALUES
+        queues[kid] = sorted(
+            (s for s in slots
+             if s["id"] not in registered
+             and (allowed is None or s["id"] in allowed)
+             and passes_filter(s, account_filters, tz)),
+            key=lambda s: s["start_utc"], reverse=latest)
+        reg_cfg.setdefault("shots", [])
+        reg_cfg["pending_ids"] = []
+        if reg_cfg.get("auth_error"):
+            stopped.add(kid)
+            reg_cfg["pending_ids"] = [s["id"] for s in queues[kid]]
+
+    attempted = set()
+    max_workers = max(1, min(len(reg_cfgs), ACCOUNTS_TOTAL_MAX))
+    with concurrent.futures.ThreadPoolExecutor(
+            max_workers=max_workers, thread_name_prefix="konta") as pool:
+        while True:
+            assignments = []
+            for reg_cfg in reg_cfgs:
+                kid = reg_cfg.get("konto") or KONTO_GLOWNE
+                if kid in stopped:
+                    continue
+                slot = next((s for s in queues[kid]
+                             if s["id"] not in attempted
+                             and s["id"] not in registered), None)
+                if slot is None:
+                    continue
+                assignments.append((reg_cfg, slot))
+            if not assignments:
+                break
+
+            futures = {}
+            registered_snapshot = set(registered)
+            for reg_cfg, slot in assignments:
+                kid = reg_cfg.get("konto") or KONTO_GLOWNE
+                label = _account_label(reg_cfg)
+                log(f"⇉ Konto {label}: próbuję {fmt_when(slot['start_utc'].astimezone(tz), short=True)}")
+
+                def attempt(c=reg_cfg, s=slot, known=registered_snapshot):
+                    old_limit = c.get("max_per_run", 1)
+                    shot_start = len(c.get("shots") or [])
+                    c["max_per_run"] = 1
+                    try:
+                        out, reg = auto_register_new_slots(
+                            [s], listing_price_by_id, c, known)
+                    finally:
+                        c["max_per_run"] = old_limit
+                    for shot in c.get("shots", [])[shot_start:]:
+                        shot["konto"] = c.get("konto") or KONTO_GLOWNE
+                        shot["account_name"] = _account_label(c)
+                    return out, reg
+
+                futures[pool.submit(attempt)] = (reg_cfg, slot)
+
+            for future in concurrent.futures.as_completed(futures):
+                reg_cfg, slot = futures[future]
+                kid = reg_cfg.get("konto") or KONTO_GLOWNE
+                try:
+                    account_results, account_registered = future.result()
+                except Exception as e:  # noqa: BLE001 - jedno konto nie zatrzymuje pozostałych
+                    account_results = {slot["id"]: (False, f"nieoczekiwany błąd konta: {e!r}")}
+                    account_registered = set()
+                    reg_cfg["auth_error"] = None
+                _merge_registration_results(results, account_results, reg_cfg)
+                registered |= set(account_registered)
+                ok = bool((account_results.get(slot["id"]) or (False,))[0])
+                if ok:
+                    used[kid] = used.get(kid, 0) + 1
+                    attempted.add(slot["id"])
+                    continue
+                if reg_cfg.get("auth_error"):
+                    stopped.add(kid)
+                    pending = [slot["id"]]
+                    pending.extend(s["id"] for s in queues[kid]
+                                   if s["id"] != slot["id"] and s["id"] not in registered)
+                    reg_cfg["pending_ids"] = pending
+                else:
+                    attempted.add(slot["id"])
+            for reg_cfg in reg_cfgs:
+                kid = reg_cfg.get("konto") or KONTO_GLOWNE
+                if kid not in stopped:
+                    continue
+                pending = [sid for sid in reg_cfg.get("pending_ids", [])
+                           if sid not in registered]
+                pending.extend(s["id"] for s in queues[kid]
+                               if s["id"] not in registered and s["id"] not in pending)
+                reg_cfg["pending_ids"] = pending
+    return results, registered, used
+
+
+def warm_account_connections(reg_cfgs, size, url):
+    """Rozgrzewa pule kont równolegle; w trybie wielokontowym wystarczą kopie hedge."""
+    def uses_salvo(reg_cfg):
+        try:
+            return int(reg_cfg.get("salvo") or 0) > 1
+        except (TypeError, ValueError):
+            return False
+
+    aktywne = [c for c in reg_cfgs if c.get("enabled") and uses_salvo(c)]
+    if not aktywne:
+        return
+    if len(aktywne) == 1:
+        warm_connections(salvo_pool(size, aktywne[0].get("konto")), size, url)
+        return
+
+    def warm(reg_cfg):
+        try:
+            ile = max(1, min(int(reg_cfg.get("hedge") or 1), HEDGE_MAX))
+        except (TypeError, ValueError):
+            ile = 1
+        warm_connections(salvo_pool(ile, reg_cfg.get("konto")), ile, url)
+
+    with concurrent.futures.ThreadPoolExecutor(
+            max_workers=len(aktywne), thread_name_prefix="grzanie-kont") as pool:
+        list(pool.map(warm, aktywne))
 
 
 # Ile najwyżej czekamy na jedno pobranie obserwatora. Patrz komentarz w `patrz()`.
@@ -3203,6 +3461,44 @@ def rejestruj_obserwujac(lid, sloty, ceny, cfg, registered, filters, tz, znane,
     return wyniki, registered, druga, doc
 
 
+def rejestruj_kontami_obserwujac(lid, sloty, ceny, reg_cfgs, registered, filters, tz,
+                                 znane, used_by_account=None, candidate_ids_by_account=None,
+                                 obserwuj=True):
+    """Wariant wielokontowy wspólnej obserwacji pierwszej i drugiej fali."""
+    obserwator = (obserwuj_podczas_zapisu(lid, filters, tz, znane)
+                  if obserwuj and lid else None)
+    try:
+        wyniki, registered, used = auto_register_accounts(
+            sloty, ceny, reg_cfgs, registered, tz, filters,
+            used_by_account, candidate_ids_by_account)
+    finally:
+        if obserwator:
+            obserwator[0].set()
+
+    druga = obserwator[1]["nowe"] if obserwator else {}
+    if not druga:
+        return wyniki, registered, druga, (obserwator[1]["doc"] if obserwator else None), used
+
+    log(f"⇉ Druga fala: {len(druga)} "
+        f"{plural(len(druga), 'termin', 'terminy', 'terminów')} pojawiło się "
+        f"w trakcie zapisów wielu kont ({obserwator[1]['pobran']} pobrań) — strzelam od razu")
+    doc = obserwator[1]["doc"]
+    cena = ((doc.get("data", {}).get("attributes", {}) or {}).get("price")
+            if doc else None)
+    ceny_fala = dict(ceny)
+    ceny_fala.update({sid: cena for sid in druga})
+    for reg_cfg in reg_cfgs:
+        reg_cfg["seen_at"] = time.monotonic()
+    wyniki_fala, registered, used = auto_register_accounts(
+        list(druga.values()), ceny_fala, reg_cfgs, registered, tz, filters,
+        used)
+    # `wyniki_fala` są już opisane nazwą konta, więc scalamy je surowo.
+    for sid, result in wyniki_fala.items():
+        if result[0] or not (wyniki.get(sid) or (False,))[0]:
+            wyniki[sid] = result
+    return wyniki, registered, druga, doc, used
+
+
 def zarejestruj_z_obserwacja(grafik, kandydaci, reg_cfg, registered_ids, filters, tz,
                              skip_light):
     """Strona lokalna: mapuje `Grafik` na wspólny rdzeń i wnosi drugą falę z powrotem.
@@ -3230,6 +3526,31 @@ def zarejestruj_z_obserwacja(grafik, kandydaci, reg_cfg, registered_ids, filters
     return wyniki, registered_ids, druga
 
 
+def zarejestruj_kontami_z_obserwacja(grafik, kandydaci_per_konto, reg_cfgs,
+                                     registered_ids, filters, tz, skip_light,
+                                     used_by_account=None):
+    """Lokalny adapter wielokontowy, odpowiednik `zarejestruj_z_obserwacja`."""
+    wszystkie = set().union(*(set(v) for v in kandydaci_per_konto.values()))
+    for reg_cfg in reg_cfgs:
+        reg_cfg["seen_at"] = grafik.seen_at
+    lid_obs = next((grafik.lid_by_id[i] for i in wszystkie if i in grafik.lid_by_id), None)
+    wyniki, registered_ids, druga, doc, used = rejestruj_kontami_obserwujac(
+        lid_obs, [grafik.current[i] for i in wszystkie], grafik.listing_price_by_id,
+        reg_cfgs, registered_ids, filters, tz, set(grafik.current),
+        used_by_account, kandydaci_per_konto,
+        obserwuj=bool(skip_light))
+    if druga:
+        url_obs, cena_obs = grafik.meta_by_lid.get(lid_obs, (grafik.book_url, None))
+        for sid, slot in druga.items():
+            grafik.current[sid] = slot
+            grafik.book_url_by_id[sid] = url_obs
+            grafik.listing_price_by_id[sid] = cena_obs
+            grafik.lid_by_id[sid] = lid_obs
+        if doc is not None:
+            grafik.docs_by_lid[lid_obs] = doc
+    return wyniki, registered_ids, druga, used
+
+
 def run_once(announce_startup=False, skip_light=False, prefetched=None, defer_push=False,
              remote=None):
     """Zwraca 0 przy powodzeniu, 2 przy błędzie sieci (stan nietknięty).
@@ -3244,7 +3565,15 @@ def run_once(announce_startup=False, skip_light=False, prefetched=None, defer_pu
     cfg = load_config()
     state_doc = load_state_doc()
     topic = opcja("NTFY_TOPIC", cfg, "ntfy_topic")
-    reg_cfg = build_reg_cfg(cfg, state_doc)
+    konta = konta_z_konfiguracji(cfg)
+    if len(konta) == 1:
+        # Dokładnie stare wywołanie dwuargumentowe — ważne także dla integracji,
+        # które podmieniają `build_reg_cfg` w testach lub własnych nakładkach.
+        reg_cfgs = [build_reg_cfg(cfg, state_doc)]
+    else:
+        reg_cfgs = [build_reg_cfg(cfg, state_doc, konto) for konto in konta]
+    reg_cfg = reg_cfgs[0]
+    multi_account = len(reg_cfgs) > 1
     tzname = opcja("TIMEZONE", cfg, "timezone", "Europe/Warsaw")
     tz = ZoneInfo(tzname) if ZoneInfo else timezone.utc
     filters = resolve_filters(cfg)
@@ -3286,18 +3615,26 @@ def run_once(announce_startup=False, skip_light=False, prefetched=None, defer_pu
     # Test poświadczeń Decathlon GO — NIE wymaga wolnego terminu. Uruchamiany przy
     # starcie procesu (gdy auto_register włączone) albo na żądanie opcją test_token.
     test_token = boolish(os.environ.get("TEST_TOKEN") or cfg.get("test_token"))
-    if (announce_startup or test_token) and (reg_cfg.get("enabled") or test_token):
-        check_decathlon_credentials(reg_cfg, topic, book_url)
-    elif reg_cfg.get("enabled"):
-        # PODTRZYMANIE SESJI: token trzeba odnawiać w KAŻDEJ iteracji, nie tylko gdy jest
-        # co rezerwować. Inaczej po dłuższej ciszy (brak wolnych terminów) JWT wygasa, a
-        # /auth/refresh wygasłego tokenu zwraca 401 — i pierwsza okazja przepada.
-        # Wywołanie jest tanie: bez ruchu sieciowego, dopóki do wygaśnięcia > marginesu.
-        _tok, _err = ensure_decathlon_token(reg_cfg)
-        reg_cfg["auth_checked"] = True  # pozwala skasować alert, gdy token znów działa
-        if _err:
-            reg_cfg["auth_error"] = _err
-            log(f"! Podtrzymanie sesji Decathlon GO nieudane: {_err}")
+    for account_cfg in reg_cfgs:
+        if (announce_startup or test_token) and (account_cfg.get("enabled") or test_token):
+            if multi_account:
+                log(f"👤 Konto {_account_label(account_cfg)}: test poświadczeń")
+            check_decathlon_credentials(account_cfg, topic, book_url)
+        elif account_cfg.get("enabled"):
+            # PODTRZYMANIE SESJI: token trzeba odnawiać w KAŻDEJ iteracji, nie tylko gdy
+            # jest co rezerwować. Dla plików przeglądarki to tani odczyt lokalny.
+            _tok, _err = ensure_decathlon_token(account_cfg)
+            account_cfg["auth_checked"] = True
+            if _err:
+                account_cfg["auth_error"] = _err
+                prefiks = f"Konto {_account_label(account_cfg)}: " if multi_account else ""
+                log(f"! {prefiks}podtrzymanie sesji Decathlon GO nieudane: {_err}")
+        remote_auth = (remote or {}).get("auth_errors", {}).get(
+            account_cfg.get("konto") or KONTO_GLOWNE)
+        if remote_auth:
+            account_cfg["auth_error"] = remote_auth
+            prefiks = f"Konto {_account_label(account_cfg)}: " if multi_account else ""
+            log(f"! {prefiks}Irlandia odrzuciła sesję: {remote_auth}")
 
     if prev is None:
         log("Pierwszy bieg — zapisuję baseline, bez alertów o pojedynczych terminach.")
@@ -3316,43 +3653,82 @@ def run_once(announce_startup=False, skip_light=False, prefetched=None, defer_pu
     # Auto-rejestracja: kandydaci to NOWE terminy + te zapamiętane po awarii tokenu
     # (pending), o ile nadal są wolne i jeszcze niezapisane. Dzięki temu naprawienie
     # cookie sprawia, że automat dogoni termin, którego wcześniej nie mógł zająć.
-    pending_prev = set(state_doc.get("pending_ids", []))
-    candidate_ids = ((new_ids | pending_prev) & current_ids) - registered_ids
-    retried = (pending_prev & candidate_ids) - new_ids
-    if candidate_ids and reg_cfg.get("enabled"):
+    saved_accounts = (state_doc.get("accounts") or {}) if isinstance(state_doc, dict) else {}
+
+    def previous_account_state(account_cfg):
+        kid = account_cfg.get("konto") or KONTO_GLOWNE
+        saved = saved_accounts.get(kid) or {}
+        if account_cfg is reg_cfg:
+            # Migracja bez utraty incydentu konta głównego: stare pola są fallbackiem.
+            return {
+                "pending_ids": saved.get("pending_ids", state_doc.get("pending_ids", [])),
+                "auth_alert_sent": saved.get("auth_alert_sent", state_doc.get("auth_alert_sent", False)),
+                "auth_error_since": saved.get("auth_error_since", state_doc.get("auth_error_since", "")),
+            }
+        return saved
+
+    candidates_per_account = {}
+    for account_cfg in reg_cfgs:
+        kid = account_cfg.get("konto") or KONTO_GLOWNE
+        pending = set(previous_account_state(account_cfg).get("pending_ids", []))
+        candidates = ((new_ids | pending) & current_ids) - registered_ids
+        candidates_per_account[kid] = candidates
+        retried = (pending & candidates) - new_ids
         if retried:
-            log(f"↻ Ponawiam auto-rejestrację dla {len(retried)} zapamiętanego(-ych) "
-                f"terminu(-ów) po wcześniejszym błędzie tokenu.")
-        wyniki_lokalne, registered_ids, druga_fala = zarejestruj_z_obserwacja(
-            grafik, candidate_ids, reg_cfg, registered_ids, filters, tz, skip_light)
-        # update, nie podstawienie: wyniki z Irlandii muszą przetrwać, bo to one
-        # trafiają do powiadomienia jako „co udało się zarezerwować".
-        registration_results.update(wyniki_lokalne)
+            log(f"↻ Konto {_account_label(account_cfg)}: ponawiam {len(retried)} "
+                "zapamiętany(-e) termin(y) po błędzie tokenu.")
+
+    candidate_ids = set().union(*candidates_per_account.values())
+    remote_used = dict((remote or {}).get("used_by_account") or {})
+    if remote and not remote_used and remote.get("registered"):
+        remote_used[reg_cfg.get("konto") or KONTO_GLOWNE] = len(remote["registered"])
+    if candidate_ids and any(c.get("enabled") for c in reg_cfgs):
+        if multi_account:
+            wyniki_lokalne, registered_ids, druga_fala, _used = \
+                zarejestruj_kontami_z_obserwacja(
+                    grafik, candidates_per_account, reg_cfgs, registered_ids,
+                    filters, tz, skip_light, remote_used)
+        else:
+            wyniki_lokalne, registered_ids, druga_fala = zarejestruj_z_obserwacja(
+                grafik, candidate_ids, reg_cfg, registered_ids, filters, tz, skip_light)
+        # update, nie podstawienie: wyniki z Irlandii muszą przetrwać.
+        for sid, result in wyniki_lokalne.items():
+            if result[0] or not (registration_results.get(sid) or (False,))[0]:
+                registration_results[sid] = result
         current_ids |= set(druga_fala)
         new_ids |= set(druga_fala)
 
-    # Alert o tokenie: raz na incydent (kasowany, gdy token znów działa).
-    auth_error = reg_cfg.get("auth_error")
-    auth_alert_sent = bool(state_doc.get("auth_alert_sent"))
-    auth_verified = bool(candidate_ids) or reg_cfg.get("auth_checked")
-    auth_since = state_doc.get("auth_error_since")
-    if auth_error:
-        # KARENCJA: czytnik tokenu ma najpierw spróbować CICHEGO LOGOWANIA — po nieudanym
-        # odczycie ponawia po 45 s, a samo odbicie przez OAuth trwa do ~20 s. Push wysłany
-        # natychmiast trafiał więc do użytkownika, zanim aplikacja w ogóle spróbowała się
-        # naprawić, i bardzo często okazywał się fałszywym alarmem.
-        if not auth_since:
-            auth_since = datetime.now(timezone.utc).isoformat()
-            log(f"~ Problem z tokenem ({auth_error}) — daję cichemu logowaniu "
-                f"{AUTH_ALERT_GRACE}s, zanim powiadomię.")
-        elif not auth_alert_sent and _starszy_niz(auth_since, AUTH_ALERT_GRACE):
-            notify_auth_problem(topic, auth_error, book_url)
-            auth_alert_sent = True
-    else:
-        auth_since = None
-        if auth_alert_sent and auth_verified and reg_cfg.get("enabled"):
-            log("✓ Token Decathlon znów działa — kasuję alert.")
-            auth_alert_sent = False
+    # Alert o tokenie: osobny incydent na każde konto. Konto główne pozostaje także
+    # w starych polach state.json, aby aktualizacja i downgrade nie gubiły alarmu.
+    account_states = {}
+    for account_cfg in reg_cfgs:
+        kid = account_cfg.get("konto") or KONTO_GLOWNE
+        old_account = previous_account_state(account_cfg)
+        auth_error = account_cfg.get("auth_error")
+        auth_alert_sent = bool(old_account.get("auth_alert_sent"))
+        auth_verified = bool(candidates_per_account.get(kid)) or account_cfg.get("auth_checked")
+        auth_since = old_account.get("auth_error_since")
+        prefiks = f"Konto {_account_label(account_cfg)}: " if multi_account else ""
+        if auth_error:
+            if not auth_since:
+                auth_since = datetime.now(timezone.utc).isoformat()
+                log(f"~ {prefiks}problem z tokenem ({auth_error}) — daję cichemu "
+                    f"logowaniu {AUTH_ALERT_GRACE}s, zanim powiadomię.")
+            elif not auth_alert_sent and _starszy_niz(auth_since, AUTH_ALERT_GRACE):
+                notify_auth_problem(topic, f"{prefiks}{auth_error}", book_url)
+                auth_alert_sent = True
+        else:
+            auth_since = None
+            if auth_alert_sent and auth_verified and account_cfg.get("enabled"):
+                log(f"✓ {prefiks}token Decathlon znów działa — kasuję alert.")
+                auth_alert_sent = False
+        account_states[kid] = {
+            "pending_ids": account_cfg.get("pending_ids") or [],
+            "auth_alert_sent": auth_alert_sent,
+            "auth_error_since": auth_since or "",
+        }
+
+    main_account_state = account_states.get(reg_cfg.get("konto") or KONTO_GLOWNE, {})
 
     if new_ids:
         log(f"NOWE wolne terminy: {len(new_ids)}")
@@ -3363,7 +3739,9 @@ def run_once(announce_startup=False, skip_light=False, prefetched=None, defer_pu
         try:
             # Strzały mogły paść po OBU stronach: zdalnie w Irlandii i lokalnie
             # z zapasu. Dziennik ma pokazać jedno i drugie.
-            strzaly = list((remote or {}).get("shots") or []) + list(reg_cfg.get("shots") or [])
+            strzaly = list((remote or {}).get("shots") or [])
+            for account_cfg in reg_cfgs:
+                strzaly.extend(account_cfg.get("shots") or [])
             record_hunt(datetime.now(tz), tz, new_slots, registration_results,
                         strzaly, grid, bool(remote), topic,
                         wykryto=(remote or {}).get("wykryto"))
@@ -3397,11 +3775,12 @@ def run_once(announce_startup=False, skip_light=False, prefetched=None, defer_pu
         current_ids - failed_ids,
         registered_ids,
         reg_cfg.get("token"),
-        pending_ids=reg_cfg.get("pending_ids") or [],
-        auth_alert_sent=auth_alert_sent,
-        auth_error_since=auth_since or "",
+        pending_ids=main_account_state.get("pending_ids") or [],
+        auth_alert_sent=main_account_state.get("auth_alert_sent", False),
+        auth_error_since=main_account_state.get("auth_error_since") or "",
         startup_push_at=start_push_iso,
         decathlon_rt=reg_cfg.get("refresh_token"),
+        account_states=account_states if multi_account else None,
     )
     return 0
 
@@ -3489,6 +3868,15 @@ def oglos_tryb_pracy():
             "ale NIE REZERWUJĘ NICZEGO. Ustaw auto_register_dry_run: false, żeby "
             "dodatek naprawdę zajmował korty.")
         return
+    konta = konta_z_konfiguracji(cfg)
+    if len(konta) > 1:
+        log(f"✓ Auto-rejestracja WŁĄCZONA: {len(konta)} kont strzela równolegle "
+            "w każdą pasującą godzinę; zwycięzcy nadal biorą udział w kolejnych strzałach.")
+        brak_nazwy = [k["id"] for k in konta if not k.get("name")]
+        if brak_nazwy:
+            log(f"! Konta bez imienia uczestnika: {', '.join(brak_nazwy)} — serwer może "
+                "odrzucić ich rezerwacje. Uzupełnij pole name.")
+        return
     imie = opcja("AUTO_REGISTER_NAME", cfg, "auto_register_name")
     ile = opcja("AUTO_REGISTER_MAX", cfg, "auto_register_max", 1)
     kolejnosc = opcja("AUTO_REGISTER_ORDER", cfg, "auto_register_order", "earliest")
@@ -3529,7 +3917,7 @@ def wczytaj_nastawy(interval):
     if burst_env.strip():
         try:
             burst = parse_burst_env(burst_env)
-            burst["seconds"] = max(1, min(int(os.environ.get("BURST_SECONDS") or 15),
+            burst["seconds"] = max(1, min(int(os.environ.get("BURST_SECONDS") or 75),
                                           BURST_MAX_SECONDS))
             burst["interval"] = max(BURST_MIN_INTERVAL,
                                     float(os.environ.get("BURST_INTERVAL") or 0.5))
@@ -3583,7 +3971,7 @@ def wczytaj_nastawy(interval):
         log(f"☁ Zdalny strzał włączony: sprint i salwa lecą z {urllib.parse.urlsplit(remote_url).netloc}. "
             f"Gdy nie odpowie, poluję lokalnie.")
 
-    # Sprint: wąskie okno pobierania bez przerw, wycelowane w samą sekundę publikacji.
+    # Sprint: okno pobierania bez przerw, obejmujące typowy rozrzut pory publikacji.
     sprint = None
     sprint_env = os.environ.get("SPRINT", "")
     try:
@@ -3595,7 +3983,7 @@ def wczytaj_nastawy(interval):
         try:
             sprint = parse_burst_env(sprint_env)   # ten sam format co burst
             # Ten sam sufit co w Lambdzie — zapas lokalny musi umieć pokryć to samo okno.
-            sprint["seconds"] = max(1, min(int(os.environ.get("SPRINT_SECONDS") or 4), 60))
+            sprint["seconds"] = max(1, min(int(os.environ.get("SPRINT_SECONDS") or 50), 60))
             hour, minute, second = sprint["at"]
             log(f"🏁 Sprint: {','.join(sprint['days'])} o {hour:02d}:{minute:02d}:{second:02d}, "
                 f"przez {sprint['seconds']}s, {sprint_threads} wątków bez przerw "
@@ -3621,6 +4009,15 @@ def wykonaj_sprint(n, granice, now_local, in_sprint):
     zajmowało 62 linie i mieszało trzy odrębne sprawy: cykl życia okna, wywołanie zdalne
     i decyzję o zapasie lokalnym.
     """
+    cfg_now = load_config(quiet=True)
+    state_now = load_state_doc()
+    sprint_accounts = konta_z_konfiguracji(cfg_now)
+    if len(sprint_accounts) == 1:
+        sprint_reg_cfgs = [build_reg_cfg(cfg_now, state_now)]
+    else:
+        sprint_reg_cfgs = [build_reg_cfg(cfg_now, state_now, konto)
+                           for konto in sprint_accounts]
+
     if not in_sprint:
         # Sprint to najbardziej czasowo-krytyczny moment całego polowania —
         # milisekundy w znacznikach są tu potrzebne nawet bez zrywu.
@@ -3638,9 +4035,11 @@ def wykonaj_sprint(n, granice, now_local, in_sprint):
         # patrz `warm_connections`. Zostaje jako tanie ubezpieczenie na wypadek, gdyby
         # serwer jednak zamknął bezczynne gniazdo. Sprint swojej puli nie potrzebuje:
         # zaraz zacznie pobierać bez przerw.
-        if n.salvo_size > 1:
+        # Przy zdalnym sprincie Lambda rozgrzewa własne pule. Lokalne grzanie przed
+        # wywołaniem tylko opóźniałoby pierwszy request do Irlandii.
+        if n.salvo_size > 1 and not n.remote_url:
             odswiezone = time.monotonic()
-            warm_connections(salvo_pool(n.warm_size), n.warm_size, n.warm_url)
+            warm_account_connections(sprint_reg_cfgs, n.warm_size, n.warm_url)
             log(f"⇉ Salwa odświeżona przed sprintem "
                 f"[{int((time.monotonic() - odswiezone) * 1000)} ms]")
 
@@ -3656,8 +4055,7 @@ def wykonaj_sprint(n, granice, now_local, in_sprint):
         wynik, blad = call_remote(
             n.remote_url, n.remote_secret,
             remote_payload(n.first_listing[0], baseline, n.tzname, zostalo,
-                           n.sprint_threads,
-                           build_reg_cfg(load_config(quiet=True), load_state_doc())),
+                           n.sprint_threads, sprint_reg_cfgs[0], sprint_reg_cfgs),
             timeout=zostalo + REMOTE_TIMEOUT_MARGIN)
         if blad:
             # ZAPAS: gdy Irlandia milczy, polujemy lokalnie. Gorzej, ale wciąż.
@@ -3734,13 +4132,25 @@ def main():
             if active:
                 burst_window = bounds
                 log(f"⚡ Zryw START — co {burst['interval']}s przez {burst['seconds']}s")
+                sprint_window_now = burst_bounds(sprint, tz, now_local) if sprint else None
+                sprint_active_now = bool(
+                    sprint_window_now
+                    and sprint_window_now[0] <= now_local < sprint_window_now[1])
                 # Połączenia salwy stygną między polowaniami (serwer zamyka bezczynne),
                 # więc rozgrzewamy je TERAZ — inaczej pierwszy strzał zapłaciłby ~160 ms
                 # za uzgodnienie TLS, czyli dokładnie to, co salwa ma wyeliminować.
-                if warm_url and (salvo_size > 1 or sprint):
+                if not sprint_active_now and warm_url and (salvo_size > 1 or sprint):
                     warmed = time.monotonic()
                     if salvo_size > 1:
-                        warm_connections(salvo_pool(warm_size), warm_size, warm_url)
+                        cfg_warm = load_config(quiet=True)
+                        state_warm = load_state_doc()
+                        konta_warm = konta_z_konfiguracji(cfg_warm)
+                        if len(konta_warm) == 1:
+                            reg_warm = [build_reg_cfg(cfg_warm, state_warm)]
+                        else:
+                            reg_warm = [build_reg_cfg(cfg_warm, state_warm, konto)
+                                        for konto in konta_warm]
+                        warm_account_connections(reg_warm, warm_size, warm_url)
                     # Sprint ma WŁASNĄ pulę, więc jej połączenia trzeba rozgrzać osobno —
                     # inaczej pierwsze sekundy sprintu zjadłoby uzgadnianie TLS.
                     if sprint:
@@ -3748,9 +4158,9 @@ def main():
                     log(f"⇉ Połączenia gotowe (salwa {salvo_size if salvo_size > 1 else 0}, "
                         f"sprint {sprint_threads if sprint else 0}) "
                         f"[{int((time.monotonic() - warmed) * 1000)} ms]")
-                if remote_url:
+                if remote_url and not sprint_active_now:
                     # Zimny start Lambdy to ~165 ms na init plus ~75 ms na import
-                    # silnika. Pukamy TERAZ, na starcie zrywu, żeby o 11:00:51
+                    # silnika. Pukamy TERAZ, na starcie zrywu, żeby kolejne wywołanie
                     # funkcja była już ciepła — kontener żyje potem kilka minut.
                     zdalne = time.monotonic()
                     _, blad_warm = call_remote(remote_url, remote_secret, {"warm": True},

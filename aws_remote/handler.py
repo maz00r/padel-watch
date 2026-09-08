@@ -47,7 +47,7 @@ LAMBDA_PELNY_RDZEN_MB = 1769
 # 04.09 publikacja przyszła o 11:00:48 — najpóźniej w całej historii pomiarów, poza
 # oknem 11:00:05+40 s. Zmierzone pory publikacji rozciągają się od 11:00:13 do 11:00:48,
 # więc pełne pokrycie wymaga ~55 s. Timeout funkcji w konsoli AWS musi być WIĘKSZY
-# (zalecane 90 s): po zamknięciu okna zostaje jeszcze rejestracja i powrót do domu.
+# niż okno: domyślne 50 s mieści się w 60 s; dla pełnych 60 s trzeba ustawić 90 s.
 MAX_SPRINT_SEKUND = 60
 
 
@@ -107,59 +107,68 @@ def poluj(wejscie):
     if surowe_filtry:
         filtry = cp.parse_filters_env(surowe_filtry)
 
-    sekundy = max(1, min(float(wejscie.get("sprint_seconds") or 4), MAX_SPRINT_SEKUND))
+    sekundy = max(1, min(float(wejscie.get("sprint_seconds") or 50), MAX_SPRINT_SEKUND))
     watki = int(wejscie.get("sprint_threads") or 3)
     baseline = set(wejscie.get("baseline_ids") or [])
 
-    # Rozgrzewka połączeń salwy — dokładnie ta sama osłona co w dodatku. W regionie
-    # kosztuje kilka ms, a zdejmuje z równania uzgadnianie TLS w chwili strzału.
-    # NIE jest wyjaśnieniem wolnych strzałów z 13.08, tylko usunięciem jednej zmiennej.
-    salwa = min(int(wejscie.get("salvo") or 0), cp.SALVO_MAX)
-    if salwa > 1:
-        rozgrzane = time.monotonic()
-        cp.warm_connections(cp.salvo_pool(salwa), salwa,
-                            cp.LISTING_URL.format(id=cp.listing_id_from_url(wejscie["listing_url"])))
-        cp.log(f"Salwa rozgrzana [{int((time.monotonic() - rozgrzane) * 1000)} ms]")
+    def reg_cfg_from_input(raw):
+        return {
+            "enabled": bool(raw.get("enabled", True)),
+            "speculative": bool(raw.get("speculative")),
+            "token": raw.get("token") or "",
+            # browser_mode=True, mimo że tu ŻADNEJ przeglądarki nie ma. Chodzi
+            # o semantykę wygaśnięcia, nie o przeglądarkę:
+            #   False -> token uznany za wygasły już na TOKEN_EXPIRY_MARGIN (300 s)
+            #            przed czasem i próba serwerowego /auth/refresh, która
+            #            w Decathlon GO ZAWSZE kończy się 401,
+            #   True  -> wygasły znaczy exp w przeszłości, bez żadnego refreshu.
+            # Przy tokenie żyjącym ~15 min ustawienie False wywracało rejestrację
+            # przez ostatnią 1/3 jego życia. Tak przepadło 17:00 w dniu 12.08.
+            # Czekania na świeższy token z pliku nie ma się co bać: bez TOKEN_FILE
+            # `wait_for_fresher_token` wraca natychmiast.
+            "browser_mode": True,
+            "refresh_cookie": "", "refresh_token": "",
+            "konto": raw.get("id") or cp.KONTO_GLOWNE,
+            "account_name": (raw.get("account_name") or raw.get("name")
+                             or raw.get("id") or cp.KONTO_GLOWNE),
+            "filters_spec": raw.get("filters") or "",
+            "name": raw.get("name") or "",
+            "age": raw.get("age"),
+            "free_only": bool(raw.get("free_only", True)),
+            "max_per_run": (raw.get("max_per_run")
+                            if raw.get("max_per_run") is not None else 1),
+            "order": raw.get("order") or "earliest",
+            "salvo": raw.get("salvo") or 0,
+            # Odstęp musi być IDENTYCZNY po obu stronach — inaczej zapas lokalny
+            # strzelałby inaczej niż Irlandia i porównanie logów przestałoby mieć sens.
+            "stagger": raw.get("stagger", cp.SALVO_STAGGER_MS),
+            # Strzał czołowy musi działać TAK SAMO po obu stronach — inaczej zapas
+            # lokalny testowałby inną hipotezę niż Irlandia.
+            "lead": raw.get("lead", False),
+            "hedge": raw.get("hedge") or 1,
+        }
 
-    # KONFIGURACJA REJESTRACJI — budowana RAZ, przed pętlą partii. Musi przeżyć
-    # wszystkie rundy, bo niesie token (odświeżony przez którykolwiek strzał)
-    # i licznik zdobyczy.
-    reg_cfg = {
-        "enabled": True,
-        "speculative": bool(wejscie.get("speculative")),
-        "token": wejscie.get("token") or "",
-        # browser_mode=True, mimo że tu ŻADNEJ przeglądarki nie ma. Chodzi
-        # o semantykę wygaśnięcia, nie o przeglądarkę:
-        #   False -> token uznany za wygasły już na TOKEN_EXPIRY_MARGIN (300 s)
-        #            przed czasem i próba serwerowego /auth/refresh, która
-        #            w Decathlon GO ZAWSZE kończy się 401,
-        #   True  -> wygasły znaczy exp w przeszłości, bez żadnego refreshu.
-        # Przy tokenie żyjącym ~15 min ustawienie False wywracało rejestrację
-        # przez ostatnią 1/3 jego życia. Tak przepadło 17:00 w dniu 12.08.
-        # Czekania na świeższy token z pliku nie ma się co bać: bez TOKEN_FILE
-        # `wait_for_fresher_token` wraca natychmiast.
-        "browser_mode": True,
-        "refresh_cookie": "", "refresh_token": "",
-        "name": wejscie.get("name") or "",
-        "age": wejscie.get("age"),
-        "free_only": bool(wejscie.get("free_only", True)),
-        "max_per_run": wejscie.get("max_per_run") or 1,
-        "order": wejscie.get("order") or "earliest",
-        "salvo": wejscie.get("salvo") or 0,
-        # Odstęp musi być IDENTYCZNY po obu stronach — inaczej zapas lokalny
-        # strzelałby inaczej niż Irlandia i porównanie logów przestałoby mieć sens.
-        "stagger": wejscie.get("stagger", cp.SALVO_STAGGER_MS),
-        # Strzał czołowy musi działać TAK SAMO po obu stronach — inaczej zapas
-        # lokalny testowałby inną hipotezę niż Irlandia i porównanie logów
-        # przestałoby cokolwiek znaczyć.
-        "lead": wejscie.get("lead", False),
-        "hedge": wejscie.get("hedge") or 1,
-    }
-    limit = reg_cfg["max_per_run"]
+    # Stary payload nie ma `accounts` i nadal przechodzi dokładnie jedną ścieżką.
+    raw_accounts = wejscie.get("accounts")
+    multi_account = isinstance(raw_accounts, list) and len(raw_accounts) > 1
+    reg_cfgs = ([reg_cfg_from_input(raw) for raw in raw_accounts]
+                if multi_account else [reg_cfg_from_input(wejscie)])
+    reg_cfg = reg_cfgs[0]
+    limit = cp._account_limit(reg_cfg)
+
+    # Rozgrzewka połączeń salwy — osobna pula każdego konta, bo wspólna ośmiowątkowa
+    # pula kolejkowałaby dalsze konta jeszcze po naszej stronie.
+    salwa = min(int(wejscie.get("salvo") or reg_cfg.get("salvo") or 0), cp.SALVO_MAX)
     try:
-        limit = max(0, int(limit))
+        salwy_aktywne = any(int(c.get("salvo") or 0) > 1 for c in reg_cfgs)
     except (TypeError, ValueError):
-        limit = 1
+        salwy_aktywne = False
+    if salwy_aktywne:
+        rozgrzane = time.monotonic()
+        cp.warm_account_connections(
+            reg_cfgs, salwa,
+            cp.LISTING_URL.format(id=cp.listing_id_from_url(wejscie["listing_url"])))
+        cp.log(f"Salwy kont rozgrzane [{int((time.monotonic() - rozgrzane) * 1000)} ms]")
 
     # PĘTLA PARTII. Publikacja nie przychodzi naraz — 01.09 grafik sypnął dwiema partiami
     # w odstępie ~450 ms. Stara wersja kończyła się na PIERWSZYM trafieniu: sprint
@@ -173,7 +182,7 @@ def poluj(wejscie):
     szukanie = time.monotonic()
     koniec = szukanie + sekundy
     widziane = set(baseline)
-    wyniki, zapisane = {}, set()
+    wyniki, zapisane, uzyte = {}, set(), {}
     lid, doc, partie = None, None, 0
     pierwsze_wykrycie = None   # monotonic chwili, gdy zobaczyliśmy PIERWSZĄ partię
 
@@ -201,24 +210,30 @@ def poluj(wejscie):
                f"— {len(nowe)} nowych pasujących do filtra")
         if not nowe or not wejscie.get("enabled"):
             continue
-        # Limit obowiązuje CAŁE wywołanie, nie pojedynczą partię. Bez odejmowania
-        # zdobyczy trzy partie przy max_per_run=2 dałyby sześć rezerwacji.
-        reg_cfg["max_per_run"] = max(0, limit - len(zapisane))
-        if reg_cfg["max_per_run"] == 0:
-            # Nie ma po co dalej patrzeć: i tak nic więcej nie zapiszemy, a dobijanie
-            # do końca okna kosztuje czas Lambdy. Dalszą obserwację przejmuje zryw
-            # w domu, który i tak leci co 0,2 s.
-            cp.log(f"Limit {limit} wykorzystany — wracam do domu")
-            break
+        # W trybie jednego konta zachowujemy stary limit. Przy wielu kontach każde
+        # sprawne konto próbuje każdej godziny, także po wcześniejszym sukcesie.
+        if not multi_account:
+            reg_cfg["max_per_run"] = max(0, limit - len(zapisane))
+            if reg_cfg["max_per_run"] == 0:
+                cp.log(f"Limit {limit} wykorzystany — wracam do domu")
+                break
         # Wiek danych liczymy od chwili, w której TA partia przyszła.
-        reg_cfg["seen_at"] = zobaczone
+        for account_cfg in reg_cfgs:
+            account_cfg["seen_at"] = zobaczone
         ceny = {s["id"]: (doc.get("data", {}).get("attributes", {}) or {}).get("price")
                 for s in nowe}
         # Ten sam rdzeń co strona lokalna: rejestrujemy, patrząc RÓWNOLEGLE na to,
         # co pojawia się w trakcie zapisu. Zapis stąd trwa ~100–200 ms, ale publikacja
         # sypie partiami co ~450 ms — więc i tutaj mieściła się cała partia.
-        wyniki_partii, zapisane_partii, druga, swiezy = cp.rejestruj_obserwujac(
-            lid, nowe, ceny, reg_cfg, set(zapisane), filtry, tz, set(widziane))
+        if multi_account:
+            wyniki_partii, zapisane_partii, druga, swiezy, uzyte = \
+                cp.rejestruj_kontami_obserwujac(
+                    lid, nowe, ceny, reg_cfgs, set(zapisane), filtry, tz,
+                    set(widziane), uzyte)
+        else:
+            wyniki_partii, zapisane_partii, druga, swiezy = cp.rejestruj_obserwujac(
+                lid, nowe, ceny, reg_cfg, set(zapisane), filtry, tz, set(widziane))
+            uzyte[reg_cfg["konto"]] = len(zapisane_partii)
         wyniki.update(wyniki_partii)
         zapisane |= zapisane_partii
         if druga:
@@ -226,7 +241,7 @@ def poluj(wejscie):
             partie += 1
             if swiezy is not None:
                 doc = swiezy          # do domu jedzie najświeższy obraz grafiku
-        if reg_cfg.get("auth_error"):
+        if not multi_account and reg_cfg.get("auth_error"):
             cp.log(f"Przerywam partie: {reg_cfg['auth_error']}")
             break
 
@@ -242,8 +257,11 @@ def poluj(wejscie):
         "doc": doc,
         "results": {k: [bool(v[0]), v[1]] for k, v in wyniki.items()},
         "registered": sorted(zapisane),
-        # `shots` doklada sie samo przez cale wywolanie — reg_cfg zyje ponad partiami.
-        "shots": reg_cfg.get("shots") or [],
+        # `shots` dokładają się przez całe wywołanie na konfiguracji każdego konta.
+        "shots": [shot for c in reg_cfgs for shot in (c.get("shots") or [])],
+        "used_by_account": uzyte,
+        "auth_errors": {c["konto"]: c["auth_error"] for c in reg_cfgs
+                        if c.get("auth_error")},
         "timings": {"sprint_ms": sprint_ms, "batches": partie,
                     # ILE TEMU zobaczyliśmy pierwszą partię — liczone w chwili budowania
                     # odpowiedzi. Zegary monotoniczne obu maszyn są nieporównywalne, więc

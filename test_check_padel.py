@@ -2665,6 +2665,61 @@ class RemoteHandlerTest(RemoteHandlerHelpers, unittest.TestCase):
         self.assertTrue(all(v[0] for v in wynik["results"].values()))
         self.assertTrue(wynik["timings"]["sprint_ms"] >= 0)
 
+    def test_remote_sprint_uses_multiple_accounts_in_parallel(self):
+        accounts = [
+            {"id": "glowne", "account_name": "Patryk", "token": "jwt-p",
+             "salvo": 0, "max_per_run": 1, "enabled": True},
+            {"id": "ania", "account_name": "Ania", "token": "jwt-a",
+             "salvo": 0, "max_per_run": 1, "enabled": True},
+        ]
+        seen = []
+        claimed = set()
+        lock = threading.Lock()
+
+        def register(slot, price, cfg, speculative=False):
+            with lock:
+                seen.append((cfg["konto"], slot["id"]))
+                if slot["id"] in claimed:
+                    return False, "409"
+                claimed.add(slot["id"])
+                return True, "accepted"
+
+        with mock.patch.object(cp, "resolve_current_id", side_effect=lambda x: self.LID), \
+                mock.patch.object(cp, "fetch_listing", return_value=self.doc(15, 17)), \
+                mock.patch.object(cp, "register_slot", side_effect=register), \
+                mock.patch("sys.stdout", io.StringIO()):
+            response = self.handler.lambda_handler(
+                self.zadanie(self.tresc(accounts=accounts)), None)
+        result = self.rozpakuj(response)
+        self.assertEqual(len(result["registered"]), 2)
+        self.assertEqual(sum(result["used_by_account"].values()), 2)
+        self.assertEqual({kid for kid, _sid in seen}, {"glowne", "ania"})
+        for date_id in ("d15", "d17"):
+            self.assertEqual({kid for kid, sid in seen if sid.endswith(date_id)},
+                             {"glowne", "ania"})
+        self.assertTrue(any(":" in msg for ok, msg in result["results"].values() if ok))
+
+    def test_remote_auth_error_returns_with_the_account_id(self):
+        accounts = [
+            {"id": "glowne", "token": "jwt-p", "salvo": 0, "enabled": True},
+            {"id": "ania", "token": "jwt-a", "salvo": 0, "enabled": True},
+        ]
+
+        def register(slot, price, cfg, speculative=False):
+            if cfg["konto"] == "ania":
+                return False, "token odrzucony (HTTP 401)"
+            return True, "accepted"
+
+        with mock.patch.object(cp, "resolve_current_id", side_effect=lambda x: self.LID), \
+                mock.patch.object(cp, "fetch_listing", return_value=self.doc(15)), \
+                mock.patch.object(cp, "register_slot", side_effect=register), \
+                mock.patch("sys.stdout", io.StringIO()):
+            response = self.handler.lambda_handler(
+                self.zadanie(self.tresc(accounts=accounts)), None)
+        result = self.rozpakuj(response)
+        _prefetched, remote = cp.adopt_remote(result)
+        self.assertIn("401", remote["auth_errors"]["ania"])
+
     def test_token_never_appears_in_response(self):
         """Token wraca do domu tylko w postaci, w jakiej przyszedł — czyli wcale."""
         tresc = self.tresc()
@@ -2841,6 +2896,19 @@ class RemoteClientTest(unittest.TestCase):
         self.assertEqual(tresc["filters"], "mon-fri:15:00-02:00")
         self.assertEqual(tresc["baseline_ids"], ["a"])
         self.assertEqual(tresc["salvo"], 6)
+
+    def test_payload_carries_each_account_without_dropping_legacy_fields(self):
+        main = {"konto": "glowne", "account_name": "Patryk", "token": "jwt-p",
+                "salvo": 6, "max_per_run": 1, "enabled": True}
+        ania = {"konto": "ania", "account_name": "Ania", "token": "jwt-a",
+                "filters_spec": "mon-fri:17:00-22:00", "salvo": 6,
+                "max_per_run": 2, "enabled": True}
+        payload = cp.remote_payload("https://go.decathlon.pl/l/x", set(),
+                                    "Europe/Warsaw", 4, 3, main, [main, ania])
+        self.assertEqual(payload["token"], "jwt-p")
+        self.assertEqual([a["id"] for a in payload["accounts"]], ["glowne", "ania"])
+        self.assertEqual(payload["accounts"][1]["token"], "jwt-a")
+        self.assertEqual(payload["accounts"][1]["filters"], "mon-fri:17:00-22:00")
 
 
 class SalvoStartOffsetTest(SalvoHelpers, unittest.TestCase):
@@ -4862,9 +4930,21 @@ class SprintWindowCoversEveryObservedPublicationTest(unittest.TestCase):
 
     def test_the_addon_schema_allows_it_too(self):
         """Limit w Lambdzie nic nie da, jeśli konfiguracja dodatku nie pozwoli tego ustawić."""
-        cfg = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                "padel_browser", "config.yaml"), encoding="utf-8").read()
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "padel_browser", "config.yaml")
+        with open(path, encoding="utf-8") as config_file:
+            cfg = config_file.read()
         self.assertIn("sprint_seconds: int(1,60)", cfg)
+
+    def test_default_schedule_uses_requested_overlapping_windows(self):
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "padel_browser", "config.yaml")
+        with open(path, encoding="utf-8") as config_file:
+            cfg = config_file.read()
+        self.assertIn('burst: "mon-sun:11:00:00"', cfg)
+        self.assertIn("burst_seconds: 75", cfg)
+        self.assertIn('sprint: "mon-sun:11:00:00"', cfg)
+        self.assertIn("sprint_seconds: 50", cfg)
 
 
 class RemoteDetectionTimeTest(HuntJournalHelpers, unittest.TestCase):
@@ -5236,6 +5316,154 @@ class AccountsFromConfigTest(unittest.TestCase):
         self.assertEqual(cfg["konto"], cp.KONTO_GLOWNE)
         self.assertEqual(cfg["name"], "Patryk Mazurowski")
         self.assertEqual(cfg["token_file"], cp.TOKEN_FILE)
+
+
+class MultiAccountRegistrationTest(SalvoHelpers, unittest.TestCase):
+    """Konta równolegle ścigają ten sam najlepszy termin, potem przechodzą dalej."""
+
+    def configs(self, count=2, limit=1):
+        return [{"enabled": True, "konto": f"k{i}", "account_name": f"Konto {i}",
+                 "max_per_run": limit, "order": "earliest", "salvo": 0,
+                 "shots": []} for i in range(count)]
+
+    def test_two_accounts_really_hit_the_same_slot_in_parallel(self):
+        barrier = threading.Barrier(2, timeout=3)
+        calls = []
+        lock = threading.Lock()
+        claimed = set()
+
+        def register(slot, price, cfg, speculative=False):
+            with lock:
+                calls.append((cfg["konto"], slot["id"]))
+            if slot["id"] == "s17":
+                barrier.wait()
+            with lock:
+                if slot["id"] not in claimed:
+                    claimed.add(slot["id"])
+                    return True, "accepted"
+            return False, "409"
+
+        cfgs = self.configs()
+        with mock.patch.object(cp, "register_slot", side_effect=register), \
+                mock.patch("sys.stdout", io.StringIO()):
+            results, registered, used = cp.auto_register_accounts(
+                self.slots(17, 18), {}, cfgs, set(), TZ)
+        self.assertEqual(len(registered), 2)
+        first_round = [kid for kid, sid in calls if sid == "s17"]
+        self.assertEqual(set(first_round), {"k0", "k1"})
+        second_round = [kid for kid, sid in calls if sid == "s18"]
+        self.assertEqual(set(second_round), {"k0", "k1"},
+                         "zwycięzca pierwszej godziny też ma próbować następnej")
+        self.assertEqual(sum(used.values()), 2)
+        self.assertTrue(all(ok for ok, _msg in results.values()))
+
+    def test_there_is_no_combined_booking_limit(self):
+        cfgs = self.configs(count=3, limit=2)
+        claimed = set()
+        lock = threading.Lock()
+
+        def register(slot, price, cfg, speculative=False):
+            with lock:
+                if slot["id"] in claimed:
+                    return False, "409"
+                claimed.add(slot["id"])
+                return True, "accepted"
+
+        with mock.patch.object(cp, "register_slot", side_effect=register), \
+                mock.patch("sys.stdout", io.StringIO()):
+            _results, registered, used = cp.auto_register_accounts(
+                self.slots(15, 16, 17, 18, 19), {}, cfgs, set(), TZ)
+        self.assertEqual(len(registered), 5)
+        self.assertEqual(sum(used.values()), 5)
+
+    def test_auth_failure_of_one_account_does_not_stop_the_other(self):
+        def register(slot, price, cfg, speculative=False):
+            if cfg["konto"] == "k0":
+                return False, "token odrzucony (HTTP 401)"
+            return True, "accepted"
+
+        cfgs = self.configs()
+        with mock.patch.object(cp, "register_slot", side_effect=register), \
+                mock.patch("sys.stdout", io.StringIO()):
+            _results, registered, used = cp.auto_register_accounts(
+                self.slots(17, 18), {}, cfgs, set(), TZ)
+        self.assertEqual(used.get("k1"), 2)
+        self.assertEqual(len(registered), 2)
+        self.assertIn("401", cfgs[0]["auth_error"])
+        self.assertEqual(cfgs[0]["pending_ids"], [],
+                         "nie ponawiamy godzin zdobytych już przez drugie konto")
+        self.assertFalse(cfgs[1]["pending_ids"])
+
+    def test_each_account_has_its_own_salvo_pool(self):
+        self.assertIsNot(cp.salvo_pool(2, "ania"), cp.salvo_pool(2, "marek"))
+        self.assertIs(cp.salvo_pool(2, "ania"), cp.salvo_pool(2, "ania"))
+
+
+class MultiAccountStateTest(unittest.TestCase):
+    def test_account_incidents_are_saved_separately(self):
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.object(cp, "STATE_PATH", os.path.join(directory, "state.json")):
+            cp.save_state(
+                {"s1"}, set(), pending_ids=["main"], auth_alert_sent=True,
+                account_states={
+                    "glowne": {"pending_ids": ["main"], "auth_alert_sent": True},
+                    "ania": {"pending_ids": ["s1"], "auth_error_since": "2026-09-08T00:00:00+00:00"},
+                })
+            state = cp.load_state_doc()
+        self.assertEqual(state["accounts"]["ania"]["pending_ids"], ["s1"])
+        self.assertTrue(state["accounts"]["glowne"]["auth_alert_sent"])
+        self.assertNotIn("decathlon_jwt", state["accounts"]["ania"])
+
+
+class MultiAccountRunOnceTest(SalvoHelpers, unittest.TestCase):
+    def test_local_run_uses_all_configured_accounts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state_path = os.path.join(directory, "state.json")
+            with open(state_path, "w", encoding="utf-8") as f:
+                json.dump({"free_ids": [], "registered_ids": []}, f)
+            cfg = {
+                "accounts": [{"id": "glowne", "name": "Patryk"},
+                             {"id": "ania", "name": "Ania"}],
+                "auto_register": True, "auto_register_dry_run": False,
+                "auto_register_max": 1, "auto_register_salvo": 0,
+                "timezone": "Europe/Warsaw", "filters": "mon-sun:00:00-24:00",
+            }
+            grafik = cp.Grafik()
+            slots = self.slots(17, 18)
+            for slot in slots:
+                slot["listing_id"] = "kort"
+            grafik.current = {s["id"]: s for s in slots}
+            grafik.book_url = "https://go.decathlon.pl/l/kort"
+            grafik.book_url_by_id = {s["id"]: grafik.book_url for s in slots}
+            grafik.listing_price_by_id = {s["id"]: None for s in slots}
+            grafik.lid_by_id = {s["id"]: "kort" for s in slots}
+            grafik.meta_by_lid = {"kort": (grafik.book_url, None)}
+            claimed, seen = set(), []
+            lock = threading.Lock()
+
+            def register(slot, price, account_cfg, speculative=False):
+                with lock:
+                    seen.append((account_cfg["konto"], slot["id"]))
+                    if slot["id"] in claimed:
+                        return False, "409"
+                    claimed.add(slot["id"])
+                    return True, "accepted"
+
+            with mock.patch.object(cp, "STATE_PATH", state_path), \
+                    mock.patch.object(cp, "load_config", return_value=cfg), \
+                    mock.patch.object(cp, "zbierz_terminy", return_value=grafik), \
+                    mock.patch.object(cp, "ensure_decathlon_token", return_value=("jwt", None)), \
+                    mock.patch.object(cp, "register_slot", side_effect=register), \
+                    mock.patch.object(cp, "notify_new", return_value=set()), \
+                    mock.patch.object(cp, "record_hunt"), \
+                    mock.patch("sys.stdout", io.StringIO()):
+                self.assertEqual(cp.run_once(), 0)
+            with open(state_path, encoding="utf-8") as f:
+                state = json.load(f)
+        self.assertEqual(set(state["registered_ids"]), {"s17", "s18"})
+        self.assertEqual({kid for kid, _sid in seen}, {"glowne", "ania"})
+        self.assertEqual([sid for _kid, sid in seen].count("s17"), 2)
+        self.assertEqual([sid for _kid, sid in seen].count("s18"), 2)
 
 
 class ResourceReportTest(unittest.TestCase):

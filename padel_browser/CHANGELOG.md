@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.28.0 — wiele kont strzela równolegle
+
+- Wszystkie skonfigurowane konta biorą udział w rejestracji lokalnej i w zdalnym
+  sprincie w Irlandii. Stary pojedynczy payload Lambdy pozostaje obsługiwany.
+- W jednej rundzie konta równocześnie strzelają w ten sam najlepszy termin. Gdy jedno
+  wygra, sukces pozostaje zapisany, po czym **wszystkie sprawne konta, także zwycięzca,**
+  strzelają w kolejną godzinę. Każde konto ma własną, trwałą pulę połączeń salwy.
+- W trybie wielu kont nie ma łącznego ani licznego per konto limitu rezerwacji.
+  Naturalnym sufitem jest liczba pasujących godzin; stary `auto_register_max` nadal
+  chroni niezmienioną ścieżkę pojedynczego konta.
+- `pending_ids`, karencja błędu tokenu i alert są zapisywane osobno dla każdego konta.
+  Awaria jednej sesji nie zatrzymuje pozostałych kont.
+- Wartość `auto_register_max: 0` nadal działa w trybie jednego konta. Błędny filtr
+  konta wyłącza tylko to konto, zamiast przypadkiem rozszerzyć polowanie.
+- Dziennik strzałów oraz komunikat wyniku zawierają nazwę konta.
+- Domyślnie sprint i zryw zaczynają się o **11:00:00**. Sprint trwa 50 sekund, zryw
+  75 sekund co 0,2 sekundy, a timeout funkcji AWS pozostaje ustawiony na 60 sekund.
+
 ## 0.27.1 — kontrola przed zrywem mówi, ile kont jest gotowych
 
 `ile_zywych` było zdefiniowane i przetestowane, ale nigdzie nie używane — czyli nie było

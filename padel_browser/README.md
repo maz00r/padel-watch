@@ -36,11 +36,11 @@ przechodzisz normalne logowanie, łącznie z kodem z maila.
 | `log_level` | ile ma być w logu: `debug` / `info` / `warn` / `error` | `info` |
 | `filters` | godziny powiadomień; okna `;`, każde `DNI:HH:MM-HH:MM` | `mon-fri:15:00-02:00; sat-sun:00:00-24:00` |
 | `intervals` | inna częstotliwość w zadanych godzinach: `DNI:HH:MM-HH:MM=SEKUNDY` | `mon-fri:15:00-02:00=30` |
-| `burst` | **zryw**: krótkie, gęste sprawdzanie wycelowane w sekundę publikacji grafiku, `DNI:GG:MM:SS`. Puste = wyłączony | `mon-sun:11:00:45` |
-| `burst_seconds` | ile sekund trwa zryw (1–120) | `15` |
+| `burst` | **zryw**: krótkie, gęste sprawdzanie, `DNI:GG:MM:SS`. Puste = wyłączony | `mon-sun:11:00:00` |
+| `burst_seconds` | ile sekund trwa zryw (1–120) | `75` |
 | `burst_interval` | odstęp w zrywie, w sekundach (dozwolone poniżej 1 s) | `0.2` |
-| `sprint` | **sprint**: wąskie okno pobierania BEZ PRZERW, `DNI:GG:MM:SS`. Puste = wyłączony | `mon-sun:11:00:51` |
-| `sprint_seconds` | ile sekund trwa sprint (1–30) | `4` |
+| `sprint` | **sprint**: okno pobierania BEZ PRZERW, `DNI:GG:MM:SS`. Puste = wyłączony | `mon-sun:11:00:00` |
+| `sprint_seconds` | ile sekund trwa sprint (1–60) | `50` |
 | `sprint_threads` | ile wątków pobiera równolegle w sprincie (1–4) | `3` |
 | `auto_login` | gdy sesja GO wygaśnie, sam kliknij „ZALOGUJ SIĘ” w przeglądarce dodatku (nie wpisuje żadnych danych) | `true` |
 | `token_check_before` | ile minut przed zrywem sprawdzić sesję i ostrzec pushem, gdy nie żyje (0–240); `0` = wyłączone | `30` |
@@ -57,21 +57,22 @@ przechodzisz normalne logowanie, łącznie z kodem z maila.
 | `auto_register_name` | imię i nazwisko uczestnika wysyłane w rezerwacji | `Jan Kowalski` |
 | `auto_register_age` | wiek uczestnika, jeśli wydarzenie go wymaga | `34` |
 | `auto_register_paid` | pozwól tworzyć transakcje także dla płatnych terminów; płatność nadal trzeba dokończyć ręcznie | `false` |
-| `auto_register_max` | ile terminów maksymalnie zapisać w jednym przebiegu (0–10); `0` = nic | `1` |
+| `auto_register_max` | przy jednym koncie: ile terminów maksymalnie zapisać w przebiegu (0–10); tryb wielu kont próbuje każdej pasującej godziny | `1` |
 | `auto_register_order` | kolejność prób: `earliest` (od najwcześniejszego) lub `latest` (od najpóźniejszego) | `latest` |
 | `auto_register_lead` | najcenniejszy termin leci sam i pierwszy (**hipoteza obalona 31.08 — trzymaj wyłączone**) | `false` |
 | `auto_register_hedge` | ile **równoległych zapisów w najcenniejszy termin** (1 = wyłączone, maks. 3) | `2` |
 | `auto_register_salvo` | ile prób rejestracji wysyłać **równolegle** (0–6); `0`/`1` = po kolei, jak dawniej | `6` |
 | `auto_register_stagger` | odstęp w ms między strzałami salwy (0–100); `0` = wszystkie naraz | `8` |
-| `accounts` | lista kont; pierwsze jest główne, kolejne mają osobne profile i tokeny | `[]` |
+| `accounts` | lista kont; pierwsze jest główne, kolejne mają osobne profile, tokeny i równoległe strzały | `[]` |
 | `sonda_konta` | diagnostyczna sonda starego eksperymentu z kontekstami (zwykle puste) | `` |
 | `sonda_tryb` | tryb sondy diagnostycznej: `zaloguj` albo `sprawdz` | `zaloguj` |
 | `test_token` | jednorazowy test poświadczeń przy starcie (nic nie rezerwuje) | `false` |
 | `clear_state` | jednorazowe czyszczenie stanu: `registered` lub `all`; puste = nic nie rób | `` |
 
-> **Bezpieczniki auto-rejestracji.** Domyślnie `auto_register_max: 1`, więc gdy pojawi się
-> naraz wiele wolnych terminów, zostanie **jedna** rezerwacja — ta najwyżej w Twojej
-> kolejności (`auto_register_order`). Reszta poczeka na kolejny przebieg. Twardy błąd autoryzacji przerywa przebieg (bez dobijania się do API).
+> **Bezpieczniki auto-rejestracji.** Przy jednym koncie domyślne
+> `auto_register_max: 1` zostawia jedną rezerwację, najwyższą w kolejności
+> (`auto_register_order`). Przy wielu kontach wszystkie sprawne konta próbują każdej
+> pasującej godziny. Twardy błąd autoryzacji zatrzymuje tylko konto z wadliwą sesją.
 > Zacznij od `auto_register_dry_run: true` — wtedy app tylko **waliduje** zapis
 > (`speculative`), niczego nie rezerwując. Dopiero gdy w logach zobaczysz
 > `~ Auto-rejestracja (test, bez rezerwacji): … walidacja OK`, przełącz `dry_run` na `false`.
@@ -233,9 +234,10 @@ Okno sprintu musi ten rozrzut **pokryć**, bo poza nim Irlandia w ogóle nie obs
 a zapas lokalny strzela pięciokrotnie wolniej (448–1303 ms wobec 66–178 ms z regionu).
 Wąskie okno 11:00:30 + 10 s trafiało w 5 dni na 11.
 
-Zalecane: `sprint: mon-sun:11:00:05`, `sprint_seconds: 40`.
+Domyślne ustawienie to sprint i zryw od `11:00:00`: sprint trwa 50 sekund, a zryw
+75 sekund co 0,2 sekundy.
 
-**Timeout funkcji Lambda musi być większy niż okno sprintu** (przy 40 s ustaw 60 s).
+**Timeout funkcji Lambda musi być większy niż okno sprintu** (przy 50 s ustaw 60 s).
 Inaczej AWS ubije funkcję w trakcie obserwacji i nie odda nawet tego, co zdążyła
 zarezerwować.
 
@@ -279,7 +281,6 @@ accounts:
   - id: ania
     name: Ania Nowak
     filters: "mon-fri:17:00-22:00"
-    max_per_run: 1
   - id: marek
     name: Marek Nowak
 ```
@@ -293,8 +294,15 @@ Zbieracz później wraca tylko do profili z wygasłym tokenem. Nie wpisuje ani n
 haseł. Na 90 sekund przed publikacją nie uruchamia Chromium, żeby nie odbierać zasobów
 monitorowi.
 
-W wersji 0.27 mechanizm utrzymuje tokeny wielu kont, ale rejestracja nadal strzela kontem
-głównym. Równoległe polowanie per konto jest kolejnym etapem wdrożenia.
+Podczas publikacji wszystkie gotowe konta strzelają **jednocześnie w ten sam najlepszy
+termin**. Potem wszystkie, łącznie ze zwycięzcą poprzedniej godziny, przechodzą do
+kolejnej. Dotyczy to zarówno lokalnego zapasu, jak i sprintu w Irlandii.
+
+W trybie wielu kont nie obowiązuje `auto_register_max`: naturalnym limitem jest liczba
+godzin pasujących do globalnego filtra i opcjonalnego, węższego `filters` konta.
+Problem z tokenem jednego konta nie zatrzymuje pozostałych; termin do ponowienia
+i karencja alertu są pamiętane per konto. Przy jednym koncie `auto_register_max`
+działa dokładnie jak dotąd.
 
 ## Poziomy logowania
 
@@ -488,17 +496,15 @@ publikacją nie istnieje. W praktyce nie kosztowało dotąd żadnego terminu.
 W Dzienniku:
 
 ```
-[11:00:45.000] ⚡ Zryw START — co 0.2s przez 30s
-[11:00:45.252] ⇉ Połączenia gotowe (salwa 6, sprint 3) [252 ms], uwierzytelnienie 70–310 ms
+[11:00:00.000] ⚡ Zryw START — co 0.2s przez 75s
+[11:00:00.001] 🏁 Sprint START — 3 wątków bez przerw do 11:00:50
 [11:00:53.010] = Kort: 11 dostępnych, 5 pasujących do filtra (pobranie 104 ms)
 [11:00:53.015] ⇉ Salwa: 4 prób równolegle (pt 14.08 20:00, 19:00, 18:00, 17:00)
 [11:00:53.140] ! Auto-rejestracja nieudana dla pt 14.08 20:00: … 409 … [125 ms]
 [11:00:53.141] ✓ Auto-rejestracja: pt 14.08 19:00 — accepted [126 ms]
 ```
 
-> **Zryw musi startować kilka sekund przed publikacją** — rozgrzanie połączeń salwy
-> zajmuje ~250 ms i dzieje się na jego początku. Domyślne `11:00:45` przy publikacji
-> ~11:00:53 daje ośmiosekundowy zapas, czyli z dużym nadmiarem.
+> Rozgrzanie połączeń salwy zajmuje ~250 ms i dzieje się na początku zrywu.
 
 ### Ile terminów w ogóle było — licznik grafiku
 
@@ -569,12 +575,8 @@ Punkt odniesienia („co jest nowe") bierze się z **zapisanego stanu**, a nie z
 pobrania sprintu. Inaczej publikacja, która trafiłaby w pierwsze ~90 ms sprintu,
 wpadłaby do punktu odniesienia i sprint nigdy by się nie odpalił.
 
-> **Sprint ma być wąski.** Trzy wątki to ~24 zapytania na sekundę — domyślne 4 sekundy
-> dają ~95 zapytań, czyli tyle co zryw przez 30 s. Nie ustawiaj `sprint_seconds`
-> na kilkadziesiąt sekund, bo to już dobijanie się do serwera.
-
-Domyślnie `mon-sun:11:00:51` przez 4 s — okno 11:00:51–11:00:55 obejmuje zmierzoną
-sekundę publikacji (~11:00:53) z zapasem po obu stronach.
+Domyślnie sprint działa od `11:00:00` przez 50 s, a okno zrywu pozostaje aktywne
+do `11:01:15`.
 
 ### Ile z opóźnienia to sieć
 
@@ -605,12 +607,12 @@ sekundy, żeby nie zaśmiecać). Dochodzą też dwie liczby, dzięki którym da 
 przegraną na czynniki:
 
 ```
-[11:00:45.000] ⚡ Zryw START — co 0.2s przez 30s
+[11:00:00.000] ⚡ Zryw START — co 0.2s przez 75s
 [11:00:52.800] = Kort: 2 dostępnych, 1 pasujących do filtra (pobranie 98 ms)
 [11:00:53.010] = Kort: 11 dostępnych, 5 pasujących do filtra (pobranie 104 ms)
 [11:00:53.130] ! Auto-rejestracja nieudana dla pt 14.08 20:00: … 409 … [118 ms]
 [11:00:53.250] ✓ Auto-rejestracja: pt 14.08 15:00 — accepted [115 ms]
-[11:01:15.010] ⚡ Zryw koniec (okno 11:00:45–11:01:15) — wracam do zwykłego taktu
+[11:01:15.010] ⚡ Zryw koniec (okno 11:00:00–11:01:15) — wracam do zwykłego taktu
 ```
 
 Jak to czytać:
