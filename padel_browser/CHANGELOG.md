@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.28.2 — poprawki po polowaniu 8 września
+
+- Konta z JWT ważnym przez całe okno pracują w jednym wywołaniu AWS, bez restartów
+  co 5 sekund i ponownego rozgrzewania połączeń. Konta wymagające odnowienia
+  obserwują i rezerwują równolegle lokalnie, z dostępem do swojego pliku tokenu.
+  Jedno konto należy przez całe okno do jednego wykonawcy. Lokalna ścieżka ma
+  większe opóźnienie sieci, ale odnowa jej tokenu nie zatrzymuje sprawnych kont AWS.
+- Kolejka daje pierwszą próbę każdej nowej godzinie przed dodatkowymi kontami
+  wcześniejszej godziny. Najwyżej dwa cele w toku na konto. Brak bariery czekającej
+  na wynik całej poprzedniej godziny. Wiele kont używa jednej kopii na parę
+  konto/termin, również przy wcześniej zapisanym `auto_register_hedge: 3`.
+  Opcja hedge nadal działa dla pojedynczego konta; jej nowy domyślny poziom to 1.
+- Lokalny obserwator pracuje także podczas oczekiwania na odnowę JWT. Potwierdzone
+  odmowy autoryzacji można ponowić po zmianie tokenu. 409 i niepewne odpowiedzi
+  nie są ponawiane z powodu samej rotacji JWT. Limit pojedynczego konta pozostaje.
+- Końcowa kontrola przed startem sprawdza akceptację tokenu każdego konta w API
+  (3 s timeout, najwyżej cztery równoległe odczyty), osobno od ważności JWT.
+- Logi zachowują oryginalny czas AWS z milisekundami. Każdy wynik niesie konto,
+  termin, wykonawcę, czas startu i wiek danych. Odbiór wyniku sprintu nie jest już
+  opisywany jako chwila wykrycia. Sukcesy obu wykonawców są scalane bez nadpisania
+  późniejszą porażką.
+- Wymaga aktualizacji dodatku i paczki Lambdy (protokół 3). Nie wymaga zwiększenia
+  współbieżności AWS. Zaktualizowanie samych źródeł lokalnych nie aktualizuje HA/AWS.
+
 ## 0.28.1 — naprawa audytu: kolejka celów na bieżąco, wspólny budżet czasu, odnowienie tokenu w trakcie sprintu
 
 Audyt `AUDYT_PADEL.md` (kod `7a19d61`, 0.28.0) wskazał pięć problemów klasy P1/P2

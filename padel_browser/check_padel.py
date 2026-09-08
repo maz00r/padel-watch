@@ -332,6 +332,29 @@ def gotowosc_kont(publikacja):
     return opis
 
 
+def verify_accounts_before_hunt(start):
+    """Jedna ograniczona czasowo kontrola API każdego konta, bez rezerwacji."""
+    cfg, state = load_config(quiet=True), load_state_doc()
+    if not boolish(os.environ.get("AUTO_REGISTER") or cfg.get("auto_register")):
+        return
+    accounts = konta_z_konfiguracji(cfg)
+    def check(account):
+        reg = build_reg_cfg(cfg, state, account)
+        token = reg.get("token") or ""
+        expiry = jwt_expiry(token)
+        if not token or expiry <= time.time():
+            ok, detail = False, "brak ważnego JWT"
+        else:
+            ok, detail = verify_decathlon_token(token, timeout=3)
+        status = "API akceptuje" if ok else ("API odrzuca" if ok is False else "API niepotwierdzone")
+        remaining = max(0, int(expiry - time.time()))
+        covers = expiry > start.timestamp() + 79
+        log(f"🔑 Konto {_account_label(reg)}: {status} ({detail}); JWT jeszcze {remaining}s; "
+            + ("ważny przez całe polowanie." if covers else "wymaga odnowienia przed końcem polowania."))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(4, max(1, len(accounts)))) as pool:
+        list(pool.map(check, accounts))
+
+
 def preflight_token(now_local, tz, topic, book_url):
     """Na X minut przed zrywem sprawdza, czy sesja żyje. Raz na dobę.
 
@@ -349,8 +372,8 @@ def preflight_token(now_local, tz, topic, book_url):
     start = burst_start_today(now_local, tz)
     if start is None:
         return None
-    if start - timedelta(minutes=2) <= now_local < start and _preflight_final_on != now_local.date():
-        log("🔑 Końcowa kontrola ważności JWT." + gotowosc_kont(start))
+    if start - timedelta(minutes=2) <= now_local < start - timedelta(seconds=15) and _preflight_final_on != now_local.date():
+        verify_accounts_before_hunt(start)
         _preflight_final_on = now_local.date()
     try:
         ile_wczesniej = max(0, min(int(os.environ.get("TOKEN_CHECK_BEFORE")
@@ -1462,7 +1485,7 @@ def ensure_decathlon_token(cfg):
     return fresh, None
 
 
-def verify_decathlon_token(token):
+def verify_decathlon_token(token, timeout=30):
     """Pyta SERWER, czy token faktycznie działa (GET, bez skutków ubocznych).
 
     Samo sprawdzenie `exp` z JWT jest lokalne i nic nie dowodzi — token może być
@@ -1483,7 +1506,7 @@ def verify_decathlon_token(token):
         },
     )
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             return (200 <= resp.status < 300), f"HTTP {resp.status}"
     except urllib.error.HTTPError as e:
         try:
@@ -2198,6 +2221,7 @@ def fire_salvo(targets, listing_price_by_id, cfg, speculative, size, ranks=None)
             time.sleep(numer * odstep)
         local = dict(cfg)
         started = time.monotonic()
+        started_at = time.time()
         try:
             ok, msg = register_slot(slot, listing_price_by_id.get(slot["id"]), local,
                                     speculative=speculative)
@@ -2209,6 +2233,8 @@ def fire_salvo(targets, listing_price_by_id, cfg, speculative, size, ranks=None)
         if ok and cfg.get("_shot_completed"):
             cfg["_shot_completed"](slot["id"])
         return {"slot": slot, "ok": ok, "msg": msg,
+                "started_at": started_at,
+                "detected_at": (started_at - (started - zobaczone) if zobaczone is not None else None),
                 "ms": int((time.monotonic() - started) * 1000),
                 # Ile czasu minęło od chwili, gdy zobaczyliśmy ten termin jako wolny,
                 # do chwili, gdy ruszył zapis. To jest opóźnienie, które przegrywa
@@ -2472,8 +2498,9 @@ def remote_payload(listing_url, baseline_ids, tz_name, seconds, threads, reg_cfg
         "speculative": bool(reg_cfg.get("speculative")),
         "enabled": bool(reg_cfg.get("enabled")),
     }
-    if reg_cfgs and len(reg_cfgs) > 1:
+    if reg_cfgs and (len(reg_cfgs) > 1 or reg_cfg.get("multi_account_mode")):
         payload["accounts"] = [_remote_account_cfg(c) for c in reg_cfgs]
+        payload["multi_account_mode"] = True
     return payload
 
 
@@ -2485,16 +2512,15 @@ def adopt_remote(wynik):
     trzeba by ich szukać w CloudWatch, a to jedyny ślad po sekundzie publikacji.
     """
     for linia in wynik.get("log") or []:
-        # Zdalna linia ma już swój znacznik czasu, a `log()` dokłada własny —
-        # bez tego w Dzienniku byłyby dwa obok siebie.
-        log(f"   ☁ {re.sub(r'^\[[^]]+\]\s*', '', linia)}")
+        # Zewnętrzny czas to odbiór wyniku, wewnętrzny to faktyczne zdarzenie w AWS.
+        log(f"   ☁ {linia}")
     czasy = wynik.get("timings") or {}
     if czasy:
         # Licznik partii pokazujemy TAKŻE przy zerze. Jego brak jest jedynym sygnałem,
         # że Lambda chodzi na kodzie sprzed 0.20.0 — a ukrywanie zera odbierało
         # możliwość odróżnienia „stary kod" od „nowy kod, nic nie znalazł".
         partie = czasy.get("batches")
-        log(f"☁ Irlandia: sprint {czasy.get('sprint_ms', '?')} ms, "
+        log(f"☁ Wynik polowania: obserwacja {czasy.get('sprint_ms', '?')} ms, "
             f"całość {czasy.get('total_ms', '?')} ms"
             + (f", {partie} {plural(partie, 'partia', 'partie', 'partii')}"
                if partie is not None else " (stara wersja funkcji — wgraj paczkę)"))
@@ -2663,6 +2689,7 @@ def auto_register_new_slots(slots, listing_price_by_id, cfg, already_registered)
             slot, msg, ms = res["slot"], res["msg"], res["ms"]
             when = fmt_when(slot["start_utc"].astimezone(_log_tz()), short=True)
             cfg["shots"].append({"when": when, "ok": bool(res["ok"]), "ms": ms,
+                                 "started_at": res.get("started_at"), "detected_at": res.get("detected_at"),
                                  "start_ms": res.get("start_ms", 0),
                                  "seen_ms": res.get("seen_ms"), "salwa": True,
                                  "hedge": ile_kopii.get(slot["id"], 1) > 1,
@@ -2740,11 +2767,14 @@ def auto_register_new_slots(slots, listing_price_by_id, cfg, already_registered)
         # Czas każdej próby: przy wyścigu o termin to najważniejsza liczba w Dzienniku —
         # mówi, ile kosztuje nieudany strzał i ile zostało do zwycięskiego.
         attempt_started = time.monotonic()
+        started_at = time.time()
         ok, msg = register_slot(slot, listing_price_by_id.get(sid), cfg, speculative=speculative)
         took_ms = int((time.monotonic() - attempt_started) * 1000)
         zobaczone = cfg.get("seen_at")
         wiek = None if zobaczone is None else int((attempt_started - zobaczone) * 1000)
         cfg["shots"].append({"when": when, "ok": bool(ok), "ms": took_ms,
+                             "started_at": started_at,
+                             "detected_at": (started_at - (attempt_started - zobaczone) if zobaczone is not None else None),
                              "start_ms": None, "seen_ms": wiek, "salwa": False,
                              "why": "" if ok else skroc_powod(msg)})
         results[sid] = (ok, msg)
@@ -3141,8 +3171,9 @@ def _merge_registration_results(target, source, reg_cfg):
 
 def auto_register_accounts(slots, listing_price_by_id, reg_cfgs, already_registered, tz,
                            filters=None, used_by_account=None,
-                           candidate_ids_by_account=None, discoveries=None, deadline=None):
-    """Strumieniowe wyniki: sukces zwalnia kolejny cel, pozne odpowiedzi sa rozliczane."""
+                           candidate_ids_by_account=None, discoveries=None, deadline=None,
+                           keep_watching=False, refresh_tokens=False, respect_limits=False):
+    """Sprawiedliwa kolejka pierwszych prób; rozliczamy również późne odpowiedzi."""
     configs = [c for c in reg_cfgs if c.get("enabled")]
     registered, results, used = set(already_registered), {}, dict(used_by_account or {})
     if not configs:
@@ -3155,7 +3186,8 @@ def auto_register_accounts(slots, listing_price_by_id, reg_cfgs, already_registe
     busy = collections.Counter()
     stopped = {c["konto"] for c in configs if c.get("auth_error")}
     futures = {}
-    gate = None
+    rejected = {}
+    next_refresh = 0.0
     latest = str(configs[0].get("order") or "earliest").lower() in LATEST_FIRST_VALUES
     for c in configs:
         c.setdefault("shots", [])
@@ -3183,19 +3215,31 @@ def auto_register_accounts(slots, listing_price_by_id, reg_cfgs, already_registe
     with concurrent.futures.ThreadPoolExecutor(
             max_workers=len(configs) * 2, thread_name_prefix="konta") as pool:
         while True:
-            new_arrivals = False
+            if refresh_tokens and time.monotonic() >= next_refresh:
+                next_refresh = time.monotonic() + 0.2
+                for c in configs:
+                    kid = c["konto"]
+                    fresh = token_from_file(c.get("token_file")) if c.get("token_file") else ""
+                    if fresh and fresh != c.get("token") and jwt_expiry(fresh) > time.time():
+                        c["token"] = newer_decathlon_token(c.get("token") or "", fresh)
+                    # Nie ponawiamy niepewnych odpowiedzi ani 409 po rotacji JWT.
+                    # Tylko potwierdzona odmowa autoryzacji pozwala na powtórkę.
+                    if c.get("token") != rejected.get(kid) and jwt_expiry(c.get("token")) > time.time():
+                        stopped.discard(kid)
+                        c.pop("auth_error", None)
+                        for sid, group in groups.items():
+                            if kid in group["auth_failed"] and not busy[kid]:
+                                group["auth_failed"].discard(kid)
+                                if sid not in registered and c not in group["waiting"]:
+                                    group["waiting"].append(c)
             while True:
                 try:
                     event = events.get_nowait()
                 except queue.Empty:
                     break
-                if event[0] == "hit":
-                    if event[1] in groups:
-                        groups[event[1]]["released"] = True
-                elif event[0] == "slots":
+                if event[0] == "slots":
                     _, items, prices, seen_at = event
                     add(items, prices, seen_at)
-                    new_arrivals = True
 
             for future in list(futures):
                 if not future.done():
@@ -3213,40 +3257,62 @@ def auto_register_accounts(slots, listing_price_by_id, reg_cfgs, already_registe
                 registered.update(won)
                 c["token"] = newer_decathlon_token(c.get("token") or "", local.get("token") or "")
                 for shot in local["shots"]:
-                    shot.update(konto=kid, account_name=_account_label(c), slot_id=sid)
+                    shot.update(konto=kid, account_name=_account_label(c), slot_id=sid,
+                                execution=c.get("execution", "aws" if c.get("hunt_deadline") else "local"))
+                    shot_time = (datetime.fromtimestamp(shot["started_at"], timezone.utc).isoformat(timespec="milliseconds")
+                                 if shot.get("started_at") is not None else "nieznany")
+                    log(f"⏱ Konto {_account_label(c)} | {sid} | {shot['execution']} | "
+                        f"start {shot_time} | dane sprzed {shot.get('seen_ms')} ms | "
+                        f"odpowiedź {shot.get('ms')} ms | {'OK' if shot.get('ok') else shot.get('why', '')}")
                 c["shots"].extend(local["shots"])
                 ok = bool((out.get(sid) or (False,))[0])
                 if ok:
                     used[kid] = used.get(kid, 0) + 1
-                    group["released"] = True
                 if local.get("auth_error"):
                     c["auth_error"] = local["auth_error"]
                     stopped.add(kid)
-                if not group["remaining"] and not group["waiting"]:
-                    group["released"] = True
+                    rejected[kid] = local.get("token")
+                    group["auth_failed"].add(kid)
 
             can_start = deadline is None or time.monotonic() < deadline
             pending = sorted((sid for sid in targets if sid not in groups),
                              key=lambda sid: targets[sid][0]["start_utc"], reverse=latest)
-            if can_start and pending and (gate is None or groups[gate]["released"] or new_arrivals):
-                sid = pending[0]
-                groups[sid] = {"waiting": list(targets[sid][1]), "remaining": 0, "released": False}
-                gate = sid
+            for sid in pending:
+                groups[sid] = {"waiting": list(targets[sid][1]), "remaining": 0,
+                               "auth_failed": set(), "started": 0}
 
-            for sid, group in groups.items():
-                s, _, seen_at = targets[sid]
-                for c in list(group["waiting"]):
+            # Najpierw pierwsza próba KAŻDEJ godziny, potem kolejne konta.
+            # Łącznie najwyżej dwa cele/konto; świeży cel wyprzedza dalsze kopie.
+            progress = True
+            while can_start and progress:
+                progress = False
+                for sid in sorted(groups, key=lambda sid: (groups[sid]["started"],
+                                  -targets[sid][0]["start_utc"].timestamp() if latest
+                                  else targets[sid][0]["start_utc"].timestamp())):
+                    group = groups[sid]
+                    s, _, seen_at = targets[sid]
+                    available = []
+                    for c in list(group["waiting"]):
+                        kid = c["konto"]
+                        if kid in stopped:
+                            if not refresh_tokens:
+                                group["waiting"].remove(c)
+                            continue
+                        if refresh_tokens and jwt_expiry(c.get("token")) <= time.time():
+                            continue
+                        if respect_limits and used.get(kid, 0) >= _account_limit(c):
+                            group["waiting"].remove(c)
+                            continue
+                        if busy[kid] < (1 if respect_limits else 2):
+                            available.append(c)
+                    if not available:
+                        continue
+                    c = min(available, key=lambda c: busy[c["konto"]])
                     kid = c["konto"]
-                    if kid in stopped or not can_start:
-                        group["waiting"].remove(c)
-                        continue
-                    if busy[kid] >= 2:
-                        continue
                     group["waiting"].remove(c)
-                    local = dict(c, max_per_run=1, shots=[])
+                    local = dict(c, max_per_run=1, shots=[], hedge=1 if not respect_limits else c.get("hedge", 1))
                     if seen_at is not None:
                         local["seen_at"] = seen_at
-                    local["_shot_completed"] = lambda found: events.put(("hit", found))
                     log(f"⇉ Konto {_account_label(c)}: próbuję {fmt_when(s['start_utc'].astimezone(tz), short=True)}")
                     # Migawka z wejscia: kazde zakwalifikowane konto odda probe, takze po cudzym sukcesie.
                     future = pool.submit(auto_register_new_slots, [s], listing_price_by_id, local, initial)
@@ -3254,16 +3320,17 @@ def auto_register_accounts(slots, listing_price_by_id, reg_cfgs, already_registe
                     attempted.add((kid, sid))
                     busy[kid] += 1
                     group["remaining"] += 1
-                if not group["remaining"] and not group["waiting"]:
-                    group["released"] = True
+                    group["started"] += 1
+                    progress = True
 
             waiting = any(g["waiting"] for g in groups.values())
-            if not futures and not waiting:
-                if not can_start or (not pending and events.empty()):
-                    break
+            if not futures and (not can_start or (not keep_watching and not waiting and events.empty())):
+                break
             if futures:
                 concurrent.futures.wait(tuple(futures), timeout=0.005,
                                         return_when=concurrent.futures.FIRST_COMPLETED)
+            else:
+                time.sleep(0.01)
 
     for c in configs:
         kid = c["konto"]
@@ -3333,7 +3400,9 @@ def obserwuj_podczas_zapisu(lid, filters, tz, znane_ids, on_slots=None, deadline
                 # a zawieszone pobranie trzyma wątek puli sprintu jeszcze długo po
                 # `stop.set()`. Przy 60 s jeden taki wątek blokowałby slot przez CAŁE
                 # okno zrywu, i to dokładnie w sekundzie publikacji.
-                doc = fetch_listing(lid, timeout=OBSERWATOR_TIMEOUT)
+                timeout = (max(0.05, min(OBSERWATOR_TIMEOUT, deadline - time.monotonic()))
+                           if deadline is not None else OBSERWATOR_TIMEOUT)
+                doc = fetch_listing(lid, timeout=timeout)
             except Exception:  # noqa: BLE001 - obserwacja nie może wywrócić polowania
                 stop.wait(0.05)
                 continue
@@ -3532,7 +3601,8 @@ def rejestruj_obserwujac(lid, sloty, ceny, cfg, registered, filters, tz, znane,
 
 def rejestruj_kontami_obserwujac(lid, sloty, ceny, reg_cfgs, registered, filters, tz,
                                  znane, used_by_account=None, candidate_ids_by_account=None,
-                                 obserwuj=True):
+                                 obserwuj=True, keep_watching=False, refresh_tokens=False,
+                                 respect_limits=False):
     """Obserwator dostarcza nowe cele w trakcie zapisow wszystkich partii."""
     events = queue.Queue()
     deadlines = [c["hunt_deadline"] for c in reg_cfgs if c.get("hunt_deadline")]
@@ -3546,7 +3616,9 @@ def rejestruj_kontami_obserwujac(lid, sloty, ceny, reg_cfgs, registered, filters
     try:
         results, registered, used = auto_register_accounts(
             sloty, dict(ceny), reg_cfgs, registered, tz, filters,
-            used_by_account, candidate_ids_by_account, events, deadline)
+            used_by_account, candidate_ids_by_account, events, deadline,
+            keep_watching=keep_watching, refresh_tokens=refresh_tokens,
+            respect_limits=respect_limits)
     finally:
         if observer:
             observer[0].set()
@@ -4058,64 +4130,121 @@ def wczytaj_nastawy(interval):
     return n
 
 
-def remote_with_fresh_tokens(n, baseline, deadline, reg_cfgs):
-    """Krotkie odcinki tylko przy ryzyku wygasniecia JWT; stan przechodzi miedzy nimi."""
-    combined = None
+def _local_token_hunt(n, baseline, deadline, configs, multi_account):
+    """Tylko konta nieprzekazane do AWS. Świeże JWT czytamy bez zatrzymywania obserwatora."""
     started = time.monotonic()
-    seen = set(baseline)
-    while time.monotonic() < deadline:
-        remaining = deadline - time.monotonic()
-        now = time.time()
-        risky = any(0 < jwt_expiry(c.get("token")) <= now + remaining + 4 for c in reg_cfgs)
-        seconds = min(5, remaining) if risky else remaining
+    configs = [dict(c, hunt_deadline=deadline, request_deadline=deadline + 3,
+                    shots=[], execution="local") for c in configs]
+    lid = listing_id_from_url(n.first_listing[0])
+    results, registered, extra, doc, used = rejestruj_kontami_obserwujac(
+        lid, [], {}, configs, set(), resolve_filters(load_config(quiet=True)), n.tz,
+        set(baseline), keep_watching=True, refresh_tokens=True,
+        respect_limits=not multi_account)
+    shots = [s for c in configs for s in c.get("shots", [])]
+    seen_times = [s.get("detected_at") for s in shots if s.get("detected_at")]
+    return {"ok": True, "protocol_version": 3, "listing_id": lid, "doc": doc,
+            "results": results, "registered": sorted(registered), "shots": shots,
+            "used_by_account": used,
+            "auth_errors": {c["konto"]: c["auth_error"] for c in configs if c.get("auth_error")},
+            "pending_ids": sorted({sid for c in configs for sid in c.get("pending_ids", [])}),
+            "seen_ids": sorted(set(baseline) | set(extra)),
+            "timings": {"sprint_ms": int((time.monotonic() - started) * 1000),
+                        "batches": int(bool(results)),
+                        "first_hit_ago_ms": (int((time.time() - min(seen_times)) * 1000)
+                                             if seen_times else None)}}
+
+
+def _merge_hunt_results(parts, elapsed_ms):
+    """Łączy rozłączne konta. Sukcesy są lepkie, czasy wykrycia obejmują oczekiwanie."""
+    combined = {"ok": True, "doc": None, "listing_id": None, "results": {},
+                "registered": [], "shots": [], "log": [], "used_by_account": {},
+                "auth_errors": {}, "pending_ids": [], "timings": {}}
+    first_hits = []
+    for result, received_at in parts:
+        if result.get("doc") is not None:
+            combined["doc"], combined["listing_id"] = result["doc"], result["listing_id"]
+        for sid, value in (result.get("results") or {}).items():
+            if value[0] or not combined["results"].get(sid, (False,))[0]:
+                combined["results"][sid] = value
+        for key in ("registered", "pending_ids"):
+            combined[key] = sorted(set(combined[key]) | set(result.get(key) or []))
+        for key in ("shots", "log"):
+            combined[key].extend(result.get(key) or [])
+        for key in ("used_by_account", "auth_errors"):
+            combined[key].update(result.get(key) or {})
+        timing = result.get("timings") or {}
+        age = timing.get("first_hit_ago_ms")
+        if age is not None:
+            first_hits.append(received_at - age / 1000)
+    combined["pending_ids"] = sorted(set(combined["pending_ids"]) - set(combined["registered"]))
+    combined["timings"] = {
+        "total_ms": elapsed_ms,
+        "sprint_ms": max((p.get("timings", {}).get("sprint_ms", 0) for p, _ in parts), default=0),
+        "batches": sum(p.get("timings", {}).get("batches", 0) for p, _ in parts),
+        "first_hit_ago_ms": int((time.monotonic() - min(first_hits)) * 1000) if first_hits else None}
+    return combined
+
+
+def remote_with_fresh_tokens(n, baseline, deadline, reg_cfgs):
+    """Jedno wywołanie AWS; odnowa ryzykownych kont odbywa się równolegle lokalnie.
+
+    Konto należy do dokładnie jednego wykonawcy przez całe okno. Nie przejmujemy
+    konta z AWS po niepewnej odpowiedzi i nie wymagamy większej współbieżności Lambdy.
+    """
+    started = time.monotonic()
+    multi = len(reg_cfgs) > 1
+    until = time.time() + max(0, deadline - started) + 4
+    remote_configs, local_configs = [], []
+    for c in reg_cfgs:
+        local = dict(c, multi_account_mode=multi)
+        if multi:
+            local["hedge"] = 1
+        renewable = c.get("browser_mode") and c.get("token_file")
+        # Bez pliku przeglądarki lokalny wykonawca nie ma skąd dostać odnowienia.
+        # Zachowujemy wtedy dotychczasową próbę AWS z dostarczonym tokenem.
+        (remote_configs if not renewable or jwt_expiry(c.get("token")) > until else local_configs).append(local)
+    log(f"☁ Podział kont: {len(remote_configs)} w ciągłym sprincie AWS, "
+        f"{len(local_configs)} lokalnie z odnową JWT; jedna próba na konto i termin w trybie wielu kont.")
+
+    def remote_hunt():
+        seconds = max(0.05, deadline - time.monotonic())
         result, error = call_remote(
             n.remote_url, n.remote_secret,
-            remote_payload(n.first_listing[0], seen, n.tzname, seconds,
-                           n.sprint_threads, reg_cfgs[0], reg_cfgs),
-            timeout=min(seconds + REMOTE_TIMEOUT_MARGIN, deadline + REMOTE_TIMEOUT_MARGIN - time.monotonic()))
-        if error:
-            if combined is None:
-                return None, error
-            log(f"! Kolejny odcinek Irlandii nieudany: {error}; zachowuję wcześniejsze wyniki.")
-            break
-        if len(reg_cfgs) > 1 and result.get("protocol_version", 0) < 2:
-            log("! Lambda nie potwierdziła protokołu 2 — wgraj aktualną paczkę AWS.")
-        if combined is None:
-            combined = dict(result)
-            combined["timings"] = dict(result.get("timings") or {})
-        else:
-            if result.get("doc") is not None:
-                combined["doc"], combined["listing_id"] = result["doc"], result["listing_id"]
-            for sid, value in (result.get("results") or {}).items():
-                if value[0] or not (combined.setdefault("results", {}).get(sid) or [False])[0]:
-                    combined.setdefault("results", {})[sid] = value
-            combined["registered"] = sorted(set(combined.get("registered") or []) | set(result.get("registered") or []))
-            combined["shots"] = list(combined.get("shots") or []) + list(result.get("shots") or [])
-            combined["log"] = list(combined.get("log") or []) + list(result.get("log") or [])
-            combined.setdefault("timings", {})["batches"] = (
-                combined.get("timings", {}).get("batches", 0) + result.get("timings", {}).get("batches", 0))
-            for kid, count in (result.get("used_by_account") or {}).items():
-                combined.setdefault("used_by_account", {})[kid] = combined["used_by_account"].get(kid, 0) + count
-        # Wiek pierwszego wykrycia musi obejmowac rowniez pozniejsze odcinki.
-        if result.get("doc") is not None and "_detected_at" not in combined:
-            age = result.get("timings", {}).get("first_hit_ago_ms")
-            combined["_detected_at"] = time.monotonic() - (age or 0) / 1000
-        combined["auth_errors"] = result.get("auth_errors") or {}
-        seen.update(result.get("seen_ids") or [])
-        seen.difference_update(result.get("pending_ids") or [])
-        seen.update(combined.get("registered") or [])
-        if not risky or result.get("protocol_version", 0) < 2:
-            break
-        cfg, state = load_config(quiet=True), load_state_doc()
-        accounts = konta_z_konfiguracji(cfg)
-        reg_cfgs = ([build_reg_cfg(cfg, state, account) for account in accounts]
-                    if len(accounts) > 1 else [build_reg_cfg(cfg, state)])
-    if combined is not None:
-        detected = combined.pop("_detected_at", None)
-        if detected is not None:
-            combined["timings"]["first_hit_ago_ms"] = int((time.monotonic() - detected) * 1000)
-        combined["timings"]["total_ms"] = int((time.monotonic() - started) * 1000)
-    return combined, None
+            remote_payload(n.first_listing[0], baseline, n.tzname, seconds,
+                           n.sprint_threads, remote_configs[0], remote_configs),
+            timeout=seconds + REMOTE_TIMEOUT_MARGIN)
+        if result is not None and not result.get("ok", True):
+            return None, "Lambda zgłosiła błąd wykonania", time.monotonic()
+        return result, error, time.monotonic()
+
+    parts, errors = [], []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="polowanie") as pool:
+        tasks = {}
+        if remote_configs:
+            tasks[pool.submit(remote_hunt)] = "AWS"
+        if local_configs:
+            tasks[pool.submit(_local_token_hunt, n, baseline, deadline, local_configs, multi)] = "lokalnie"
+        for future in concurrent.futures.as_completed(tasks):
+            source = tasks[future]
+            try:
+                if source == "AWS":
+                    result, error, received = future.result()
+                else:
+                    result, error, received = future.result(), None, time.monotonic()
+            except Exception as e:
+                result, error, received = None, f"błąd wykonawcy: {e!r}", time.monotonic()
+            if error:
+                errors.append(f"{source}: {error}")
+            elif result is not None:
+                if source == "AWS" and result.get("protocol_version", 0) < 3:
+                    log("! Lambda ma stary protokół — wgraj paczkę 0.28.2 (protokół 3).")
+                parts.append((result, received))
+    if not parts:
+        return None, "; ".join(errors) or "brak wykonawcy"
+    if errors:
+        log("! Niepełny wynik polowania: " + "; ".join(errors)
+            + ". Wynik zapisów może być niepewny — sprawdź rezerwacje w panelu.")
+    return _merge_hunt_results(parts, int((time.monotonic() - started) * 1000)), None
 
 
 def wykonaj_sprint(n, granice, now_local, in_sprint):
@@ -4189,8 +4318,12 @@ def wykonaj_sprint(n, granice, now_local, in_sprint):
                                 baseline, n.tz,
                                 filters=resolve_filters(load_config(quiet=True)))
     if prefetched:
-        log(f"🏁 Sprint: NOWE terminy wykryte po "
-            f"{int((time.monotonic() - szukanie) * 1000)} ms — rejestruję z gotowych danych")
+        if remote_result is not None:
+            log(f"🏁 Sprint: wynik odebrany po {int((time.monotonic() - szukanie) * 1000)} ms; "
+                f"pierwsze wykrycie: {remote_result.get('wykryto')} — zapisy już wykonane.")
+        else:
+            log(f"🏁 Sprint: NOWE terminy wykryte po "
+                f"{int((time.monotonic() - szukanie) * 1000)} ms — rejestruję z gotowych danych")
     return prefetched, remote_result, in_sprint
 
 

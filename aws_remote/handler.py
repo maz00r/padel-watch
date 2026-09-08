@@ -154,10 +154,14 @@ def poluj(wejscie, budget_seconds=None):
 
     # Stary payload nie ma `accounts` i nadal przechodzi dokładnie jedną ścieżką.
     raw_accounts = wejscie.get("accounts")
-    multi_account = isinstance(raw_accounts, list) and len(raw_accounts) > 1
+    multi_account = isinstance(raw_accounts, list) and bool(raw_accounts) and (
+        len(raw_accounts) > 1 or bool(wejscie.get("multi_account_mode")))
     reg_cfgs = ([reg_cfg_from_input(raw) for raw in raw_accounts]
                 if multi_account else [reg_cfg_from_input(wejscie)])
     reg_cfg = reg_cfgs[0]
+    if multi_account:
+        for account in reg_cfgs:
+            account["hedge"] = 1
     limit = cp._account_limit(reg_cfg)
 
     # Rozgrzewka połączeń salwy — osobna pula każdego konta, bo wspólna ośmiowątkowa
@@ -252,14 +256,14 @@ def poluj(wejscie, budget_seconds=None):
     sprint_ms = int((time.monotonic() - szukanie) * 1000)
     if doc is None:
         return {"ok": True, "doc": None, "listing_id": None,
-                "protocol_version": 2, "multi_account": True,
+                "protocol_version": 3, "multi_account": True,
                 "seen_ids": sorted(widziane), "pending_ids": [],
                 "timings": {"sprint_ms": sprint_ms, "batches": 0,
                             "total_ms": int((time.monotonic() - started) * 1000)}}
 
     return {
         "ok": True,
-        "protocol_version": 2,
+        "protocol_version": 3,
         "multi_account": True,
         "seen_ids": sorted(widziane),
         "pending_ids": sorted({sid for c in reg_cfgs for sid in c.get("pending_ids", [])}),
@@ -289,6 +293,7 @@ def poluj(wejscie, budget_seconds=None):
 
 
 def lambda_handler(event, context):   # noqa: ARG001 - kontrakt AWS
+    cp.set_log_precision(True)
     ok, powod = _sekret_ok(event or {})
     if not ok:
         # Bez szczegółów w treści: to jest publicznie osiągalny adres.
@@ -304,7 +309,7 @@ def lambda_handler(event, context):   # noqa: ARG001 - kontrakt AWS
         # Bez tego pierwsze wywołanie dnia płaci zimny start (~165 ms na init
         # plus ~75 ms na import silnika) dokładnie w chwili, gdy liczy się najbardziej.
         print("rozgrzewka")
-        return _odpowiedz({"ok": True, "warm": True, "protocol_version": 2,
+        return _odpowiedz({"ok": True, "warm": True, "protocol_version": 3,
                           "multi_account": True})
     if not wejscie.get("listing_url"):
         return _odpowiedz({"ok": False, "blad": "brak listing_url"}, 400)

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Testy jednostkowe silnika (bez sieci). Uruchomienie: python3 -m unittest -v test_check_padel"""
 
+import concurrent.futures
 import io
 import gzip
 import base64
@@ -5572,3 +5573,233 @@ class AccountReadinessBeforeBurstTest(unittest.TestCase):
                                side_effect=RuntimeError("padło")), \
                 mock.patch("sys.stdout", io.StringIO()):
             self.assertEqual(cp.gotowosc_kont(self.publikacja), "")
+
+
+class SeptemberHuntRegressionTest(SalvoHelpers, unittest.TestCase):
+    """Regresje z logu 8 września. Wyłącznie symulowane odpowiedzi, bez API."""
+
+    def configs(self, count=2):
+        return [dict(enabled=True, konto=f'k{i}', name=f'Konto {i}',
+                     token=jwt_with_exp(time.time()+1000), token_file=f'/test/k{i}',
+                     browser_mode=True, salvo=3, hedge=3, max_per_run=1)
+                for i in range(count)]
+
+    def test_third_target_starts_before_slow_first_two_finish(self):
+        release, third = threading.Event(), threading.Event()
+        calls = []
+        def register(slot, price, cfg, speculative=False):
+            calls.append((cfg['konto'], slot['id']))
+            if slot['id'] == 's20':
+                third.set()
+            release.wait(2)
+            return False, '409'
+        cfgs = self.configs()
+        with mock.patch.object(cp, 'register_slot', side_effect=register), mock.patch.object(cp, 'log'):
+            with concurrent.futures.ThreadPoolExecutor(1) as pool:
+                future = pool.submit(cp.auto_register_accounts, self.slots(18, 19, 20), {}, cfgs, set(), TZ)
+                try:
+                    self.assertTrue(third.wait(1), '20:00 czeka na odpowiedzi wcześniejszych godzin')
+                finally:
+                    release.set()
+                future.result(timeout=2)
+        self.assertEqual(len(calls), 6, 'dokładnie jedna próba każdej pary konto/termin')
+        self.assertEqual(len(set(calls)), 6)
+
+    def test_discovered_batch_gets_first_attempt_for_both_new_hours(self):
+        events = cp.queue.Queue()
+        release, first, third = threading.Event(), threading.Event(), threading.Event()
+        calls = []
+        def register(slot, price, cfg, speculative=False):
+            calls.append(slot['id'])
+            if calls.count('s18') == 2:
+                first.set()
+            if slot['id'] == 's20':
+                third.set()
+            release.wait(2)
+            return False, '409'
+        with mock.patch.object(cp, 'register_slot', side_effect=register), mock.patch.object(cp, 'log'):
+            with concurrent.futures.ThreadPoolExecutor(1) as pool:
+                future = pool.submit(cp.auto_register_accounts, self.slots(18), {}, self.configs(), set(), TZ,
+                                     discoveries=events)
+                try:
+                    self.assertTrue(first.wait(1))
+                    events.put(('slots', self.slots(19, 20), {}, time.monotonic()))
+                    self.assertTrue(third.wait(1), 'drugi nowy termin nie dostał pierwszej próby')
+                finally:
+                    release.set()
+                future.result(timeout=2)
+
+    def test_token_rotation_retries_only_auth_failure(self):
+        cfgs = self.configs(1)
+        old, fresh = cfgs[0]['token'], jwt_with_exp(time.time()+2000)
+        denied = threading.Event()
+        calls = []
+        def register(slot, price, cfg, speculative=False):
+            calls.append(cfg['token'])
+            if cfg['token'] == old:
+                denied.set()
+                return False, 'token odrzucony (HTTP 401)'
+            return True, 'accepted'
+        def read(path):
+            self.assertEqual(path, '/test/k0')
+            return fresh if denied.is_set() else old
+        with mock.patch.object(cp, 'register_slot', side_effect=register), \
+                mock.patch.object(cp, 'token_from_file', side_effect=read), mock.patch.object(cp, 'log'):
+            result, won, _ = cp.auto_register_accounts(
+                self.slots(18), {}, cfgs, set(), TZ, keep_watching=True, refresh_tokens=True,
+                deadline=time.monotonic()+.45)
+        self.assertEqual(calls, [old, fresh])
+        self.assertEqual(won, {'s18'})
+        self.assertTrue(result['s18'][0])
+        self.assertNotIn('auth_error', cfgs[0])
+
+    def test_expired_token_waits_for_fresh_file_without_sending(self):
+        cfgs = self.configs(1)
+        cfgs[0]['token'] = jwt_with_exp(time.time()-10)
+        fresh = jwt_with_exp(time.time()+2000)
+        reads = []
+        def read(path):
+            reads.append(path)
+            return cfgs[0]['token'] if len(reads) == 1 else fresh
+        with mock.patch.object(cp, 'token_from_file', side_effect=read), \
+                mock.patch.object(cp, 'register_slot', return_value=(True, 'ok')) as register, \
+                mock.patch.object(cp, 'log'):
+            _, won, _ = cp.auto_register_accounts(
+                self.slots(18), {}, cfgs, set(), TZ, keep_watching=True, refresh_tokens=True,
+                deadline=time.monotonic()+.45)
+        self.assertEqual(register.call_count, 1)
+        self.assertEqual(register.call_args.args[2]['token'], fresh)
+        self.assertEqual(won, {'s18'})
+
+    def test_rotation_does_not_retry_409_or_uncertain_response(self):
+        for response in ('409: No available seats', 'brak odpowiedzi: timeout'):
+            cfgs = self.configs(1)
+            calls = []
+            def register(slot, price, cfg, speculative=False):
+                calls.append(cfg['token'])
+                return False, response
+            fresh = jwt_with_exp(time.time()+2000)
+            with mock.patch.object(cp, 'token_from_file', side_effect=lambda _: fresh if calls else cfgs[0]['token']), \
+                    mock.patch.object(cp, 'register_slot', side_effect=register), mock.patch.object(cp, 'log'):
+                cp.auto_register_accounts(self.slots(18), {}, cfgs, set(), TZ,
+                                          keep_watching=True, refresh_tokens=True, deadline=time.monotonic()+.3)
+            self.assertEqual(len(calls), 1)
+
+    def test_single_account_rescue_preserves_booking_limit(self):
+        cfgs = self.configs(1)
+        cfgs[0]['hedge'] = 1
+        with mock.patch.object(cp, 'register_slot', return_value=(True, 'ok')) as register, \
+                mock.patch.object(cp, 'log'):
+            _, won, _ = cp.auto_register_accounts(self.slots(18,19,20), {}, cfgs, set(), TZ,
+                                                  respect_limits=True)
+        self.assertEqual(register.call_count, 1)
+        self.assertEqual(won, {'s18'})
+
+    def test_stable_aws_and_local_rescue_are_parallel_and_disjoint(self):
+        from types import SimpleNamespace
+        cfgs = self.configs(3)
+        cfgs[1]['token'] = jwt_with_exp(time.time()+1)
+        cfgs[2]['token'] = jwt_with_exp(time.time()-1)
+        barrier = threading.Barrier(2, timeout=2)
+        def remote(url, secret, payload, timeout):
+            self.assertEqual([c['id'] for c in payload['accounts']], ['k0'])
+            self.assertTrue(payload['multi_account_mode'])
+            self.assertGreater(payload['sprint_seconds'], 5)
+            barrier.wait()
+            return dict(ok=True, protocol_version=3, doc={'remote': True}, listing_id='kort',
+                        registered=['s18'], results={'s18': [True, 'ok']},
+                        timings={'first_hit_ago_ms': 100}), None
+        def local(n, baseline, deadline, configs, multi):
+            self.assertTrue(multi)
+            self.assertEqual([c['konto'] for c in configs], ['k1','k2'])
+            barrier.wait()
+            return dict(ok=True, doc={'local': True}, listing_id='kort', registered=['s19'],
+                        results={'s18':[False,'409'], 's19':[True,'ok']}, timings={})
+        n = SimpleNamespace(remote_url='unused', remote_secret='unused', first_listing=['kort'],
+                            tzname='Europe/Warsaw', sprint_threads=3, tz=TZ)
+        with mock.patch.object(cp, 'call_remote', side_effect=remote) as aws, \
+                mock.patch.object(cp, '_local_token_hunt', side_effect=local), mock.patch.object(cp, 'log'):
+            result, error = cp.remote_with_fresh_tokens(n, set(), time.monotonic()+50, cfgs)
+        self.assertIsNone(error)
+        self.assertEqual(aws.call_count, 1, 'JWT dodatkowych kont nie może restartować AWS')
+        self.assertEqual(set(result['registered']), {'s18','s19'})
+        self.assertTrue(result['results']['s18'][0])
+
+    def test_original_aws_timestamp_is_retained(self):
+        original = '[2026-09-08 11:00:32.123] start zapisu'
+        with mock.patch.object(cp, 'log') as logger:
+            cp.adopt_remote({'log':[original]})
+        self.assertIn(original, logger.call_args.args[0])
+
+    def test_final_preflight_checks_each_account_with_bounded_timeout(self):
+        cfgs = self.configs(3)
+        with mock.patch.object(cp, 'load_config', return_value={'auto_register': True}), \
+                mock.patch.dict(os.environ, {'AUTO_REGISTER': ''}), \
+                mock.patch.object(cp, 'load_state_doc', return_value={}), \
+                mock.patch.object(cp, 'konta_z_konfiguracji', return_value=cfgs), \
+                mock.patch.object(cp, 'build_reg_cfg', side_effect=lambda cfg,state,account: account), \
+                mock.patch.object(cp, 'verify_decathlon_token', return_value=(True,'HTTP 200')) as verify, \
+                mock.patch.object(cp, 'log'):
+            cp.verify_accounts_before_hunt(datetime.now(TZ)+timedelta(minutes=1))
+        self.assertEqual(verify.call_count, 3)
+        self.assertTrue(all(call.kwargs['timeout']==3 for call in verify.call_args_list))
+
+
+class SeptemberHuntIntegrationTest(RemoteHandlerHelpers, unittest.TestCase):
+    def test_single_remote_member_retains_multi_account_semantics(self):
+        accounts = [{'id':'safe', 'enabled':True, 'token':jwt_with_exp(time.time()+600),
+                     'name':'Safe', 'max_per_run':1, 'salvo':0, 'hedge':3}]
+        with mock.patch.object(cp, 'resolve_current_id', return_value=self.LID), \
+                mock.patch.object(cp, 'fetch_listing', return_value=self.doc(18,19,20)), \
+                mock.patch.object(cp, 'register_slot', return_value=(True,'ok')), mock.patch.object(cp, 'log'):
+            result = self.handler.poluj(self.tresc(accounts=accounts, multi_account_mode=True))
+        self.assertEqual(result['protocol_version'], 3)
+        self.assertEqual(len(result['registered']), 3, 'nie wolno przywracać limitu 1 po podziale kont')
+        self.assertEqual(len(result['shots']), 3)
+
+    def test_local_rescue_observes_while_token_is_expired_and_preserves_success(self):
+        from types import SimpleNamespace
+        old, fresh = jwt_with_exp(time.time()-1), jwt_with_exp(time.time()+600)
+        observed = threading.Event()
+        fetched = []
+        def fetch(lid, timeout):
+            fetched.append(lid)
+            observed.set()
+            time.sleep(.01)
+            return self.doc(18)
+        config = dict(enabled=True, konto='rescue', token=old, token_file='/test/rescue',
+                      name='Rescue', salvo=3, hedge=1, browser_mode=True, max_per_run=1)
+        n = SimpleNamespace(first_listing=[f'https://go.decathlon.pl/l/{self.LID}'], tz=TZ)
+        with mock.patch.object(cp, 'fetch_listing', side_effect=fetch), \
+                mock.patch.object(cp, 'load_config', return_value={}), \
+                mock.patch.object(cp, 'resolve_filters', return_value=[]), \
+                mock.patch.object(cp, 'token_from_file', side_effect=lambda _: fresh if observed.is_set() else old), \
+                mock.patch.object(cp, 'register_slot', return_value=(True,'ok')) as register, \
+                mock.patch.object(cp, 'log'):
+            result = cp._local_token_hunt(n, set(), time.monotonic()+.4, [config], False)
+        self.assertEqual(len(result['registered']), 1)
+        self.assertIsNotNone(result['doc'])
+        self.assertEqual(register.call_count, 1)
+        self.assertEqual(register.call_args.args[2]['token'], fresh)
+        self.assertGreater(len(fetched), 1)
+        self.assertEqual(result['shots'][0]['execution'], 'local')
+        self.assertIsNotNone(result['shots'][0]['detected_at'])
+        self.assertNotIn(fresh, json.dumps(result))
+
+    def test_lost_remote_response_keeps_local_success_without_account_takeover(self):
+        from types import SimpleNamespace
+        configs = [dict(enabled=True,konto='safe',token=jwt_with_exp(time.time()+600),browser_mode=True,token_file='/test/safe'),
+                   dict(enabled=True,konto='rescue',token=jwt_with_exp(time.time()-1),browser_mode=True,token_file='/test/rescue')]
+        n = SimpleNamespace(remote_url='unused',remote_secret='unused',first_listing=['kort'],
+                            tzname='Europe/Warsaw',sprint_threads=3)
+        local_result = dict(ok=True,listing_id='kort',doc={},registered=['won'],results={'won':(True,'ok')})
+        with mock.patch.object(cp, 'call_remote', return_value=(None,'brak odpowiedzi')) as aws, \
+                mock.patch.object(cp, '_local_token_hunt', return_value=local_result) as local, \
+                mock.patch.object(cp, 'log') as logger:
+            result, error = cp.remote_with_fresh_tokens(n,set(),time.monotonic()+50,configs)
+        self.assertIsNone(error)
+        self.assertEqual(result['registered'],['won'])
+        self.assertEqual(aws.call_count,1)
+        self.assertEqual(local.call_count,1)
+        self.assertEqual([c['konto'] for c in local.call_args.args[3]],['rescue'])
+        self.assertTrue(any('Niepełny wynik' in str(c) for c in logger.call_args_list))

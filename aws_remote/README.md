@@ -1,3 +1,15 @@
+## Aktualizacja 0.28.2
+
+Wgraj `padel-remote.zip` razem z aktualizacją dodatku do 0.28.2. Lambda zgłasza
+protokół 3: potrafi zachować tryb wielu kont także wtedy, gdy po podziale tylko
+jedno konto ma token ważny przez cały sprint. Pozostałe konta obsługuje równolegle
+lokalny wykonawca z dostępem do odnowionych JWT. Nie zwiększaj z tego powodu
+reserved concurrency — nadal wystarcza jedno wywołanie AWS.
+
+Wiele kont używa jednej kopii zapisu na konto/termin. Logi odesłane przez Lambdę
+zachowują oryginalne znaczniki czasu z milisekundami. Zewnętrzna godzina w HA to
+czas odbioru całego wyniku, nie chwila wykrycia terminu.
+
 # Zdalny strzał z Irlandii — instrukcja krok po kroku
 
 Sprint i salwa wykonują się w AWS eu-west-1, tuż obok serwera Decathlona.

@@ -60,7 +60,7 @@ przechodzisz normalne logowanie, łącznie z kodem z maila.
 | `auto_register_max` | przy jednym koncie: ile terminów maksymalnie zapisać w przebiegu (0–10); tryb wielu kont próbuje każdej pasującej godziny | `1` |
 | `auto_register_order` | kolejność prób: `earliest` (od najwcześniejszego) lub `latest` (od najpóźniejszego) | `latest` |
 | `auto_register_lead` | najcenniejszy termin leci sam i pierwszy (**hipoteza obalona 31.08 — trzymaj wyłączone**) | `false` |
-| `auto_register_hedge` | ile **równoległych zapisów w najcenniejszy termin** (1 = wyłączone, maks. 3) | `2` |
+| `auto_register_hedge` | kopie najcenniejszego terminu przy jednym koncie (1–3); wiele kont zawsze używa jednej kopii na konto/termin | `1` |
 | `auto_register_salvo` | ile prób rejestracji wysyłać **równolegle** (0–6); `0`/`1` = po kolei, jak dawniej | `6` |
 | `auto_register_stagger` | odstęp w ms między strzałami salwy (0–100); `0` = wszystkie naraz | `8` |
 | `accounts` | lista kont; pierwsze jest główne, kolejne mają osobne profile, tokeny i równoległe strzały | `[]` |
@@ -131,38 +131,32 @@ dnie, a co `check_interval` (np. 300 s) w pozostałych porach. Puste = zawsze `c
 Minimum 2 s (niższa wartość jest podbijana, z wpisem w logu; poniżej 5 s logowane jest
 ostrzeżenie — używaj tylko w wąskich oknach, bo grozi blokadą po IP). Zmiana interwału jest logowana (`⏱ aktualny interwał: ...`).
 
-## Strzał redundantny
+## Kolejka terminów i kopie zapytań
 
-Czas, w jakim serwer przetwarza nasz zapis, jest **loterią**. Zmierzone 30–31.08:
-61, 62, 63, 71, 115, 150, 157, 178, 188, 236, 251, **730** ms — bez związku z czymkolwiek,
-co robimy. Ten sam termin trafiony dwa razy dawał 62 i 251 ms (30.08, 12:00) oraz
-700 i 68 ms (25.08, 20:00).
+Od 0.28.2 wiele kont używa jednej próby na parę konto/termin. Pierwsza próba nowej
+godziny ma pierwszeństwo przed kolejnymi kontami wcześniejszej godziny. Na konto
+przypada najwyżej dwa aktywne cele. Dzięki temu wolna odpowiedź dla 18:00 nie
+blokuje automatycznie pierwszej próby 20:00, o ile jest wolne miejsce wykonawcze.
 
-Skoro to losowanie, jedno można zamienić na **minimum z kilku**: `auto_register_hedge`
-posyła 2–3 równoległe zapisy w najcenniejszy termin i liczy ten, który wróci pierwszy.
-Kopie startują **razem** (odstęp salwy ich nie rozsuwa) — inaczej nie byłyby
-równoczesnymi losowaniami.
+Przy pojedynczym koncie `auto_register_hedge` pozwala wybrać 1–3 kopie najcenniejszego
+terminu; domyślnie 1. Historyczne różnice czasów między kopiami nie dowodzą, że
+większa liczba równoległych żądań zwiększa skuteczność przy dziesięciu kontach.
+Sukces jest zachowywany nawet wtedy, gdy inna kopia później zwróci błąd.
 
-Dotyczy **wyłącznie czołowego celu**. Rozciąganie tego na całą salwę mnożyłoby ryzyko
-podwójnej rezerwacji bez żadnych danych, że pomaga.
+## Tokeny podczas sprintu
 
-**Jak czytać `✗` przy kopii.** Serwer odpowiada `Booking is already exists`, gdy miejsce
-jest już nasze, i `No available seats`, gdy wziął je ktoś inny. Krzyżyk przy drugiej
-kopii to prawie zawsze to pierwsze — nasz własny zapis odbijający się od naszej własnej
-rezerwacji. W Dzienniku ma etykietę `miejsce już nasze` i nie liczy się do przegranych.
+Konta z JWT ważnym przez całe okno oraz zapas na odpowiedź trafiają do jednego
+ciągłego wywołania AWS. Konta z krótszą lub nieznaną ważnością tokenu obsługuje
+równolegle lokalny obserwator, który czyta świeże JWT z plików kont. Konto przez
+całe okno ma tylko jednego wykonawcę. Lokalny zapis może mieć większe opóźnienie
+sieci, ale odnowa sesji nie przerywa obserwacji sprawnych kont w AWS.
 
-**Podwójna rezerwacja nie jest możliwa** — limit miejsc w terminie wynosi 1, więc gdy
-jedna kopia zapisze się skutecznie, druga z definicji dostaje 409. Nie ma tu żadnego
-anulowania i nie ma czego pilnować. Jedyne, co dodatek musi zrobić z dwiema odpowiedziami
-na ten sam termin, to **nie pozwolić wolniejszej porażce nadpisać szybszego zwycięstwa** —
-inaczej powiadomienie skłamałoby, że termin przepadł.
+Lokalna ścieżka ponawia potwierdzoną odmowę autoryzacji dopiero z nowym tokenem;
+nie ponawia 409 ani timeoutu wyłącznie z powodu rotacji JWT. Przy pojedynczym
+koncie zachowuje `auto_register_max`. Tryb próbny i filtry obowiązują w obu miejscach.
 
-W Dzienniku kopie mają znacznik `⧉` przy godzinie.
-
-**Jak ocenić, czy działa:** porównaj czasy kopii tego samego terminu. Jeśli regularnie
-różnią się kilkukrotnie (np. 80 ms i 600 ms), redundancja robi dokładnie to, po co
-powstała. Jeśli obie kopie wracają w podobnym czasie, loterii nie ma i opcję można
-zdjąć do `1`.
+Log `⏱` pokazuje konto, ID terminu, wykonawcę, rzeczywisty start UTC i wiek danych.
+Zewnętrzna godzina przy odtworzonym logu AWS oznacza odbiór, wewnętrzna — zdarzenie.
 
 ## Strzał czołowy — hipoteza obalona
 
