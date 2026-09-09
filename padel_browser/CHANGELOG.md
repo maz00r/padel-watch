@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.28.5 — rezerwacje dostępne po wylogowaniu konta
+
+- **Rezerwacje wylogowanych kont nie znikają z panelu.** Ostatni poprawny
+  odczyt jest zapisywany osobno dla każdego konta w `/data` i przeżywa restart
+  dodatku. Gdy token konta wygaśnie, panel pokazuje zapisane rezerwacje wraz
+  z ostrzeżeniem i godziną ich ostatniej aktualizacji. Panel sam wykonuje
+  jeden taki zapis tuż po codziennym zrywie, kiedy tokeny są jeszcze ważne.
+- **Eksport kalendarza działa przy częściowo wylogowanych kontach.** Błąd
+  jednego konta nie blokuje już pliku `.ics`, jeśli są dostępne rezerwacje
+  pozostałych kont albo ich ostatni zapisany stan.
+
 ## 0.28.4 — tokeny uzbrojone na całe polowanie
 
 - Przygotowanie kont dodatkowych jest dwufazowe. Obchód 30 minut wcześniej nadal

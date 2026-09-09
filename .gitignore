@@ -7,3 +7,5 @@ hunts.json
 data/
 # lokalne ustawienia Claude Code
 .claude/
+# Surowe logi polowań zawierają dane osobowe i identyfikatory operacyjne.
+/analysis/hunt-logs/raw/

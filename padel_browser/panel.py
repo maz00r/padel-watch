@@ -39,6 +39,12 @@ PANEL_HTML = os.path.join(HERE, "panel.html")
 # w zakładkę — krótki bufor oszczędza serwerowi GO zbędnych zapytań.
 CACHE_TTL = 20
 ERROR_TTL = 5
+POST_HUNT_CACHE_DELAY = 3
+POST_HUNT_CACHE_WINDOW = 60
+_state_dir = os.environ.get("STATE_DIR") or ""
+RESERVATIONS_CACHE_PATH = (
+    os.path.join(_state_dir, "reservations-cache.json") if _state_dir else ""
+)
 
 MIME = {
     ".html": "text/html; charset=utf-8", ".js": "application/javascript; charset=utf-8",
@@ -50,6 +56,12 @@ MIME = {
 _cache = {"at": 0.0, "items": None, "error": None}
 _cache_lock = threading.Lock()
 _login_lock = threading.Lock()
+_post_hunt_cached_on = None
+
+_RESERVATION_CACHE_FIELDS = (
+    "id", "state", "cancelled", "when", "date_label", "day", "hours",
+    "title", "slot_name", "address", "participants", "minutes", "book_url",
+)
 
 
 def log(*args):
@@ -64,6 +76,59 @@ def _tz():
         return timezone.utc
 
 
+def _reservation_to_cache(row):
+    """JSON-owa kopia rezerwacji bez poświadczeń i obiektu ``datetime``."""
+    out = {key: row.get(key) for key in _RESERVATION_CACHE_FIELDS}
+    start = row.get("start_utc")
+    out["start_utc"] = start.isoformat() if start else ""
+    return out
+
+
+def _reservation_from_cache(doc):
+    """Odtwarza rezerwację z dysku i na nowo wylicza, czy termin już minął."""
+    if not isinstance(doc, dict):
+        return None
+    try:
+        start = datetime.fromisoformat(
+            str(doc.get("start_utc") or "").replace("Z", "+00:00")
+        )
+    except ValueError:
+        return None
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=timezone.utc)
+    out = {key: doc.get(key) for key in _RESERVATION_CACHE_FIELDS}
+    out["start_utc"] = start
+    out["past"] = start < datetime.now(timezone.utc)
+    return out
+
+
+def _load_reservations_cache():
+    if not RESERVATIONS_CACHE_PATH:
+        return {}
+    try:
+        with open(RESERVATIONS_CACHE_PATH, encoding="utf-8") as f:
+            doc = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    accounts = doc.get("accounts") if isinstance(doc, dict) else None
+    return accounts if isinstance(accounts, dict) else {}
+
+
+def _save_reservations_cache(accounts):
+    if RESERVATIONS_CACHE_PATH:
+        check_padel.zapisz_json_atomowo(RESERVATIONS_CACHE_PATH, {
+            "version": 1,
+            "accounts": accounts,
+        })
+
+
+def _cached_at_label(saved_at):
+    try:
+        return datetime.fromtimestamp(float(saved_at), _tz()).strftime("%d.%m %H:%M")
+    except (TypeError, ValueError, OSError):
+        return "wcześniejszego odczytu"
+
+
 def reservations(force=False):
     """(lista, błąd) z krótkim buforem. force=True po anulowaniu — stan właśnie się zmienił."""
     with _cache_lock:
@@ -72,6 +137,12 @@ def reservations(force=False):
         if not force and fresh and (_cache["items"] is not None or _cache["error"]):
             return _cache["items"], _cache["error"]
     accounts = check_padel.konta_z_konfiguracji(check_padel.load_config(quiet=True))
+    known_ids = {account["id"] for account in accounts}
+    stored = {
+        str(kid): value for kid, value in _load_reservations_cache().items()
+        if str(kid) in known_ids and isinstance(value, dict)
+    }
+
     def fetch(account):
         cfg = (check_padel.credentials_cfg(account) if len(accounts) > 1
                else check_padel.credentials_cfg())
@@ -79,14 +150,45 @@ def reservations(force=False):
             rows, error = check_padel.reservations_view(cfg, _tz())
         except Exception as e:  # pojedyncze konto nie ukrywa rezerwacji pozostalych
             rows, error = [], f"nieoczekiwany błąd: {e!r}"
-        label = account.get("name") or account["id"]
-        return [dict(row, account_id=account["id"], account_name=label) for row in rows or []], (
-            f"{label}: {error}" if error else "")
+        kid = account["id"]
+        label = account.get("name") or kid
+        update = None
+        if error:
+            saved = stored.get(kid)
+            cached = [
+                row for row in (
+                    _reservation_from_cache(doc)
+                    for doc in ((saved or {}).get("items") or [])
+                ) if row is not None
+            ]
+            rows = cached
+            suffix = ""
+            if saved is not None:
+                suffix = (
+                    " — pokazuję ostatni poprawny stan z "
+                    + _cached_at_label(saved.get("saved_at"))
+                )
+            warning = f"{label}: {error}{suffix}"
+        else:
+            rows = rows or []
+            update = {
+                "saved_at": int(time.time()),
+                "items": [_reservation_to_cache(row) for row in rows],
+            }
+            warning = ""
+        decorated = [dict(row, account_id=kid, account_name=label) for row in rows]
+        return decorated, warning, (kid, update) if update is not None else None
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=min(4, len(accounts))) as pool:
         parts = list(pool.map(fetch, accounts))
-    items = [row for rows, _ in parts for row in rows]
+    for _rows, _error, update in parts:
+        if update:
+            stored[update[0]] = update[1]
+    if any(update for _rows, _error, update in parts):
+        _save_reservations_cache(stored)
+    items = [row for rows, _error, _update in parts for row in rows]
     items.sort(key=lambda row: row.get("start_utc") or datetime.max.replace(tzinfo=timezone.utc))
-    error = "; ".join(error for _, error in parts if error) or None
+    error = "; ".join(error for _rows, error, _update in parts if error) or None
     if error:
         # Bez tego czerwony komunikat w panelu nie zostawiał ŻADNEGO śladu w Dzienniku
         # i nie dało się dojść, co właściwie się stało.
@@ -94,6 +196,35 @@ def reservations(force=False):
     with _cache_lock:
         _cache.update(at=time.time(), items=items, error=error)
     return items, error
+
+
+def refresh_reservations_after_hunt(now=None):
+    """Raz dziennie utrwala wynik tuż po zrywie, zanim wygasną krótkie JWT."""
+    global _post_hunt_cached_on
+    timestamp = time.time() if now is None else float(now)
+    tz = _tz()
+    local_now = datetime.fromtimestamp(timestamp, tz)
+    publication = check_padel.burst_start_today(local_now, tz)
+    if publication is None or _post_hunt_cached_on == local_now.date():
+        return False
+    hunt_end = zbieracz.wymagany_exp(publication.timestamp(), margines=0)
+    target = hunt_end + POST_HUNT_CACHE_DELAY
+    if not target <= timestamp < target + POST_HUNT_CACHE_WINDOW:
+        return False
+    # Znacznik ustawiamy przed siecią: awaria API nie może uruchamiać pełnego
+    # odczytu dziesięciu kont co pięć sekund przez całą minutę.
+    _post_hunt_cached_on = local_now.date()
+    reservations(force=True)
+    return True
+
+
+def _post_hunt_cache_loop():
+    while True:
+        try:
+            refresh_reservations_after_hunt()
+        except Exception as e:  # noqa: BLE001 - cache nie może wywrócić panelu
+            log(f"! nie odświeżyłem cache rezerwacji po polowaniu: {e!r}")
+        time.sleep(5)
 
 
 def safe_static_path(path):
@@ -246,8 +377,6 @@ class Handler(BaseHTTPRequestHandler):
     def api_reservations(self):
         force = "refresh=1" in (urlparse(self.path).query or "")
         items, error = reservations(force=force)
-        if error and not items:
-            return self._json({"ok": False, "error": error})
         self._json({
             "ok": True,
             "items": [public_reservation(r) for r in items],
@@ -331,7 +460,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def serve_ics(self, ident):
         items, error = reservations()
-        if error:
+        if error and not items:
             return self._send(503, f"Nie mogę pobrać rezerwacji: {error}", "text/plain; charset=utf-8")
         method = "PUBLISH"
         if ident == "all":
@@ -411,6 +540,11 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     server = ThreadingHTTPServer(("0.0.0.0", PANEL_PORT), Handler)
     server.daemon_threads = True
+    threading.Thread(
+        target=_post_hunt_cache_loop,
+        name="reservation-cache",
+        daemon=True,
+    ).start()
     log(f"panel na porcie {PANEL_PORT} (noVNC: {NOVNC_DIR}, "
         f"websockify: {WEBSOCKIFY_PORT}/{EXTRA_WEBSOCKIFY_PORT})")
     server.serve_forever()

@@ -12,6 +12,7 @@ import os
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "padel_browser"))
@@ -180,6 +181,107 @@ class AccountsEndpointTest(unittest.TestCase):
                 mock.patch.object(panel, "EXTRA_WEBSOCKIFY_PORT", 6081):
             self.assertEqual(panel.websocket_port("/websockify"), 6080)
             self.assertEqual(panel.websocket_port("/prefix/websockify-extra"), 6081)
+
+
+class ReservationsOfflineCacheTest(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        path = os.path.join(self.directory.name, "reservations-cache.json")
+        patcher = mock.patch.object(panel, "RESERVATIONS_CACHE_PATH", path)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        panel._cache.update(at=0, items=None, error=None)
+        self.addCleanup(
+            lambda: panel._cache.update(at=0, items=None, error=None)
+        )
+
+    @staticmethod
+    def reservation(ident):
+        return {
+            "id": ident,
+            "state": "confirmed",
+            "cancelled": False,
+            "past": False,
+            "start_utc": datetime(2026, 9, 16, 15, 0, tzinfo=timezone.utc),
+            "minutes": 60,
+            "when": "śr 16.09 17:00",
+            "date_label": "śr 16.09",
+            "day": "16.09.2026",
+            "hours": "17:00–18:00",
+            "title": "Padel",
+            "slot_name": "Kort 1",
+            "address": "Warszawa",
+            "participants": ["Ania"],
+            "book_url": "https://go.decathlon.pl/l/kort",
+        }
+
+    def test_logged_out_account_keeps_its_last_successful_reservations(self):
+        accounts = [
+            {"id": "glowne", "name": "Główne", "main": True},
+            {"id": "ania", "name": "Ania", "main": False},
+        ]
+        offline = {"ania": False}
+
+        def credentials(account=None):
+            return {"account_id": account["id"] if account else "glowne"}
+
+        def view(cfg, _tz):
+            kid = cfg["account_id"]
+            if kid == "ania" and offline["ania"]:
+                return None, "brak tokenu — zaloguj się"
+            return ([self.reservation("tx-ania")] if kid == "ania" else []), None
+
+        with mock.patch.object(cp, "load_config", return_value={}), \
+                mock.patch.object(cp, "konta_z_konfiguracji", return_value=accounts), \
+                mock.patch.object(cp, "credentials_cfg", side_effect=credentials), \
+                mock.patch.object(cp, "reservations_view", side_effect=view):
+            first, error = panel.reservations(force=True)
+            self.assertIsNone(error)
+            self.assertEqual([row["id"] for row in first], ["tx-ania"])
+
+            # Symulacja restartu panelu i wygasłego tokenu konta dodatkowego.
+            panel._cache.update(at=0, items=None, error=None)
+            offline["ania"] = True
+            second, error = panel.reservations(force=True)
+
+        self.assertEqual([row["id"] for row in second], ["tx-ania"])
+        self.assertEqual(second[0]["account_name"], "Ania")
+        self.assertIn("ostatni poprawny stan", error)
+
+    def test_reservations_endpoint_reports_warning_instead_of_fatal_error(self):
+        with mock.patch.object(panel, "reservations", return_value=([], "Ania: brak tokenu")):
+            response = Zapytanie("GET", "/api/reservations").wykonaj()
+        self.assertIn('"ok": true', response)
+        self.assertIn('"warning": "Ania: brak tokenu"', response)
+
+    def test_calendar_uses_available_items_despite_an_offline_account(self):
+        item = self.reservation("tx-ania")
+        with mock.patch.object(
+            panel, "reservations", return_value=([item], "Główne: brak tokenu")
+        ):
+            response = Zapytanie("GET", "/cal/all.ics").wykonaj()
+        self.assertIn("200", response.splitlines()[0])
+        self.assertIn("BEGIN:VCALENDAR", response)
+        self.assertIn("UID:tx-ania@padel-watch", response)
+
+    def test_calendar_still_fails_when_nothing_was_ever_loaded(self):
+        with mock.patch.object(panel, "reservations", return_value=([], "brak tokenu")):
+            response = Zapytanie("GET", "/cal/all.ics").wykonaj()
+        self.assertIn("503", response.splitlines()[0])
+
+    def test_cache_is_refreshed_once_just_after_the_hunt(self):
+        publication = datetime(2026, 9, 9, 11, 0, tzinfo=timezone.utc)
+        target = publication.timestamp() + 75 + panel.POST_HUNT_CACHE_DELAY
+        panel._post_hunt_cached_on = None
+        self.addCleanup(setattr, panel, "_post_hunt_cached_on", None)
+        with mock.patch.object(cp, "burst_start_today", return_value=publication), \
+                mock.patch.object(panel.zbieracz, "wymagany_exp",
+                                  return_value=publication.timestamp() + 75), \
+                mock.patch.object(panel, "reservations", return_value=([], None)) as refresh:
+            self.assertTrue(panel.refresh_reservations_after_hunt(target))
+            self.assertFalse(panel.refresh_reservations_after_hunt(target + 1))
+        refresh.assert_called_once_with(force=True)
 
 
 if __name__ == "__main__":
