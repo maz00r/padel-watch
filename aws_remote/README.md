@@ -1,10 +1,14 @@
-## Aktualizacja 0.28.2
+## Aktualizacja 0.28.4
 
-Wgraj `padel-remote.zip` razem z aktualizacją dodatku do 0.28.2. Lambda zgłasza
+Wgraj `padel-remote.zip` razem z aktualizacją dodatku do 0.28.4. Lambda zgłasza
 protokół 3: potrafi zachować tryb wielu kont także wtedy, gdy po podziale tylko
 jedno konto ma token ważny przez cały sprint. Pozostałe konta obsługuje równolegle
 lokalny wykonawca z dostępem do odnowionych JWT. Nie zwiększaj z tego powodu
 reserved concurrency — nadal wystarcza jedno wywołanie AWS.
+
+Wersja 0.28.4 przygotowuje tokeny kont dodatkowych w dwóch fazach, aby 15-minutowe
+JWT nie wygasały podczas publikacji. Jest to zmiana po stronie dodatku; paczka Lambdy
+zostaje przebudowana dla zachowania identycznego silnika, a protokół nadal ma numer 3.
 
 Wiele kont używa jednej kopii zapisu na konto/termin. Logi odesłane przez Lambdę
 zachowują oryginalne znaczniki czasu z milisekundami. Zewnętrzna godzina w HA to

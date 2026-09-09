@@ -320,7 +320,9 @@ def gotowosc_kont(publikacja):
         now = time.time()
         tokens = [(k, token_from_file(k.get("token_file"))) for k in konta]
         zywe = sum(jwt_expiry(token) > now for _, token in tokens)
-        until = publikacja.timestamp() + 75
+        # Ten sam próg co w harmonogramie zbieracza: token ma pokryć dłuższe z okien
+        # sprint/zryw oraz zapas, a nie tylko przeżyć samą sekundę publikacji.
+        until = zbieracz.wymagany_exp(publikacja.timestamp())
         ready = sum(jwt_expiry(token) > until for _, token in tokens)
     except Exception as e:  # noqa: BLE001 - diagnostyka nie może wywrócić kontroli sesji
         log(f"! Nie policzyłem gotowości kont: {e!r}", level="debug")
@@ -334,6 +336,7 @@ def gotowosc_kont(publikacja):
 
 def verify_accounts_before_hunt(start):
     """Jedna ograniczona czasowo kontrola API każdego konta, bez rezerwacji."""
+    import zbieracz
     cfg, state = load_config(quiet=True), load_state_doc()
     if not boolish(os.environ.get("AUTO_REGISTER") or cfg.get("auto_register")):
         return
@@ -348,7 +351,7 @@ def verify_accounts_before_hunt(start):
             ok, detail = verify_decathlon_token(token, timeout=3)
         status = "API akceptuje" if ok else ("API odrzuca" if ok is False else "API niepotwierdzone")
         remaining = max(0, int(expiry - time.time()))
-        covers = expiry > start.timestamp() + 79
+        covers = expiry >= zbieracz.wymagany_exp(start.timestamp())
         log(f"🔑 Konto {_account_label(reg)}: {status} ({detail}); JWT jeszcze {remaining}s; "
             + ("ważny przez całe polowanie." if covers else "wymaga odnowienia przed końcem polowania."))
     with concurrent.futures.ThreadPoolExecutor(max_workers=min(4, max(1, len(accounts)))) as pool:

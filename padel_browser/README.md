@@ -265,8 +265,10 @@ gdy problem przetrwał karencję. W logu widać to jako:
 ## Wiele kont — logowanie i tokeny
 
 Konta dodatkowe korzystają z osobnych, trwałych profili Chromium. Konto główne
-monitoruje i rezerwuje przez całą dobę. Pozostałe budzą się 30 minut przed godziną
-`burst`, biorą udział w sprincie/zrywie i przestają działać wraz z jego końcem.
+monitoruje i rezerwuje przez całą dobę. Pozostałe zaczynają przygotowanie 30 minut
+przed godziną `burst`: pierwszy obchód wykrywa wylogowane profile, a końcowy obchód
+jest celowo opóźniony tak, by świeży, około 15-minutowy JWT obejmował całe polowanie.
+Wymagany `exp` to koniec dłuższego z okien `burst` i `sprint` plus 30 sekund zapasu.
 Zwykłe zwolnienie miejsca później obsługuje tylko konto główne.
 
 W danej chwili działa tylko jeden dodatkowy profil, więc pamięć nie rośnie wraz
@@ -290,9 +292,11 @@ nowym koncie. Otworzy się jego własny ekran; po poprawnym logowaniu token zost
 wykryty, zapisany i przeglądarka zamknie się sama. Sesja pozostaje w `/data`.
 
 Zbieracz wraca tylko do profili z wygasłym tokenem i tylko w półgodzinnym oknie przed
-rzutem oraz podczas zrywu. Nie wpisuje ani nie zapisuje haseł. Ręczne logowanie z panelu
-pozostaje dostępne poza samym krytycznym oknem polowania. Profile pozostają na `/data`,
-więc nie trzeba logować kont ponownie każdego dnia.
+rzutem. W ostatnich 90 sekundach oraz podczas zrywu obowiązuje twarda cisza — Chromium
+nie jest wtedy uruchamiany nawet dla wygasłego konta. Nie wpisuje ani nie zapisuje
+haseł. Ręczne logowanie z panelu pozostaje dostępne odpowiednio wcześniej; nie można
+go rozpocząć tak późno, by dziesięciominutowe okno weszło w polowanie. Profile pozostają
+na `/data`, więc nie trzeba logować kont ponownie każdego dnia.
 
 Podczas publikacji wszystkie gotowe konta strzelają **jednocześnie w ten sam najlepszy
 termin**. Potem wszystkie, łącznie ze zwycięzcą poprzedniej godziny, przechodzą do

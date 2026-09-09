@@ -13,9 +13,10 @@ i `check_padel.BROWSER_RENEW_GRACE`. Wejście na stronę z żywym tokenem oddaje
 token, więc jest czystą stratą czasu i procesora.
 
 Konta dodatkowe służą wyłącznie do codziennego rzutu o godzinie skonfigurowanej
-w `burst`. Zbieracz budzi je 30 minut przed startem i kończy pracę wraz ze zrywem.
-Poza tym oknem nie uruchamia ich profili i nie odnawia JWT. Konto główne ma osobny,
-stale działający mechanizm i przez całą dobę obsługuje zwykły monitoring.
+w `burst`. Zbieracz zaczyna preflight 30 minut przed startem, a końcowy obchód
+układa tak, żeby JWT obejmowały całe polowanie. W ostatnich 90 sekundach i podczas
+zrywu nie uruchamia Chromium. Konto główne ma osobny, stale działający mechanizm
+i przez całą dobę obsługuje zwykły monitoring.
 
 W aktywnym oknie odwiedzamy tylko konto z wygasłym tokenem. Strona Decathlon GO
 odnawia JWT dopiero po jego wygaśnięciu; wcześniejsza wizyta oddałaby ten sam token.
@@ -43,8 +44,15 @@ except ImportError:  # pragma: no cover - obraz dodatku ma współczesnego Pytho
 # procesor monitorowi dokładnie wtedy, gdy jest mu najbardziej potrzebny.
 STOP_PRZED_PUBLIKACJA = 90
 # Dziewięć profili otwieranych kolejno potrzebuje zwykle około 3–4 minut. Zaczynamy
-# wcześniej, ponieważ pierwszy JWT może wygasnąć przed 11 i wymagać drugiej wizyty.
+# wcześniej, żeby wykryć wylogowane profile i zostawić użytkownikowi czas na reakcję.
 PRZYGOTOWANIE_PRZED_PUBLIKACJA = 30 * 60
+# JWT Decathlon GO żyje zwykle około 15 minut. Pierwszy obchód o 10:30 jest tylko
+# kontrolny: gdybyśmy odnawiali ponownie natychmiast po wygaśnięciu około 10:45,
+# kolejna fala tokenów wygasałaby właśnie podczas publikacji o 11:00. Dlatego po
+# preflight czekamy z końcowym obchodem do chwili, w której nowy JWT obejmie całe
+# polowanie oraz ten zapas.
+OCZEKIWANA_WAZNOSC_JWT = 15 * 60
+MARGINES_PO_POLOWANIU = 30
 # Najkrótszy odstęp między dwiema wizytami u TEGO SAMEGO konta. Chroni przed pętlą
 # dobijania się do konta, które jest wylogowane i nigdy nie odda tokenu.
 COOLDOWN = 120
@@ -87,7 +95,14 @@ def nastepne_konto(status, konta, teraz, publikacja=None,
     """
     if not okno_kont_dodatkowych(teraz, publikacja, przygotowanie):
         return None
-    quiet = cisza_przed_publikacja(teraz, publikacja, stop_przed)
+    quiet = cisza_przed_publikacja(
+        teraz, publikacja, stop_przed + LIMIT_WIZYTY)
+    # Twarda cisza: Chromium nie startuje ani tuż przed publikacją, ani w trakcie
+    # zrywu. Poprzednio wyjątek dla wygasłej sesji powodował dokładnie odwrotny efekt:
+    # dziewięć tokenów odnawianych od 10:30 wpadało w trzeci cykl około 11:00.
+    if quiet:
+        return None
+    poczatek_przygotowania = publikacja - przygotowanie
     kandydaci = []
     for konto in konta:
         if konto.get("main"):
@@ -96,13 +111,19 @@ def nastepne_konto(status, konta, teraz, publikacja=None,
         if teraz - (wpis.get("odwiedzone") or 0) < cooldown:
             continue
         exp = wpis.get("exp")
-        # W oknie polowania dopuszczamy tylko ratunek wygaslej, znanej sesji.
-        # Nowe profile i reczne logowanie czekaja do konca zrywu.
-        if quiet and (exp is None or exp > teraz):
-            continue
         if exp is None:
             kandydaci.append((0, float("-inf"), konto))   # nic nie wiemy — najpilniejsze
         elif exp <= teraz:
+            # Profil sprawdzony już w dzisiejszym preflight dostał token około 30 min
+            # przed publikacją. Po jego pierwszym wygaśnięciu NIE odnawiamy od razu:
+            # czekamy na końcowe uzbrojenie, aby kolejny JWT nie wygasł o 11:00.
+            odwiedzone = wpis.get("odwiedzone") or 0
+            sprawdzony_dzis = (odwiedzone >= poczatek_przygotowania
+                               and not wpis.get("blad"))
+            uzbrojenie_od = start_finalnego_uzbrojenia(
+                publikacja, wpis.get("ttl") or OCZEKIWANA_WAZNOSC_JWT)
+            if sprawdzony_dzis and teraz < uzbrojenie_od:
+                continue
             kandydaci.append((1, exp, konto))             # wygasł, im dawniej tym pilniej
     if not kandydaci:
         return None
@@ -118,9 +139,37 @@ def cisza_przed_publikacja(teraz, publikacja, stop_przed=STOP_PRZED_PUBLIKACJA):
     return publikacja is not None and -after < publikacja - teraz <= stop_przed
 
 
+def _czas_okna(nazwa, domyslnie, maksimum):
+    try:
+        return max(1, min(int(float(os.environ.get(nazwa) or domyslnie)), maksimum))
+    except (TypeError, ValueError):
+        return domyslnie
+
+
+def wymagany_exp(publikacja, burst_seconds=None, sprint_seconds=None,
+                 margines=MARGINES_PO_POLOWANIU):
+    """Najwcześniejszy bezpieczny `exp`: koniec dłuższego okna plus zapas."""
+    burst = (_czas_okna("BURST_SECONDS", 75, 120)
+             if burst_seconds is None else max(1, min(int(burst_seconds), 120)))
+    sprint = (_czas_okna("SPRINT_SECONDS", 50, 60)
+              if sprint_seconds is None else max(1, min(int(sprint_seconds), 60)))
+    return publikacja + max(burst, sprint) + margines
+
+
+def start_finalnego_uzbrojenia(publikacja, ttl=OCZEKIWANA_WAZNOSC_JWT):
+    """Od tej chwili odnowiony JWT będzie ważny przez całe polowanie."""
+    try:
+        ttl = int(float(ttl))
+    except (TypeError, ValueError):
+        ttl = OCZEKIWANA_WAZNOSC_JWT
+    # Uszkodzony status nie może przesunąć obchodu poza publikację ani o wiele godzin.
+    ttl = max(5 * 60, min(ttl, 30 * 60))
+    return wymagany_exp(publikacja) - ttl
+
+
 def okno_kont_dodatkowych(teraz, publikacja,
                           przygotowanie=PRZYGOTOWANIE_PRZED_PUBLIKACJA):
-    """Profile automatyczne działają tylko przed rzutem i podczas zrywu."""
+    """Pętla rozpatruje profile tylko wokół rzutu; osobny bezpiecznik blokuje zryw."""
     if publikacja is None:
         return False
     try:
@@ -141,9 +190,11 @@ def odnotuj(status, kid, exp=None, blad="", user_id="", teraz=None):
     inaczej cooldown by nie działał i zbieracz dobijałby się do wylogowanego konta."""
     wpis = dict(status.get(kid) or {})
     wpis.pop("aktywne", None)
-    wpis["odwiedzone"] = int(teraz if teraz is not None else time.time())
+    odwiedzone = int(teraz if teraz is not None else time.time())
+    wpis["odwiedzone"] = odwiedzone
     if exp:
         wpis["exp"] = int(exp)
+        wpis["ttl"] = max(0, int(exp) - odwiedzone)
         wpis["blad"] = ""
     if blad:
         wpis["blad"] = blad
@@ -394,7 +445,10 @@ def main():
             if konto:
                 teraz = time.time()
                 publikacja = publikacja_dzis(check_padel, teraz)
-                if cisza_przed_publikacja(teraz, publikacja):
+                # Nie zaczynaj dziesięciominutowego logowania tak późno, żeby mogło
+                # pozostać otwarte w krytycznym oknie polowania.
+                if cisza_przed_publikacja(
+                        teraz, publikacja, STOP_PRZED_PUBLIKACJA + LIMIT_LOGOWANIA):
                     time.sleep(PETLA_SLEEP)
                     continue
                 zadanie.update(state="active", started=int(time.time()), error="")

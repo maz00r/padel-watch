@@ -88,9 +88,9 @@ class CiszaPrzedPublikacjaTest(unittest.TestCase):
 
     STATUS = {"marek": {"exp": TERAZ - 900, "odwiedzone": 0}}
 
-    def test_only_expired_sessions_are_recovered_during_the_hunt(self):
+    def test_no_expired_session_starts_during_the_hunt(self):
         for ile_przed in (10, 60, 89):
-            self.assertIsNotNone(
+            self.assertIsNone(
                 zb.nastepne_konto(self.STATUS, konta("marek"), TERAZ,
                                   publikacja=TERAZ + ile_przed))
             self.assertIsNone(zb.nastepne_konto({}, konta("marek"), TERAZ,
@@ -101,14 +101,69 @@ class CiszaPrzedPublikacjaTest(unittest.TestCase):
                                                publikacja=TERAZ + 200))
 
     def test_work_continues_only_until_the_burst_ends(self):
-        self.assertIsNotNone(zb.nastepne_konto(self.STATUS, konta("marek"), TERAZ,
-                                               publikacja=TERAZ - 60))
+        self.assertIsNone(zb.nastepne_konto(self.STATUS, konta("marek"), TERAZ,
+                                            publikacja=TERAZ - 60))
         self.assertIsNone(zb.nastepne_konto(self.STATUS, konta("marek"), TERAZ,
                                             publikacja=TERAZ - 76))
 
     def test_the_same_guard_is_available_for_manual_login(self):
         self.assertTrue(zb.cisza_przed_publikacja(TERAZ, TERAZ + 30))
         self.assertFalse(zb.cisza_przed_publikacja(TERAZ, TERAZ + 200))
+
+
+class FinalneUzbrojenieTest(unittest.TestCase):
+    """Regresja 09.09: start 30 min przed rzutem i TTL 15 min synchronizowały
+    trzecią falę odnowień dokładnie z publikacją terminów."""
+
+    def test_second_refresh_waits_until_it_can_cover_the_whole_hunt(self):
+        publikacja = TERAZ
+        status = {"marek": {
+            "exp": publikacja - 880,
+            "odwiedzone": publikacja - 1780,
+            "ttl": KWADRANS,
+            "blad": "",
+        }}
+        self.assertIsNone(zb.nastepne_konto(
+            status, konta("marek"), publikacja - 870, publikacja=publikacja))
+        self.assertEqual(zb.nastepne_konto(
+            status, konta("marek"), publikacja - 790, publikacja=publikacja)["id"],
+            "marek")
+
+    def test_nine_accounts_finish_armed_before_the_quiet_window(self):
+        publikacja = TERAZ
+        ids = [f"k{i}" for i in range(9)]
+        status = {kid: {"exp": publikacja - 86400,
+                        "odwiedzone": publikacja - 86400, "blad": ""}
+                  for kid in ids}
+        wizyty = {kid: [] for kid in ids}
+        teraz = publikacja - zb.PRZYGOTOWANIE_PRZED_PUBLIKACJA
+
+        with mock.patch.dict(os.environ, {"BURST_SECONDS": "75",
+                                          "SPRINT_SECONDS": "50"}):
+            while teraz < publikacja - zb.STOP_PRZED_PUBLIKACJA:
+                konto = zb.nastepne_konto(status, konta(*ids), teraz,
+                                           publikacja=publikacja)
+                if konto is None:
+                    teraz += 10
+                    continue
+                # Najgorszy dozwolony przypadek: każdy profil zużywa cały limit.
+                teraz += zb.LIMIT_WIZYTY
+                kid = konto["id"]
+                wizyty[kid].append(teraz)
+                zb.odnotuj(status, kid, exp=teraz + KWADRANS, teraz=teraz)
+
+            wymagany = zb.wymagany_exp(publikacja)
+
+        self.assertTrue(all(len(wizyty[kid]) == 2 for kid in ids))
+        self.assertTrue(all(status[kid]["exp"] >= wymagany for kid in ids))
+        self.assertTrue(all(max(wizyty[kid]) <= publikacja - zb.STOP_PRZED_PUBLIKACJA
+                            for kid in ids))
+
+    def test_automatic_visit_is_not_started_if_its_limit_overlaps_quiet_time(self):
+        publikacja = TERAZ + zb.STOP_PRZED_PUBLIKACJA + zb.LIMIT_WIZYTY - 1
+        self.assertIsNone(zb.nastepne_konto(
+            {"marek": {"exp": TERAZ - 1, "odwiedzone": 0}},
+            konta("marek"), TERAZ, publikacja=publikacja))
 
 
 class TozsamoscTest(unittest.TestCase):
@@ -148,6 +203,7 @@ class OdnotowanieTest(unittest.TestCase):
         zb.odnotuj(status, "marek", exp=TERAZ + KWADRANS, teraz=TERAZ)
         self.assertEqual(status["marek"]["blad"], "")
         self.assertEqual(status["marek"]["exp"], TERAZ + KWADRANS)
+        self.assertEqual(status["marek"]["ttl"], KWADRANS)
 
 
 class IleZywychTest(unittest.TestCase):

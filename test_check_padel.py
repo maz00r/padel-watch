@@ -5573,6 +5573,14 @@ class AccountReadinessBeforeBurstTest(unittest.TestCase):
         self.assertIn("2/3", opis)
         self.assertIn("Sprawdź odnawianie", opis)
 
+    def test_alive_at_publication_is_not_ready_if_it_expires_during_the_hunt(self):
+        with mock.patch.dict(os.environ, {"BURST_SECONDS": "75", "SPRINT_SECONDS": "50"}):
+            opis = self.gotowosc(
+                self.konta("a"),
+                {"a": {"exp": self.publikacja.timestamp() + 90}})
+        self.assertIn("2/2 z żywym tokenem teraz", opis)
+        self.assertIn("JWT ważny do końca polowania: 1/2", opis)
+
     def test_a_broken_status_file_does_not_break_the_session_check(self):
         """Diagnostyka nie może wywrócić kontroli sesji — ona jest ważniejsza."""
         import zbieracz

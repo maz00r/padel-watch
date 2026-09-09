@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.28.4 — tokeny uzbrojone na całe polowanie
+
+- Przygotowanie kont dodatkowych jest dwufazowe. Obchód 30 minut wcześniej nadal
+  wykrywa wylogowane profile, ale po pierwszym wygaśnięciu JWT zbieracz czeka z
+  kolejnym odnowieniem do końcowego okna uzbrojenia. Dzięki temu token ważny około
+  15 minut nie wpada już w trzeci cykl odnowienia dokładnie około 11:00.
+- Wymagany czas ważności jest liczony jako koniec dłuższego z okien `burst` i
+  `sprint` plus 30 sekund zapasu. Diagnostyka gotowości używa tego samego progu.
+- Ostatnie 90 sekund przed publikacją i cały zryw są twardą ciszą: automatyczny
+  Chromium nie startuje nawet dla wygasłego konta. Nowa automatyczna wizyta nie
+  rusza również wtedy, gdy jej 60-sekundowy limit mógłby wejść w ciszę; ręcznego
+  logowania nie można rozpocząć tak późno, by jego okno weszło w polowanie.
+- Test harmonogramu symuluje dziewięć kont, pełne 30 minut i JWT o TTL 15 minut.
+  Wszystkie konta kończą z tokenem obejmującym polowanie, zanim zacznie się cisza.
+- Wymaga aktualizacji dodatku i paczki Lambdy. Protokół pozostaje w wersji 3.
+
 ## 0.28.3 — konta dodatkowe tylko na codzienny rzut
 
 - Konto główne nadal monitoruje i rezerwuje przez całą dobę. Konta dodatkowe biorą
