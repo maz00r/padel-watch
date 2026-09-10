@@ -5,7 +5,8 @@ __pycache__/
 state.json
 hunts.json
 data/
-# lokalne ustawienia Claude Code
-.claude/
+# lokalne ustawienia Claude Code (settings.json jest wspolny, reszta lokalna)
+.claude/*
+!.claude/settings.json
 # Surowe logi polowań zawierają dane osobowe i identyfikatory operacyjne.
 /analysis/hunt-logs/raw/

@@ -1,0 +1,6 @@
+{
+  "extraKnownMarketplaces": {
+    "alexgreensh-token-optimizer": { "source": { "source": "github", "repo": "alexgreensh/token-optimizer" } }
+  },
+  "enabledPlugins": { "token-optimizer@alexgreensh-token-optimizer": true }
+}
