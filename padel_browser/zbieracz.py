@@ -146,13 +146,23 @@ def _czas_okna(nazwa, domyslnie, maksimum):
         return domyslnie
 
 
+def _sufit_sprintu():
+    """Ten sam sufit co w dodatku i Lambdzie; import leniwy, bo silnik jest ciężki."""
+    try:
+        from check_padel import SPRINT_MAX_SECONDS
+        return SPRINT_MAX_SECONDS
+    except ImportError:
+        return 80
+
+
 def wymagany_exp(publikacja, burst_seconds=None, sprint_seconds=None,
                  margines=MARGINES_PO_POLOWANIU):
     """Najwcześniejszy bezpieczny `exp`: koniec dłuższego okna plus zapas."""
+    sufit = _sufit_sprintu()
     burst = (_czas_okna("BURST_SECONDS", 75, 120)
              if burst_seconds is None else max(1, min(int(burst_seconds), 120)))
-    sprint = (_czas_okna("SPRINT_SECONDS", 50, 60)
-              if sprint_seconds is None else max(1, min(int(sprint_seconds), 60)))
+    sprint = (_czas_okna("SPRINT_SECONDS", 75, sufit)
+              if sprint_seconds is None else max(1, min(int(sprint_seconds), sufit)))
     return publikacja + max(burst, sprint) + margines
 
 

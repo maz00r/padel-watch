@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.29.0 — sprint 75 s po publikacji o 11:00:50,7
+
+Log z 14.09: Lambda z oknem 50 s zobaczyła pierwszą partię po 48,7 s — 0,3 s przed
+własnym końcem. Drugą partię (15:00, 18:00, 19:00 o 11:00:52) obsłużył już tylko
+lokalny zapas, bo Irlandia skończyła obserwację. Zmierzone pory publikacji sięgają
+teraz od 11:00:13 do 11:00:50,7; mediana nic tu nie znaczy, okno ma pokrywać ogon.
+
+- **Sprint trwa domyślnie 75 s, tyle co zryw.** Sufit podniesiony z 60 do 80 s i jest
+  jedną liczbą dla dodatku, Lambdy i zbieracza (`SPRINT_MAX_SECONDS`) — trzy osobne
+  wartości przycinałyby po cichu. **Timeout funkcji w konsoli AWS ustaw na 90 s**
+  (Configuration → General configuration) i wgraj nową paczkę.
+- **Lambda odsyła faktyczne okno (`window_s`).** Przy za niskim timeoucie funkcja
+  nie ginie w połowie — liczy koniec z własnego budżetu — ale obserwuje krócej, niż
+  prosił dodatek. Dodatek to teraz porównuje i pisze w Dzienniku „Lambda skróciła okno
+  obserwacji do N s z M s — ustaw co najmniej M+10 s". Stara paczka nadal działa.
+- **Wiersz Dziennika trafia do strumienia jednym zapisem.** Salwa dziesięciu kont
+  przeplatała znaczniki czasu („[11:00:52.292][11:00:52.292] ⇉ Strzał…") i wrzucała
+  treść linijkę niżej; analiza takiego logu była zgadywaniem.
+- **Kontrola o 10:30 nie odsyła już do panelu za coś, co jest planem.** Przy
+  15-minutowym JWT żaden token odczytany pół godziny przed zrywem nie może objąć
+  polowania — „0/10 ważnych do końca" to harmonogram zbieracza, nie awaria. Linia
+  podaje teraz godzinę końcowego odnowienia, a do panelu odsyła dopiero wtedy, gdy
+  zbieracz już nie zdąży, oraz wymienia z nazwy profile, których ostatnia wizyta
+  się nie powiodła.
+- **Panel: jedna przyczyna — jedno zdanie.** Dziewięć kont z wygasłym tokenem dawało
+  dziewięć powtórzeń przy każdym odświeżeniu. Wygasły token konta dodatkowego poza
+  oknem zbierania jest opisany jako to, czym jest („odnowi się przed polowaniem");
+  o logowanie prosimy tylko, gdy zbieracz faktycznie nie dostał tokenu z profilu.
+
 ## 0.28.5 — rezerwacje dostępne po wylogowaniu konta
 
 - **Rezerwacje wylogowanych kont nie znikają z panelu.** Ostatni poprawny

@@ -249,6 +249,67 @@ class ReservationsOfflineCacheTest(unittest.TestCase):
         self.assertEqual(second[0]["account_name"], "Ania")
         self.assertIn("ostatni poprawny stan", error)
 
+    def test_nine_accounts_with_one_cause_give_one_sentence(self):
+        """14.09 panel wypisywał dziewięć razy „token wygasł — zaloguj się w panelu",
+        po jednym na konto, przy każdym odświeżeniu. Jedna przyczyna — jedno zdanie."""
+        accounts = [{"id": "glowne", "name": "Główne", "main": True}] + [
+            {"id": f"k{i}", "name": f"Gracz {i}", "main": False} for i in range(3)]
+
+        def credentials(account=None):
+            return {"account_id": account["id"] if account else "glowne"}
+
+        def view(cfg, _tz):
+            if cfg["account_id"] == "glowne":
+                return [], None
+            return None, "token wygasł — zaloguj się w panelu Padel"
+
+        cache = {f"k{i}": {"saved_at": 1_800_000_000 + 60 * i, "items": []} for i in range(3)}
+        with mock.patch.object(cp, "load_config", return_value={}), \
+                mock.patch.object(cp, "konta_z_konfiguracji", return_value=accounts), \
+                mock.patch.object(cp, "credentials_cfg", side_effect=credentials), \
+                mock.patch.object(cp, "reservations_view", side_effect=view), \
+                mock.patch.object(panel, "_load_reservations_cache", return_value=cache), \
+                mock.patch.object(panel.zbieracz, "wczytaj_status", return_value={}):
+            panel._cache.update(at=0, items=None, error=None)
+            _items, error = panel.reservations(force=True)
+        self.assertEqual(error.count("token wygasł"), 1, error)
+        self.assertIn("3 kont (Gracz 0, Gracz 1, Gracz 2)", error)
+        # Konto dodatkowe poza oknem zbierania: to plan zbieracza, nie prośba o logowanie.
+        self.assertIn("poza oknem zbierania", error)
+        self.assertNotIn("zaloguj", error)
+        self.assertRegex(error, r"pokazuję ostatni poprawny stan z \d\d\.\d\d \d\d:\d\d–\d\d\.\d\d \d\d:\d\d")
+
+    def test_a_profile_the_harvester_failed_on_still_asks_for_a_login(self):
+        accounts = [{"id": "glowne", "name": "Główne", "main": True},
+                    {"id": "k0", "name": "Robert", "main": False}]
+
+        def credentials(account=None):
+            return {"account_id": account["id"] if account else "glowne"}
+
+        def view(cfg, _tz):
+            if cfg["account_id"] == "glowne":
+                return [], None
+            return None, "token wygasł — zaloguj się w panelu Padel"
+
+        with mock.patch.object(cp, "load_config", return_value={}), \
+                mock.patch.object(cp, "konta_z_konfiguracji", return_value=accounts), \
+                mock.patch.object(cp, "credentials_cfg", side_effect=credentials), \
+                mock.patch.object(cp, "reservations_view", side_effect=view), \
+                mock.patch.object(panel, "_load_reservations_cache", return_value={}), \
+                mock.patch.object(panel.zbieracz, "wczytaj_status",
+                                  return_value={"k0": {"blad": "brak go-sdk-jwt"}}):
+            panel._cache.update(at=0, items=None, error=None)
+            _items, error = panel.reservations(force=True)
+        self.assertIn("Robert: token wygasł — zaloguj się w panelu Padel", error)
+        self.assertIn("ostatnia wizyta zbieracza nieudana: brak go-sdk-jwt", error)
+
+    def test_the_main_account_keeps_its_plain_error(self):
+        """Konto główne nie ma zbieracza — jego wygasły token to zawsze sprawa użytkownika."""
+        self.assertEqual(
+            panel._opis_bledu_konta({"id": "glowne", "main": True},
+                                    "token wygasł — zaloguj się w panelu Padel", {}),
+            "token wygasł — zaloguj się w panelu Padel")
+
     def test_reservations_endpoint_reports_warning_instead_of_fatal_error(self):
         with mock.patch.object(panel, "reservations", return_value=([], "Ania: brak tokenu")):
             response = Zapytanie("GET", "/api/reservations").wykonaj()

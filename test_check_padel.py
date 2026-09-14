@@ -8,6 +8,7 @@ import base64
 import json
 import contextlib
 import os
+import re
 import sys
 import tempfile
 import threading
@@ -4909,45 +4910,110 @@ class CorruptApiRecordTest(unittest.TestCase):
         self.assertNotIn("Pominąłem", out)
 
 
+class LogLinesSurviveConcurrentThreadsTest(unittest.TestCase):
+    """Wiersz Dziennika ma trafić do strumienia JEDNYM zapisem.
+
+    14.09 salwa dziesięciu kont pisała równolegle i `print(ts, *args)` — trzy osobne
+    zapisy na wiersz — dawał „[11:00:52.292][11:00:52.292] ⇉ Strzał…" ze znacznikami
+    sklejonymi parami i treścią linijkę niżej. Analiza salwy z takiego logu jest zgadywaniem.
+    """
+
+    class StrumienJakTerminal(io.StringIO):
+        """Prawdziwe stdout oddaje GIL przy każdym zapisie; StringIO nie — więc wymuszamy
+        przełączenie wątku po każdym `write`, inaczej test przechodzi także na starym kodzie."""
+
+        def write(self, tekst):
+            wynik = super().write(tekst)
+            time.sleep(0)
+            return wynik
+
+    def test_every_line_keeps_its_own_timestamp_and_text(self):
+        bufor = self.StrumienJakTerminal()
+        start = threading.Barrier(8, timeout=5)
+
+        def pisz(nr):
+            start.wait()
+            for i in range(200):
+                cp.log(f"wątek {nr} wiersz {i}")
+
+        with mock.patch("sys.stdout", bufor):
+            watki = [threading.Thread(target=pisz, args=(nr,)) for nr in range(8)]
+            for w in watki:
+                w.start()
+            for w in watki:
+                w.join()
+        wiersze = bufor.getvalue().splitlines()
+        self.assertEqual(len(wiersze), 8 * 200)
+        wzor = re.compile(r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d{3})?\] wątek \d wiersz \d+$")
+        zle = [w for w in wiersze if not wzor.match(w)]
+        self.assertEqual(zle, [], f"{len(zle)} przeplecionych wierszy, np. {zle[:3]}")
+
+    def test_a_bare_timestamp_has_no_trailing_space(self):
+        bufor = io.StringIO()
+        with mock.patch("sys.stdout", bufor):
+            cp.log()
+        self.assertRegex(bufor.getvalue(), r"^\[[^\]]+\]\n$")
+
+
 class SprintWindowCoversEveryObservedPublicationTest(unittest.TestCase):
     """Okno sprintu musi obejmować WSZYSTKIE zaobserwowane pory publikacji.
 
-    Zmierzone (23.08–04.09, sekunda po 11:00):
-    15, 13, 13, 15, 36, 36, 36, 37, 37, 42, 25, **48**.
+    Zmierzone (sekunda po 11:00): 23.08–04.09: 15, 13, 13, 15, 36, 36, 36, 37, 37, 42,
+    25, 29 (04.09 wyglądało na 48 przez błąd pomiaru, patrz `RemoteDetectionTimeTest`);
+    08.09 i 09.09: 28; **14.09: 50,7**.
 
-    04.09 przyszła o 11:00:48 — poza oknem 11:00:05+40 s, które obowiązywało. Limit
-    `MAX_SPRINT_SEKUND` przycinał ustawienie użytkownika po cichu, więc dłuższego okna
-    nie dało się w ogóle włączyć.
+    14.09 Lambda z oknem 50 s zobaczyła pierwszą partię 0,3 s przed własnym końcem,
+    a drugą (11:00:52) obsłużył już tylko lokalny zapas. Trzy osobne rzeczy muszą
+    pozwolić na dłuższe okno: sufit w Lambdzie, schemat dodatku i — co 14.09 zawiodło,
+    choć oba pierwsze były w porządku — DOMYŚLNA wartość, z którą dodatek faktycznie
+    poluje. Sufit, który pozwala, nic nie daje, gdy domyślne 50 s nie sięga publikacji.
     """
 
-    PUBLIKACJE = [15, 13, 13, 15, 36, 36, 36, 37, 37, 42, 25, 48]
+    PUBLIKACJE = [15, 13, 13, 15, 36, 36, 36, 37, 37, 42, 25, 29, 28, 28, 51]
+    START_SPRINTU = 0          # sprint rusza o 11:00:00
+    ZAPAS = 10                 # druga partia przychodzi 1–2 s po pierwszej
+
+    @classmethod
+    def potrzebne(cls):
+        return max(cls.PUBLIKACJE) - cls.START_SPRINTU + cls.ZAPAS
+
+    @staticmethod
+    def config_yaml():
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "padel_browser", "config.yaml")
+        with open(path, encoding="utf-8") as config_file:
+            return config_file.read()
 
     def test_the_cap_allows_a_window_that_covers_everything(self):
         sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "aws_remote"))
         import handler
-        potrzebne = max(self.PUBLIKACJE) - 5 + 2      # start 11:00:05 + zapas
         self.assertGreaterEqual(
-            handler.MAX_SPRINT_SEKUND, potrzebne,
+            handler.MAX_SPRINT_SEKUND, self.potrzebne(),
             f"limit {handler.MAX_SPRINT_SEKUND}s przycina okno potrzebne do pokrycia "
             f"publikacji o 11:00:{max(self.PUBLIKACJE)}")
 
-    def test_the_addon_schema_allows_it_too(self):
-        """Limit w Lambdzie nic nie da, jeśli konfiguracja dodatku nie pozwoli tego ustawić."""
-        path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                            "padel_browser", "config.yaml")
-        with open(path, encoding="utf-8") as config_file:
-            cfg = config_file.read()
-        self.assertIn("sprint_seconds: int(1,60)", cfg)
+    def test_the_lambda_and_the_addon_share_one_cap(self):
+        """Dwie różne liczby przycinałyby po cichu: dodatek prosi, Lambda tnie."""
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "aws_remote"))
+        import handler
+        self.assertEqual(handler.MAX_SPRINT_SEKUND, cp.SPRINT_MAX_SECONDS)
+        self.assertIn(f"sprint_seconds: int(1,{cp.SPRINT_MAX_SECONDS})", self.config_yaml())
+
+    def test_the_default_window_really_covers_everything(self):
+        """To jest test, którego brakowało 14.09: sufit pozwalał, domyślne 50 s nie sięgało."""
+        dopasowanie = re.search(r"^  sprint_seconds: (\d+)$", self.config_yaml(), re.M)
+        self.assertIsNotNone(dopasowanie, "brak domyślnego sprint_seconds w config.yaml")
+        self.assertGreaterEqual(
+            int(dopasowanie.group(1)), self.potrzebne(),
+            f"domyślny sprint {dopasowanie.group(1)} s nie sięga publikacji "
+            f"o 11:00:{max(self.PUBLIKACJE)}")
 
     def test_default_schedule_uses_requested_overlapping_windows(self):
-        path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                            "padel_browser", "config.yaml")
-        with open(path, encoding="utf-8") as config_file:
-            cfg = config_file.read()
+        cfg = self.config_yaml()
         self.assertIn('burst: "mon-sun:11:00:00"', cfg)
         self.assertIn("burst_seconds: 75", cfg)
         self.assertIn('sprint: "mon-sun:11:00:00"', cfg)
-        self.assertIn("sprint_seconds: 50", cfg)
+        self.assertIn("sprint_seconds: 75", cfg)
 
 
 class RemoteDetectionTimeTest(HuntJournalHelpers, unittest.TestCase):
@@ -5027,6 +5093,78 @@ class RemoteReportsItsDetectionAgeTest(RemoteHandlerHelpers, unittest.TestCase):
             wynik = self.rozpakuj(self.handler.lambda_handler(
                 self.zadanie(self.tresc(sprint_seconds=1)), None))
         self.assertIsNone(wynik["timings"].get("first_hit_ago_ms"))
+
+
+class LambdaReportsItsRealWindowTest(RemoteHandlerHelpers, unittest.TestCase):
+    """Za niski timeout funkcji skraca obserwację PO CICHU.
+
+    `poluj` liczy koniec z pozostałego budżetu wykonania, więc funkcja ubita nie zostaje —
+    ale okno wychodzi krótsze, niż prosił dodatek, a publikacja po tej sekundzie odbywa
+    się bez Irlandii. Lambda odsyła więc faktyczne okno, a dodatek porównuje je z prośbą.
+    """
+
+    class Kontekst:
+        def __init__(self, ms):
+            self.ms = ms
+
+        def get_remaining_time_in_millis(self):
+            return self.ms
+
+    def okno(self, sprint_seconds, budget_ms):
+        """Prawdziwy, krótki przebieg — okno 1 s, żeby test nie czekał na 75 s."""
+        with mock.patch.object(cp, "resolve_current_id", side_effect=lambda x: self.LID), \
+                mock.patch.object(cp, "fetch_listing", return_value=self.doc()), \
+                mock.patch("sys.stdout", io.StringIO()):
+            wynik = self.rozpakuj(self.handler.lambda_handler(
+                self.zadanie(self.tresc(sprint_seconds=sprint_seconds)),
+                self.Kontekst(budget_ms)))
+        return wynik["window_s"]
+
+    def test_a_generous_timeout_leaves_the_requested_window_intact(self):
+        self.assertAlmostEqual(self.okno(1, 90_000), 1.0, delta=0.15)
+
+    def test_a_short_timeout_shortens_the_window(self):
+        # Budżet 5,5 s → po odjęciu 2 s zapasu 3,5 s; twardy koniec 3,5 s; obserwacja
+        # kończy się 3 s wcześniej: 0,5 s zamiast proszonej 1 s. Ta sama arytmetyka,
+        # która przy timeoucie 60 s i prośbie o 75 s daje 55 s.
+        self.assertAlmostEqual(self.okno(1, 5_500), 0.5, delta=0.15)
+
+    def test_the_addon_warns_when_ireland_returns_a_shorter_window(self):
+        from types import SimpleNamespace
+        cfgs = [dict(enabled=True, konto="k0", name="Konto 0",
+                     token=jwt_with_exp(time.time() + 1000), token_file="/test/k0",
+                     browser_mode=True, salvo=1, hedge=1, max_per_run=1)]
+
+        def remote(url, secret, payload, timeout):
+            return dict(ok=True, protocol_version=3, doc=None, listing_id=None,
+                        window_s=55.0, timings={"batches": 0}), None
+
+        n = SimpleNamespace(remote_url="unused", remote_secret="unused", first_listing=["kort"],
+                            tzname="Europe/Warsaw", sprint_threads=3, tz=TZ)
+        with mock.patch.object(cp, "call_remote", side_effect=remote), \
+                mock.patch.object(cp, "log") as logger:
+            cp.remote_with_fresh_tokens(n, set(), time.monotonic() + 75, cfgs)
+        komunikaty = [c.args[0] for c in logger.call_args_list]
+        ostrzezenia = [k for k in komunikaty if "skróciła okno obserwacji do 55 s z 75 s" in k]
+        self.assertEqual(len(ostrzezenia), 1, komunikaty)
+        self.assertIn("co najmniej 85 s", ostrzezenia[0])
+
+    def test_a_full_window_or_an_old_lambda_raises_no_alarm(self):
+        from types import SimpleNamespace
+        cfgs = [dict(enabled=True, konto="k0", name="Konto 0",
+                     token=jwt_with_exp(time.time() + 1000), token_file="/test/k0",
+                     browser_mode=True, salvo=1, hedge=1, max_per_run=1)]
+        n = SimpleNamespace(remote_url="unused", remote_secret="unused", first_listing=["kort"],
+                            tzname="Europe/Warsaw", sprint_threads=3, tz=TZ)
+        for odpowiedz in (dict(ok=True, protocol_version=3, doc=None, listing_id=None,
+                               window_s=74.6, timings={"batches": 0}),
+                          dict(ok=True, protocol_version=3, doc=None, listing_id=None,
+                               timings={"batches": 0})):
+            with mock.patch.object(cp, "call_remote", return_value=(odpowiedz, None)), \
+                    mock.patch.object(cp, "log") as logger:
+                cp.remote_with_fresh_tokens(n, set(), time.monotonic() + 75, cfgs)
+            self.assertFalse([c.args[0] for c in logger.call_args_list
+                              if "skróciła okno" in c.args[0]])
 
 
 class NoUndefinedNamesTest(unittest.TestCase):
@@ -5537,14 +5675,15 @@ class AccountReadinessBeforeBurstTest(unittest.TestCase):
         sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                         "padel_browser"))
 
-    def gotowosc(self, konta, status):
+    def gotowosc(self, konta, status, teraz=None):
         import zbieracz
         plik = os.path.join(self.dir.name, "harvest.json")
         with open(plik, "w", encoding="utf-8") as f:
             json.dump(status, f)
+        teraz = self.publikacja.timestamp() if teraz is None else teraz
         with mock.patch.object(cp, "konta_z_konfiguracji", return_value=konta), \
                 mock.patch.object(zbieracz, "STATUS_PATH", plik), \
-                mock.patch.object(cp.time, "time", return_value=self.publikacja.timestamp()), \
+                mock.patch.object(cp.time, "time", return_value=teraz), \
                 mock.patch.object(cp, "token_from_file", side_effect=lambda path: jwt_with_exp(
                     self.publikacja.timestamp() + 600 if path == "glowne" else
                     (status.get(path) or {}).get("exp", 0))), \
@@ -5567,11 +5706,39 @@ class AccountReadinessBeforeBurstTest(unittest.TestCase):
         self.assertNotIn("zaloguj", opis.lower())
 
     def test_a_missing_account_tells_you_what_to_do(self):
+        """Tuż przed publikacją zbieracz milczy — brakujące konto to już sprawa użytkownika."""
         zywy = self.publikacja.timestamp() + 600
         opis = self.gotowosc(self.konta("a", "b"),
                              {"a": {"exp": zywy}, "b": {"exp": self.publikacja.timestamp() - 10}})
         self.assertIn("2/3", opis)
-        self.assertIn("Sprawdź odnawianie", opis)
+        self.assertIn("Sprawdź brakujące konta w panelu", opis)
+
+    def test_half_an_hour_before_the_hunt_expired_tokens_are_the_plan(self):
+        """14.09 o 10:30: „0/10 ważnych do końca polowania. Sprawdź w panelu" — a dwie
+        minuty później zbieracz sam odnowił wszystkie konta. Przy 15-minutowym JWT żaden
+        token odczytany o 10:30 nie MOŻE objąć polowania o 11:00; komunikat ma mówić,
+        kiedy zbieracz to zrobi, a nie odsyłać do panelu."""
+        dawno = self.publikacja.timestamp() - 3600
+        opis = self.gotowosc(self.konta("a", "b"),
+                             {"a": {"exp": dawno}, "b": {"exp": dawno}},
+                             teraz=self.publikacja.timestamp() - 30 * 60)
+        self.assertIn("1/3 z żywym tokenem teraz", opis)
+        self.assertIn("JWT ważny do końca polowania: 1/3", opis)
+        # publikacja 11:00:28 + max(zryw 75, sprint) + 30 s zapasu − 15 min życia JWT
+        self.assertIn("zbieracz odnowi od 10:47:13", opis)
+        self.assertNotIn("Sprawdź", opis)
+
+    def test_a_profile_whose_last_visit_failed_is_named(self):
+        """Wylogowany profil to jedyny przypadek, w którym o 10:30 trzeba coś zrobić ręcznie."""
+        dawno = self.publikacja.timestamp() - 3600
+        opis = self.gotowosc(
+            [{"id": "glowne", "main": True, "token_file": "glowne"},
+             {"id": "a", "name": "Anna", "main": False, "token_file": "a"},
+             {"id": "b", "name": "Robert", "main": False, "token_file": "b"}],
+            {"a": {"exp": dawno}, "b": {"exp": dawno, "blad": "brak go-sdk-jwt"}},
+            teraz=self.publikacja.timestamp() - 30 * 60)
+        self.assertIn("wymagają logowania w panelu: Robert", opis)
+        self.assertNotIn("Anna", opis.split("wymagają logowania")[1])
 
     def test_alive_at_publication_is_not_ready_if_it_expires_during_the_hunt(self):
         with mock.patch.dict(os.environ, {"BURST_SECONDS": "75", "SPRINT_SECONDS": "50"}):

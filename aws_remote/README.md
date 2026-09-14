@@ -94,7 +94,7 @@ Konsola AWS, **region `eu-west-1` (Ireland)** — sprawdź prawy górny róg.
 | ustawienie | wartość | dlaczego |
 |---|---|---|
 | Memory | **1769 MB** | pamięć w Lambdzie to suwak od **procesora**; pełny rdzeń zaczyna się tutaj. Przy 512 MB samo TLS zajmowało 17 ms zamiast 3 ms. RAM-u zużywa się i tak ~55 MB |
-| Timeout | **60 s** | sprint trwa do 50 s; pozostałe 10 s to zapas na rejestrację i odpowiedź |
+| Timeout | **90 s** | sprint trwa domyślnie 75 s (maks. 80); pozostałe 10 s to zapas na rejestrację i odpowiedź. Przy za niskim timeoucie funkcja sama skróci okno, a dodatek zgłosi to w Dzienniku („Lambda skróciła okno obserwacji”) |
 
 **Configuration → Concurrency → Reserve concurrency: `1`**
 

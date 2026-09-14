@@ -19,6 +19,7 @@ import concurrent.futures
 import http.client
 import io
 import json
+import math
 import os
 import queue
 import re
@@ -148,7 +149,12 @@ def log(*args, level=None):
     now = datetime.now(_log_tz())
     ts = (now.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3] if _LOG_MILLIS
           else now.strftime("%Y-%m-%d %H:%M:%S"))
-    print(f"[{ts}]", *args, flush=True)
+    # Jeden zapis na wiersz. `print(ts, *args)` pisze znacznik, treść i koniec linii
+    # osobno, więc dziesięć wątków salwy przeplatało się w środku wiersza — w logu
+    # z 14.09 znaczniki czasu sklejały się parami, a treść lądowała linijkę niżej.
+    tresc = " ".join(str(a) for a in args)
+    sys.stdout.write(f"[{ts}] {tresc}\n" if tresc else f"[{ts}]\n")
+    sys.stdout.flush()
 
 
 # --------------------------------------------------------------------------- IO
@@ -328,9 +334,27 @@ def gotowosc_kont(publikacja):
         log(f"! Nie policzyłem gotowości kont: {e!r}", level="debug")
         return ""
     opis = (f" Konta: {zywe}/{len(konta)} z żywym tokenem teraz; "
-            f"JWT ważny do końca polowania: {ready}/{len(konta)} (pozostałe wymagają odnowienia).")
-    if zywe < len(konta):
-        opis += " Sprawdź odnawianie brakujących kont w panelu."
+            f"JWT ważny do końca polowania: {ready}/{len(konta)}.")
+    if ready < len(konta):
+        # Przy 15-minutowym JWT żaden token odczytany o 10:30 nie może objąć polowania
+        # o 11:00 — „0/10" pół godziny przed zrywem to harmonogram zbieracza, nie awaria.
+        # 14.09 ta linia odsyłała do panelu, a dwie minuty później zbieracz sam odnowił
+        # wszystkie konta. Do panelu odsyłamy dopiero, gdy zbieracz już nie zdąży.
+        uzbrojenie_od = zbieracz.start_finalnego_uzbrojenia(publikacja.timestamp())
+        ostatnia_szansa = (publikacja.timestamp() - zbieracz.STOP_PRZED_PUBLIKACJA
+                           - zbieracz.LIMIT_WIZYTY)
+        if now < uzbrojenie_od:
+            kiedy = datetime.fromtimestamp(uzbrojenie_od, publikacja.tzinfo)
+            opis += (f" Pozostałe zbieracz odnowi od {kiedy:%H:%M:%S} — wcześniejszy JWT "
+                     f"nie objąłby całego polowania.")
+        elif now < ostatnia_szansa:
+            opis += " Zbieracz odnawia pozostałe."
+        else:
+            opis += " Sprawdź brakujące konta w panelu — zbieracz już nie zdąży ich odnowić."
+    wylogowane = [k.get("name") or k["id"] for k in konta
+                  if not k.get("main") and (status.get(k["id"]) or {}).get("blad")]
+    if wylogowane:
+        opis += f" Ostatnia wizyta nieudana, wymagają logowania w panelu: {', '.join(wylogowane)}."
     return opis
 
 
@@ -2317,6 +2341,12 @@ def log_rtt(host):
 # Zmierzone: 3 wątki pobierające BEZ PRZERW dają świeży obraz co ~20 ms (34 zapytania/s).
 # Dlatego przez kilka sekund wokół sekundy publikacji przechodzimy na tryb ciągły.
 SPRINT_MAX_THREADS = 4
+# Sufit długości sprintu. Wspólny dla dodatku, Lambdy (`handler.MAX_SPRINT_SEKUND`)
+# i zbieracza tokenów — trzy osobne liczby rozjechałyby się przy pierwszej zmianie.
+# 14.09 publikacja przyszła o 11:00:50.7: Lambda z oknem 50 s zobaczyła partię 0,3 s
+# przed własnym końcem, a drugą partię (11:00:52) obsłużył już tylko lokalny zapas.
+# Timeout funkcji w konsoli AWS musi wynosić co najmniej sufit + 10 s (90 s).
+SPRINT_MAX_SECONDS = 80
 _sprint_pool = None
 
 
@@ -4122,7 +4152,8 @@ def wczytaj_nastawy(interval):
         try:
             sprint = parse_burst_env(sprint_env)   # ten sam format co burst
             # Ten sam sufit co w Lambdzie — zapas lokalny musi umieć pokryć to samo okno.
-            sprint["seconds"] = max(1, min(int(os.environ.get("SPRINT_SECONDS") or 50), 60))
+            sprint["seconds"] = max(1, min(int(os.environ.get("SPRINT_SECONDS") or 75),
+                                           SPRINT_MAX_SECONDS))
             hour, minute, second = sprint["at"]
             log(f"🏁 Sprint: {','.join(sprint['days'])} o {hour:02d}:{minute:02d}:{second:02d}, "
                 f"przez {sprint['seconds']}s, {sprint_threads} wątków bez przerw "
@@ -4226,6 +4257,13 @@ def remote_with_fresh_tokens(n, baseline, deadline, reg_cfgs):
             timeout=seconds + REMOTE_TIMEOUT_MARGIN)
         if result is not None and not result.get("ok", True):
             return None, "Lambda zgłosiła błąd wykonania", time.monotonic()
+        okno = (result or {}).get("window_s")
+        if isinstance(okno, (int, float)) and okno < seconds - 2:
+            # Funkcja liczy koniec z własnego budżetu czasu (timeout w konsoli AWS).
+            # Skrócone okno to nie awaria — to publikacja po sekundzie `okno` bez Irlandii.
+            log(f"! ☁ Lambda skróciła okno obserwacji do {okno:.0f} s z {seconds:.0f} s — "
+                f"timeout funkcji jest za niski. Ustaw co najmniej {math.ceil(seconds) + 10} s "
+                f"w Configuration → General configuration.")
         return result, error, time.monotonic()
 
     parts, errors = [], []

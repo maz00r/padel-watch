@@ -129,6 +129,45 @@ def _cached_at_label(saved_at):
         return "wcześniejszego odczytu"
 
 
+def _opis_bledu_konta(account, error, status):
+    """Dla konta dodatkowego wygasły token poza oknem zbierania to plan, nie awaria.
+
+    Zbieracz odnawia JWT kont dodatkowych wyłącznie w okolicy rzutu; przez resztę dnia
+    ich tokeny wygasają po 15 minutach i panel pokazuje stan z bufora. 14.09 komunikat
+    „token wygasł — zaloguj się w panelu" odsyłał do logowania dziewięciu kont, które
+    następnego dnia zbieracz odnowił sam. Do logowania odsyłamy tylko, gdy ostatnia
+    wizyta zbieracza faktycznie się nie powiodła.
+    """
+    if account.get("main") or not str(error).startswith("token wygasł"):
+        return error
+    wpis = status.get(account["id"]) or {}
+    if wpis.get("blad"):
+        return f"{error} (ostatnia wizyta zbieracza nieudana: {wpis['blad']})"
+    return "token wygasł poza oknem zbierania — odnowi się przed polowaniem"
+
+
+def _zwin_ostrzezenia(problemy):
+    """Jedno zdanie na przyczynę, nie na konto.
+
+    Dziewięć kont z tym samym błędem dawało dziewięć powtórzeń tej samej treści przy
+    każdym odświeżeniu panelu — komunikat przestawał być czytelny.
+    """
+    grupy = {}
+    for problem in problemy:
+        grupy.setdefault(problem["error"], []).append(problem)
+    zdania = []
+    for error, konta in grupy.items():
+        etykiety = ", ".join(k["label"] for k in konta)
+        kto = etykiety if len(konta) == 1 else f"{len(konta)} kont ({etykiety})"
+        zapisy = sorted(k["saved_at"] for k in konta if k["saved_at"] is not None)
+        suffix = ""
+        if zapisy:
+            od, do = _cached_at_label(zapisy[0]), _cached_at_label(zapisy[-1])
+            suffix = " — pokazuję ostatni poprawny stan z " + (od if od == do else f"{od}–{do}")
+        zdania.append(f"{kto}: {error}{suffix}")
+    return "; ".join(zdania) or None
+
+
 def reservations(force=False):
     """(lista, błąd) z krótkim buforem. force=True po anulowaniu — stan właśnie się zmienił."""
     with _cache_lock:
@@ -142,6 +181,10 @@ def reservations(force=False):
         str(kid): value for kid, value in _load_reservations_cache().items()
         if str(kid) in known_ids and isinstance(value, dict)
     }
+    try:
+        harvest = zbieracz.wczytaj_status(zbieracz.STATUS_PATH) if len(accounts) > 1 else {}
+    except Exception:  # noqa: BLE001 - opis błędu nie może wywrócić listy rezerwacji
+        harvest = {}
 
     def fetch(account):
         cfg = (check_padel.credentials_cfg(account) if len(accounts) > 1
@@ -152,7 +195,7 @@ def reservations(force=False):
             rows, error = [], f"nieoczekiwany błąd: {e!r}"
         kid = account["id"]
         label = account.get("name") or kid
-        update = None
+        update = problem = None
         if error:
             saved = stored.get(kid)
             cached = [
@@ -162,33 +205,27 @@ def reservations(force=False):
                 ) if row is not None
             ]
             rows = cached
-            suffix = ""
-            if saved is not None:
-                suffix = (
-                    " — pokazuję ostatni poprawny stan z "
-                    + _cached_at_label(saved.get("saved_at"))
-                )
-            warning = f"{label}: {error}{suffix}"
+            problem = {"label": label, "error": _opis_bledu_konta(account, error, harvest),
+                       "saved_at": (saved or {}).get("saved_at") if saved is not None else None}
         else:
             rows = rows or []
             update = {
                 "saved_at": int(time.time()),
                 "items": [_reservation_to_cache(row) for row in rows],
             }
-            warning = ""
         decorated = [dict(row, account_id=kid, account_name=label) for row in rows]
-        return decorated, warning, (kid, update) if update is not None else None
+        return decorated, problem, (kid, update) if update is not None else None
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=min(4, len(accounts))) as pool:
         parts = list(pool.map(fetch, accounts))
-    for _rows, _error, update in parts:
+    for _rows, _problem, update in parts:
         if update:
             stored[update[0]] = update[1]
-    if any(update for _rows, _error, update in parts):
+    if any(update for _rows, _problem, update in parts):
         _save_reservations_cache(stored)
-    items = [row for rows, _error, _update in parts for row in rows]
+    items = [row for rows, _problem, _update in parts for row in rows]
     items.sort(key=lambda row: row.get("start_utc") or datetime.max.replace(tzinfo=timezone.utc))
-    error = "; ".join(error for _rows, error, _update in parts if error) or None
+    error = _zwin_ostrzezenia([problem for _rows, problem, _update in parts if problem])
     if error:
         # Bez tego czerwony komunikat w panelu nie zostawiał ŻADNEGO śladu w Dzienniku
         # i nie dało się dojść, co właściwie się stało.

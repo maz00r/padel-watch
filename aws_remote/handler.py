@@ -42,13 +42,15 @@ LAMBDA_PELNY_RDZEN_MB = 1769
 # 11 dni od 23.08 do 03.09 dało pory od 11:00:13 do 11:00:42. Dziesięciosekundowe okno
 # trafiało w 5 dni na 11; w pozostałe strzelaliśmy z domu, gdzie zapis trwa 448-1303 ms
 # zamiast 66-178 ms z regionu. Limit musi więc pozwolić na okno rzędu 40 s.
-# Timeout funkcji w konsoli AWS musi być WIĘKSZY niż to okno — inaczej Lambda zostanie
-# ubita w trakcie obserwacji i nie odda nawet tego, co zdążyła zarezerwować.
-# 04.09 publikacja przyszła o 11:00:48 — najpóźniej w całej historii pomiarów, poza
-# oknem 11:00:05+40 s. Zmierzone pory publikacji rozciągają się od 11:00:13 do 11:00:48,
-# więc pełne pokrycie wymaga ~55 s. Timeout funkcji w konsoli AWS musi być WIĘKSZY
-# niż okno: domyślne 50 s mieści się w 60 s; dla pełnych 60 s trzeba ustawić 90 s.
-MAX_SPRINT_SEKUND = 60
+# Sufit okna sprintu — ta sama liczba co w dodatku (`check_padel.SPRINT_MAX_SECONDS`),
+# bo dodatek prosi o okno, a Lambda je przycina; dwie różne liczby przycinałyby po cichu.
+# Zmierzone pory publikacji: od 11:00:13 do 11:00:50.7 (14.09 — Lambda z oknem 50 s
+# zobaczyła partię 0,3 s przed własnym końcem, drugą partię o 11:00:52 już nie).
+# Timeout funkcji w konsoli AWS musi być WIĘKSZY niż okno plus zapas na zapisy
+# i odpowiedź (`+5 s` niżej): dla domyślnych 75 s ustaw 90 s. Za niski timeout NIE
+# ubija funkcji w połowie — `poluj` liczy koniec z pozostałego budżetu i odda wynik,
+# ale okno będzie krótsze, niż prosił dodatek; ten to zauważy po `window_s` i ostrzeże.
+MAX_SPRINT_SEKUND = cp.SPRINT_MAX_SECONDS
 
 
 def _sekret_ok(event):
@@ -254,9 +256,12 @@ def poluj(wejscie, budget_seconds=None):
             break
 
     sprint_ms = int((time.monotonic() - szukanie) * 1000)
+    # Faktyczna długość okna, jaką funkcja mogła sobie pozwolić — dodatek porównuje ją
+    # z tym, o co prosił, i ostrzega, gdy timeout w konsoli AWS przycina obserwację.
+    window_s = round(hunt_end - started, 1)
     if doc is None:
         return {"ok": True, "doc": None, "listing_id": None,
-                "protocol_version": 3, "multi_account": True,
+                "protocol_version": 3, "multi_account": True, "window_s": window_s,
                 "seen_ids": sorted(widziane), "pending_ids": [],
                 "timings": {"sprint_ms": sprint_ms, "batches": 0,
                             "total_ms": int((time.monotonic() - started) * 1000)}}
@@ -265,6 +270,7 @@ def poluj(wejscie, budget_seconds=None):
         "ok": True,
         "protocol_version": 3,
         "multi_account": True,
+        "window_s": window_s,
         "seen_ids": sorted(widziane),
         "pending_ids": sorted({sid for c in reg_cfgs for sid in c.get("pending_ids", [])}),
         "listing_id": lid,

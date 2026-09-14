@@ -40,7 +40,7 @@ przechodzisz normalne logowanie, łącznie z kodem z maila.
 | `burst_seconds` | ile sekund trwa zryw (1–120) | `75` |
 | `burst_interval` | odstęp w zrywie, w sekundach (dozwolone poniżej 1 s) | `0.2` |
 | `sprint` | **sprint**: okno pobierania BEZ PRZERW, `DNI:GG:MM:SS`. Puste = wyłączony | `mon-sun:11:00:00` |
-| `sprint_seconds` | ile sekund trwa sprint (1–60) | `50` |
+| `sprint_seconds` | ile sekund trwa sprint (1–80; timeout Lambdy musi być o 10 s dłuższy) | `75` |
 | `sprint_threads` | ile wątków pobiera równolegle w sprincie (1–4) | `3` |
 | `auto_login` | gdy sesja GO wygaśnie, sam kliknij „ZALOGUJ SIĘ” w przeglądarce dodatku (nie wpisuje żadnych danych) | `true` |
 | `token_check_before` | ile minut przed zrywem sprawdzić sesję i ostrzec pushem, gdy nie żyje (0–240); `0` = wyłączone | `30` |
@@ -228,12 +228,14 @@ Okno sprintu musi ten rozrzut **pokryć**, bo poza nim Irlandia w ogóle nie obs
 a zapas lokalny strzela pięciokrotnie wolniej (448–1303 ms wobec 66–178 ms z regionu).
 Wąskie okno 11:00:30 + 10 s trafiało w 5 dni na 11.
 
-Domyślne ustawienie to sprint i zryw od `11:00:00`: sprint trwa 50 sekund, a zryw
-75 sekund co 0,2 sekundy.
+Domyślne ustawienie to sprint i zryw od `11:00:00`, oba przez 75 sekund (zryw co
+0,2 sekundy). 14.09 publikacja przyszła o 11:00:50,7 — poprzednie okno 50 s złapało
+pierwszą partię z zapasem 0,3 s, a drugą (11:00:52) obsłużył już tylko lokalny zapas.
 
-**Timeout funkcji Lambda musi być większy niż okno sprintu** (przy 50 s ustaw 60 s).
-Inaczej AWS ubije funkcję w trakcie obserwacji i nie odda nawet tego, co zdążyła
-zarezerwować.
+**Timeout funkcji Lambda musi być o co najmniej 10 s dłuższy niż okno sprintu**
+(przy 75 s ustaw 90 s). Funkcja liczy swój koniec z pozostałego budżetu czasu, więc
+za niski timeout nie ubije jej w trakcie zapisów — ale skróci obserwację, a dodatek
+wypisze w Dzienniku „Lambda skróciła okno obserwacji do N s".
 
 ## Ciche logowanie
 
@@ -579,8 +581,8 @@ Punkt odniesienia („co jest nowe") bierze się z **zapisanego stanu**, a nie z
 pobrania sprintu. Inaczej publikacja, która trafiłaby w pierwsze ~90 ms sprintu,
 wpadłaby do punktu odniesienia i sprint nigdy by się nie odpalił.
 
-Domyślnie sprint działa od `11:00:00` przez 50 s, a okno zrywu pozostaje aktywne
-do `11:01:15`.
+Domyślnie sprint i zryw działają od `11:00:00` do `11:01:15`; główne konto obserwuje
+grafik lokalnie równolegle z Irlandią przez całe okno.
 
 ### Ile z opóźnienia to sieć
 
