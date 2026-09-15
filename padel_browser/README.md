@@ -232,6 +232,11 @@ Domyślne ustawienie to sprint i zryw od `11:00:00`, oba przez 75 sekund (zryw c
 0,2 sekundy). 14.09 publikacja przyszła o 11:00:50,7 — poprzednie okno 50 s złapało
 pierwszą partię z zapasem 0,3 s, a drugą (11:00:52) obsłużył już tylko lokalny zapas.
 
+> Home Assistant zachowuje wartości zapisane w opcjach dodatku. Jeśli kiedykolwiek
+> zapisałeś konfigurację, `sprint_seconds` ma nadal starą wartość mimo aktualizacji —
+> dodatek wypisze wtedy przy starcie „Sprint 50 s nie pokrywa zmierzonych publikacji".
+> Ustaw `sprint_seconds: 75` ręcznie.
+
 **Timeout funkcji Lambda musi być o co najmniej 10 s dłuższy niż okno sprintu**
 (przy 75 s ustaw 90 s). Funkcja liczy swój koniec z pozostałego budżetu czasu, więc
 za niski timeout nie ubije jej w trakcie zapisów — ale skróci obserwację, a dodatek

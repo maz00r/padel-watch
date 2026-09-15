@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.29.1 — po logu z 15.09: krótki sprint mówi o sobie przy starcie, bez drugiego strzału w cudzy termin
+
+15.09 publikacja przyszła o 11:00:50,6 — drugi dzień z rzędu o tej samej sekundzie.
+Dodatek polował nadal z oknem 50 s: Home Assistant zachowuje wartość zapisaną
+w opcjach, więc nowa domyślna z 0.29.0 nie zmieniła niczego. 20:00 zdobyte
+z Irlandii, 17:00 przegrane; 18:00 i 19:00 pojawiły się i zniknęły między 52. a 55.
+sekundą, kiedy Irlandia już skończyła, a dom był zajęty czym innym.
+
+- **Sprint krótszy niż 75 s dostaje ostrzeżenie przy starcie** z nazwą opcji do
+  zmiany. Sufit i domyślna wartość nic nie dają, gdy w opcjach siedzi stare 50.
+- **Termin, który w Irlandii dostał „No available seats", nie dostaje drugiego
+  strzału z domu.** Dokument wraca sprzed zapisów, więc przegrany termin nadal
+  wyglądał w nim na wolny — dziesięć kont strzeliło w 17:00 drugi raz: dziesięć
+  kolejnych 409 i 0,8 s bez patrzenia na grafik, dokładnie gdy publikowano 18:00
+  i 19:00. Limit miejsc wynosi 1, więc cudza rezerwacja jest ostateczna; inne
+  odmowy (token, 5xx) nadal ponawiamy z domu.
+
 ## 0.29.0 — sprint 75 s po publikacji o 11:00:50,7
 
 Log z 14.09: Lambda z oknem 50 s zobaczyła pierwszą partię po 48,7 s — 0,3 s przed

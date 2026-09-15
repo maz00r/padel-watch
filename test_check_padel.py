@@ -2767,6 +2767,42 @@ class RemoteHandlerTest(RemoteHandlerHelpers, unittest.TestCase):
             cp.run_once(skip_light=True, prefetched=prefetched, remote=remote)
         lokalny.assert_not_called()
 
+    def zdalna_odmowa(self, komunikat):
+        """Irlandia strzeliła i dostała odmowę; dokument wraca sprzed zapisów."""
+        wynik = self.rozpakuj(self.odpal(self.doc(15), rejestracja=(False, komunikat)))
+        prefetched, remote = cp.adopt_remote(wynik)
+        self.assertIsNotNone(remote)
+        katalog = tempfile.mkdtemp()
+        with mock.patch.object(cp, "STATE_PATH", os.path.join(katalog, "s.json")), \
+                mock.patch.dict(os.environ, {
+                    "LISTINGS": f"https://go.decathlon.pl/l/{self.LID}",
+                    "NTFY_TOPIC": "", "FILTERS": "mon-sun:00:00-24:00",
+                    "AUTO_REGISTER": "true", "AUTO_REGISTER_NAME": "Jan",
+                    "AUTO_REGISTER_DRY_RUN": "false", "AUTO_REGISTER_MAX": "5",
+                    "CONFIG_PATH": os.path.join(katalog, "brak.json")}), \
+                mock.patch.object(cp, "resolve_current_id", side_effect=lambda x: self.LID), \
+                mock.patch.object(cp, "register_slot", return_value=(False, komunikat)) as lokalny, \
+                mock.patch("sys.stdout", io.StringIO()) as out:
+            cp.run_once(skip_light=True, prefetched=(self.LID, self.doc()))   # baseline
+            cp.run_once(skip_light=True, prefetched=prefetched, remote=remote)
+        return lokalny, out.getvalue()
+
+    def test_a_seat_ireland_saw_taken_gets_no_second_shot_from_home(self):
+        """15.09: dziesięć kont strzeliło z domu drugi raz w 17:00, które Irlandia
+        przegrała chwilę wcześniej — dziesięć kolejnych 409 i 0,8 s bez patrzenia na
+        grafik, dokładnie gdy pojawiły się i zniknęły 18:00 i 19:00. Dokument z Irlandii
+        jest sprzed zapisów, więc przegrany termin nadal wygląda w nim na wolny."""
+        lokalny, dziennik = self.zdalna_odmowa(
+            'Decathlon HTTP 409: {"error":"Error","message":"No available seats"}')
+        lokalny.assert_not_called()
+        self.assertIn("Bez drugiego strzału z domu", dziennik)
+
+    def test_a_remote_refusal_that_is_not_a_taken_seat_is_retried_from_home(self):
+        """Nie stępiamy zapasu: 5xx z Irlandii to nie dowód, że termin jest cudzy."""
+        lokalny, dziennik = self.zdalna_odmowa("Decathlon HTTP 503: upstream")
+        self.assertTrue(lokalny.called, "odmowa 503 w Irlandii wyłączyła strzał z domu")
+        self.assertNotIn("Bez drugiego strzału", dziennik)
+
     def test_remote_results_reach_the_notification(self):
         """To, co zarezerwowała Irlandia, musi wejść do treści powiadomienia."""
         wynik = self.rozpakuj(self.odpal(self.doc(15)))
@@ -4483,6 +4519,37 @@ class SettingsTest(unittest.TestCase):
     def test_a_broken_burst_disables_only_the_burst(self):
         n = self.nastawy(BURST="to nie jest zryw")
         self.assertIsNone(n.burst)
+
+    def nastawy_z_dziennikiem(self, **env):
+        pelne = {"INTERVALS": "", "BURST": "", "SPRINT": "mon-sun:11:00:00",
+                 "LISTINGS": "https://go.decathlon.pl/l/1c0ec93e-ca77-44b9-a3a6-c72a99d050dd",
+                 "AUTO_REGISTER_SALVO": "", "AUTO_REGISTER_HEDGE": "",
+                 "REMOTE_URL": "", "REMOTE_SECRET": "", "TIMEZONE": "Europe/Warsaw"}
+        pelne.update(env)
+        with mock.patch.dict(os.environ, pelne), mock.patch("sys.stdout", io.StringIO()) as out:
+            n = cp.wczytaj_nastawy(60)
+        return n, out.getvalue()
+
+    def test_a_sprint_shorter_than_the_measured_publications_is_called_out_at_startup(self):
+        """15.09: dodatek po aktualizacji do 0.29.0 nadal polował z oknem 50 s, bo Home
+        Assistant zachowuje wartość zapisaną w opcjach — zmiana domyślnej w `config.yaml`
+        nie dociera do nikogo, kto raz zapisał konfigurację. Publikacja przyszła o
+        11:00:50,6 drugi dzień z rzędu; 18:00 i 19:00 pojawiły się i zniknęły, gdy nikt
+        nie patrzył. Dodatek ma to powiedzieć przy starcie, a nie dopiero po polowaniu."""
+        n, dziennik = self.nastawy_z_dziennikiem(SPRINT_SECONDS="50")
+        self.assertEqual(n.sprint["seconds"], 50)
+        self.assertIn("Sprint 50 s nie pokrywa zmierzonych publikacji", dziennik)
+        self.assertIn("sprint_seconds: 75", dziennik)
+
+    def test_the_recommended_sprint_raises_no_alarm(self):
+        n, dziennik = self.nastawy_z_dziennikiem(SPRINT_SECONDS="75")
+        self.assertEqual(n.sprint["seconds"], 75)
+        self.assertNotIn("nie pokrywa", dziennik)
+
+    def test_the_default_sprint_is_the_recommended_one(self):
+        n, dziennik = self.nastawy_z_dziennikiem(SPRINT_SECONDS="")
+        self.assertEqual(n.sprint["seconds"], cp.SPRINT_RECOMMENDED_SECONDS)
+        self.assertNotIn("nie pokrywa", dziennik)
 
     def test_a_typo_in_the_court_url_does_not_kill_the_process(self):
         """W Home Assistancie nieobsłużony wyjątek to pętla restartów bez wyjaśnienia.

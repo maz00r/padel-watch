@@ -2347,6 +2347,11 @@ SPRINT_MAX_THREADS = 4
 # przed własnym końcem, a drugą partię (11:00:52) obsłużył już tylko lokalny zapas.
 # Timeout funkcji w konsoli AWS musi wynosić co najmniej sufit + 10 s (90 s).
 SPRINT_MAX_SECONDS = 80
+# Najkrótsze okno, które pokrywa wszystkie zmierzone publikacje (do 11:00:50,7 + druga
+# partia ~2 s później). Home Assistant zachowuje wartość zapisaną w opcjach dodatku,
+# więc zmiana domyślnej w `config.yaml` NIE zmienia okna u nikogo, kto raz zapisał
+# konfigurację — 15.09 dodatek po aktualizacji nadal polował z oknem 50 s.
+SPRINT_RECOMMENDED_SECONDS = 75
 _sprint_pool = None
 
 
@@ -3815,9 +3820,18 @@ def run_once(announce_startup=False, skip_light=False, prefetched=None, defer_pu
     failed_ids = set()
     registered_ids = load_registered_ids()
     registration_results = {}
+    zajete_zdalnie = set()
     if remote:
         registered_ids = registered_ids | remote["registered"]
         registration_results.update(remote["results"])
+        # Dokument z Irlandii jest sprzed zapisów, więc termin, który tam dostał
+        # „No available seats", tu nadal wygląda na wolny. 15.09 dziesięć kont
+        # strzeliło z domu drugi raz w 17:00 przegrane w Irlandii chwilę wcześniej —
+        # dziesięć kolejnych 409 i 0,8 s, w których nikt nie patrzył na grafik,
+        # a 18:00 i 19:00 właśnie wtedy się pojawiły i zniknęły. Limit miejsc wynosi 1,
+        # więc cudza rezerwacja jest ostateczna; inne odmowy (token, 5xx) ponawiamy.
+        zajete_zdalnie = {sid for sid, (ok, msg) in remote["results"].items()
+                          if not ok and "No available seats" in str(msg)}
 
     # Auto-rejestracja: kandydaci to NOWE terminy + te zapamiętane po awarii tokenu
     # (pending), o ile nadal są wolne i jeszcze niezapisane. Dzięki temu naprawienie
@@ -3840,7 +3854,7 @@ def run_once(announce_startup=False, skip_light=False, prefetched=None, defer_pu
     for account_cfg in reg_cfgs:
         kid = account_cfg.get("konto") or KONTO_GLOWNE
         pending = set(previous_account_state(account_cfg).get("pending_ids", []))
-        candidates = ((new_ids | pending) & current_ids) - registered_ids
+        candidates = ((new_ids | pending) & current_ids) - registered_ids - zajete_zdalnie
         candidates_per_account[kid] = candidates
         retried = (pending & candidates) - new_ids
         if retried:
@@ -3848,6 +3862,12 @@ def run_once(announce_startup=False, skip_light=False, prefetched=None, defer_pu
                 "zapamiętany(-e) termin(y) po błędzie tokenu.")
 
     candidate_ids = set().union(*candidates_per_account.values())
+    pominiete = zajete_zdalnie & current_ids
+    if pominiete:
+        godziny = sorted(fmt_when(current[i]["start_utc"].astimezone(tz), short=True)
+                         for i in pominiete)
+        log(f"☁ Bez drugiego strzału z domu w {', '.join(godziny)} — Irlandia dostała "
+            f"tam już „No available seats”.")
     remote_used = dict((remote or {}).get("used_by_account") or {})
     if remote and not remote_used and remote.get("registered"):
         remote_used[reg_cfg.get("konto") or KONTO_GLOWNE] = len(remote["registered"])
@@ -4158,6 +4178,11 @@ def wczytaj_nastawy(interval):
             log(f"🏁 Sprint: {','.join(sprint['days'])} o {hour:02d}:{minute:02d}:{second:02d}, "
                 f"przez {sprint['seconds']}s, {sprint_threads} wątków bez przerw "
                 f"(świeży obraz co ~{max(1, round(117 / sprint_threads))} ms)")
+            if sprint["seconds"] < SPRINT_RECOMMENDED_SECONDS:
+                log(f"! Sprint {sprint['seconds']} s nie pokrywa zmierzonych publikacji "
+                    f"(14–15.09: 11:00:50,7, druga partia ~2 s później). Ustaw "
+                    f"sprint_seconds: {SPRINT_RECOMMENDED_SECONDS} w konfiguracji dodatku — "
+                    f"wartość zapisana w opcjach nie zmienia się sama po aktualizacji.")
         except Exception as e:  # noqa: BLE001 - błędna opcja nie może wywrócić monitora
             log(f"! Błędny SPRINT '{sprint_env}': {e} — sprint wyłączony")
             sprint = None
