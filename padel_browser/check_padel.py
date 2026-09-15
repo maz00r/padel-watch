@@ -382,7 +382,7 @@ def verify_accounts_before_hunt(start):
         list(pool.map(check, accounts))
 
 
-def preflight_token(now_local, tz, topic, book_url):
+def preflight_token(now_local, tz, topic, book_url, remote_url="", remote_secret=""):
     """Na X minut przed zrywem sprawdza, czy sesja żyje. Raz na dobę.
 
     Sprawdzenie jest DWUSTOPNIOWE, bo dwa różne uszkodzenia wyglądają tak samo
@@ -401,6 +401,10 @@ def preflight_token(now_local, tz, topic, book_url):
         return None
     if start - timedelta(minutes=2) <= now_local < start - timedelta(seconds=15) and _preflight_final_on != now_local.date():
         verify_accounts_before_hunt(start)
+        # Kontener Lambdy ma być ciepły o 11:00:00 — ping na starcie zrywu nie wychodzi,
+        # gdy sprint rusza w tej samej sekundzie. Konta sprawdzamy PRZED pingiem: to one
+        # decydują o alarmie, a ping może wisieć do REMOTE_TIMEOUT_MARGIN.
+        rozgrzej_irlandie(remote_url, remote_secret, " przed zrywem")
         _preflight_final_on = now_local.date()
     try:
         ile_wczesniej = max(0, min(int(os.environ.get("TOKEN_CHECK_BEFORE")
@@ -2486,6 +2490,24 @@ def call_remote(url, secret, payload, timeout):
         return None, f"zła odpowiedź: {e!r}"
 
 
+def rozgrzej_irlandie(remote_url, remote_secret, powod=""):
+    """Ping `{"warm": True}`, żeby kontener Lambdy był ciepły, zanim zacznie się liczyć.
+
+    Zimny start to ~340 ms init plus ~650 ms rozgrzewania połączeń — Irlandia zaczyna
+    patrzeć ~1,4 s po wywołaniu. Ping przy starcie zrywu (0.17.0) jest pomijany, gdy
+    sprint rusza w tej samej sekundzie, a odkąd oba zaczynają o 11:00:00, warunek nie
+    zachodzi nigdy: 14 i 15.09 CloudWatch pokazał `INIT_START` dokładnie o 11:00:00.
+    Dlatego pukamy też przy końcowej kontroli JWT, dwie minuty wcześniej.
+    """
+    if not remote_url:
+        return
+    zdalne = time.monotonic()
+    _, blad_warm = call_remote(remote_url, remote_secret, {"warm": True},
+                               timeout=REMOTE_TIMEOUT_MARGIN)
+    log(f"☁ Rozgrzewka Irlandii{powod} [{int((time.monotonic() - zdalne) * 1000)} ms]"
+        + (f" — NIEUDANA: {blad_warm}" if blad_warm else ""))
+
+
 def _remote_account_cfg(reg_cfg):
     return {
         "id": reg_cfg.get("konto") or KONTO_GLOWNE,
@@ -3231,6 +3253,7 @@ def auto_register_accounts(slots, listing_price_by_id, reg_cfgs, already_registe
     futures = {}
     rejected = {}
     next_refresh = 0.0
+    runda = 0     # jeden obieg pętli = jedna salwa; żądania z różnych obiegów nie są „naraz"
     latest = str(configs[0].get("order") or "earliest").lower() in LATEST_FIRST_VALUES
     for c in configs:
         c.setdefault("shots", [])
@@ -3258,6 +3281,7 @@ def auto_register_accounts(slots, listing_price_by_id, reg_cfgs, already_registe
     with concurrent.futures.ThreadPoolExecutor(
             max_workers=len(configs) * 2, thread_name_prefix="konta") as pool:
         while True:
+            runda += 1
             if refresh_tokens and time.monotonic() >= next_refresh:
                 next_refresh = time.monotonic() + 0.2
                 for c in configs:
@@ -3308,9 +3332,25 @@ def auto_register_accounts(slots, listing_price_by_id, reg_cfgs, already_registe
                         f"start {shot_time} | dane sprzed {shot.get('seen_ms')} ms | "
                         f"odpowiedź {shot.get('ms')} ms | {'OK' if shot.get('ok') else shot.get('why', '')}")
                 c["shots"].extend(local["shots"])
-                ok = bool((out.get(sid) or (False,))[0])
+                ok, komunikat = (out.get(sid) or (False, ""))[:2]
+                ok = bool(ok)
                 if ok:
                     used[kid] = used.get(kid, 0) + 1
+                    group["won"] += 1
+                    # Limit miejsc w terminie to zwykle 1: po własnej wygranej kolejne
+                    # nasze konto dostałoby „No available seats" od nas samych.
+                    wolne = max(1, int(targets[sid][0].get("limit") or 1)
+                                - int(targets[sid][0].get("count") or 0))
+                    if group["won"] >= wolne:
+                        group["done"] = "zdobyte"
+                elif "No available seats" in str(komunikat):
+                    # Cudza rezerwacja jest ostateczna. 14.09 po pierwszym 409 kolejne
+                    # konta nadal wchodziły w tę samą godzinę i dostawały 409 w 80 ms.
+                    group["done"] = "zajęte przez innych"
+                if group["done"] and group["waiting"]:
+                    log(f"⤫ {fmt_when(targets[sid][0]['start_utc'].astimezone(tz), short=True)}: "
+                        f"{group['done']} — {len(group['waiting'])} kont bez strzału")
+                    group["waiting"].clear()
                 if local.get("auth_error"):
                     c["auth_error"] = local["auth_error"]
                     stopped.add(kid)
@@ -3322,10 +3362,17 @@ def auto_register_accounts(slots, listing_price_by_id, reg_cfgs, already_registe
                              key=lambda sid: targets[sid][0]["start_utc"], reverse=latest)
             for sid in pending:
                 groups[sid] = {"waiting": list(targets[sid][1]), "remaining": 0,
-                               "auth_failed": set(), "started": 0}
+                               "auth_failed": set(), "started": 0, "won": 0, "done": "",
+                               "runda": 0}
 
             # Najpierw pierwsza próba KAŻDEJ godziny, potem kolejne konta.
             # Łącznie najwyżej dwa cele/konto; świeży cel wyprzedza dalsze kopie.
+            # Do godziny, w którą już strzelamy, dołącza tylko wolne konto i tylko w tej
+            # samej salwie (obiegu) — żądania wysłane naraz mają szansę w jitterze
+            # kolejności, żądanie wysłane 700 ms później stoi w kolejce za naszym własnym.
+            # Decathlon obsługuje zapisy niemal po kolei (15.09: dwadzieścia odpowiedzi
+            # co ~110 ms), więc druga fala w godzinę z pięcioma naszymi żądaniami tylko
+            # wydłużała domykanie zapisów — o 1,4 s — i nie dawała nic.
             progress = True
             while can_start and progress:
                 progress = False
@@ -3333,6 +3380,8 @@ def auto_register_accounts(slots, listing_price_by_id, reg_cfgs, already_registe
                                   -targets[sid][0]["start_utc"].timestamp() if latest
                                   else targets[sid][0]["start_utc"].timestamp())):
                     group = groups[sid]
+                    if group["done"]:
+                        continue
                     s, _, seen_at = targets[sid]
                     available = []
                     for c in list(group["waiting"]):
@@ -3346,8 +3395,11 @@ def auto_register_accounts(slots, listing_price_by_id, reg_cfgs, already_registe
                         if respect_limits and used.get(kid, 0) >= _account_limit(c):
                             group["waiting"].remove(c)
                             continue
-                        if busy[kid] < (1 if respect_limits else 2):
-                            available.append(c)
+                        if busy[kid] >= (1 if respect_limits else 2):
+                            continue
+                        if group["remaining"] and (busy[kid] or group["runda"] != runda):
+                            continue        # nie ustawiamy się w kolejce za własnym żądaniem
+                        available.append(c)
                     if not available:
                         continue
                     c = min(available, key=lambda c: busy[c["konto"]])
@@ -3357,11 +3409,15 @@ def auto_register_accounts(slots, listing_price_by_id, reg_cfgs, already_registe
                     if seen_at is not None:
                         local["seen_at"] = seen_at
                     log(f"⇉ Konto {_account_label(c)}: próbuję {fmt_when(s['start_utc'].astimezone(tz), short=True)}")
-                    # Migawka z wejscia: kazde zakwalifikowane konto odda probe, takze po cudzym sukcesie.
+                    # Każde zakwalifikowane konto oddaje próbę, dopóki godzina nie jest
+                    # rozstrzygnięta — po naszej wygranej albo cudzym „No available seats"
+                    # kolejka tej godziny się zamyka (`group["done"]`).
                     future = pool.submit(auto_register_new_slots, [s], listing_price_by_id, local, initial)
                     futures[future] = (c, local, sid)
                     attempted.add((kid, sid))
                     busy[kid] += 1
+                    if not group["remaining"]:
+                        group["runda"] = runda
                     group["remaining"] += 1
                     group["started"] += 1
                     progress = True
@@ -3377,8 +3433,11 @@ def auto_register_accounts(slots, listing_price_by_id, reg_cfgs, already_registe
 
     for c in configs:
         kid = c["konto"]
+        # Godzina zajęta przez innych nie jest „do nadrobienia" — konto, które w nią
+        # nie strzeliło, nie strzeliło celowo.
         c["pending_ids"] = [sid for sid, (_, eligible, _) in targets.items()
                             if c in eligible and sid not in registered
+                            and (groups.get(sid) or {}).get("done") != "zajęte przez innych"
                             and (kid in stopped or (kid, sid) not in attempted)]
     return results, registered, used
 
@@ -4478,14 +4537,10 @@ def main():
                         f"sprint {sprint_threads if sprint else 0}) "
                         f"[{int((time.monotonic() - warmed) * 1000)} ms]")
                 if remote_url and not sprint_active_now:
-                    # Zimny start Lambdy to ~165 ms na init plus ~75 ms na import
-                    # silnika. Pukamy TERAZ, na starcie zrywu, żeby kolejne wywołanie
-                    # funkcja była już ciepła — kontener żyje potem kilka minut.
-                    zdalne = time.monotonic()
-                    _, blad_warm = call_remote(remote_url, remote_secret, {"warm": True},
-                                               timeout=REMOTE_TIMEOUT_MARGIN)
-                    log(f"☁ Rozgrzewka Irlandii [{int((time.monotonic() - zdalne) * 1000)} ms]"
-                        + (f" — NIEUDANA: {blad_warm}" if blad_warm else ""))
+                    # Pukamy na starcie zrywu, żeby wywołanie sprintu trafiło w ciepły
+                    # kontener. Przy sprincie startującym w tej samej sekundzie ten
+                    # ping nie ma kiedy wyjść — wtedy liczy się ten z kontroli o 10:58.
+                    rozgrzej_irlandie(remote_url, remote_secret)
             else:
                 # Ta linia leci dopiero przy NASTĘPNYM sprawdzeniu, czyli sporo po końcu
                 # okna — dlatego podajemy faktyczne granice, a nie sugerujemy „teraz".
@@ -4501,7 +4556,8 @@ def main():
         try:
             preflight_token(now_local, tz, n.topic,
                             LISTING_PAGE_URL.format(id=listing_id_from_url(first_listing[0]))
-                            if first_listing else "")
+                            if first_listing else "",
+                            remote_url=n.remote_url, remote_secret=n.remote_secret)
         except Exception as e:  # noqa: BLE001 - kontrola nie może wywrócić pętli
             log(f"! Kontrola sesji nieudana: {e!r}")
 

@@ -2698,9 +2698,9 @@ class RemoteHandlerTest(RemoteHandlerHelpers, unittest.TestCase):
         self.assertEqual(len(result["registered"]), 2)
         self.assertEqual(sum(result["used_by_account"].values()), 2)
         self.assertEqual({kid for kid, _sid in seen}, {"glowne", "ania"})
-        for date_id in ("d15", "d17"):
-            self.assertEqual({kid for kid, sid in seen if sid.endswith(date_id)},
-                             {"glowne", "ania"})
+        # Dwa konta, dwie godziny: każde bierze jedną i wygrywa. Zdobyta godzina zamyka
+        # swoją kolejkę — drugie konto nie strzela w nią po nas (limit miejsc 1).
+        self.assertEqual(sorted(sid[-3:] for _kid, sid in seen), ["d15", "d17"])
         self.assertTrue(any(":" in msg for ok, msg in result["results"].values() if ok))
 
     def test_remote_auth_error_returns_with_the_account_id(self):
@@ -3328,6 +3328,8 @@ class PreflightTokenTest(unittest.TestCase):
         cp._preflight_done_on = None
         cp._preflight_problem_od = None
         cp._preflight_alarm = False
+        cp._preflight_final_on = None
+        self.addCleanup(setattr, cp, "_preflight_final_on", None)
         self.addCleanup(setattr, cp, "_preflight_done_on", None)
         self.addCleanup(setattr, cp, "_preflight_problem_od", None)
         self.addCleanup(setattr, cp, "_preflight_alarm", False)
@@ -3358,6 +3360,34 @@ class PreflightTokenTest(unittest.TestCase):
                 mock.patch("sys.stdout", buf):
             wynik = cp.preflight_token(chwila, self.TZ, "temat", "https://kort")
         return wynik, push, buf.getvalue(), wywolanie
+
+    def test_the_final_check_warms_ireland_once(self):
+        """CloudWatch 14 i 15.09: `INIT_START` dokładnie o 11:00:00 — zimny start co dzień,
+        bo ping na starcie zrywu jest pomijany, gdy sprint rusza w tej samej sekundzie.
+        Kontener ma być ciepły PRZED 11:00, więc pukamy przy kontroli dwie minuty wcześniej."""
+        chwila = datetime(2026, 8, 28, 10, 58, 30, tzinfo=self.TZ)
+        with mock.patch.object(cp, "verify_accounts_before_hunt"), \
+                mock.patch.object(cp, "call_remote", return_value=({"ok": True, "warm": True}, None)) as ping, \
+                mock.patch.object(cp, "build_reg_cfg", return_value={"token": self.zywy()}), \
+                mock.patch.object(cp, "decathlon_rpc", return_value={}), \
+                mock.patch("sys.stdout", io.StringIO()) as out:
+            cp.preflight_token(chwila, self.TZ, "temat", "https://kort",
+                               remote_url="https://x.lambda-url.eu-west-1.on.aws/", remote_secret="s")
+            cp.preflight_token(chwila + timedelta(seconds=20), self.TZ, "temat", "https://kort",
+                               remote_url="https://x.lambda-url.eu-west-1.on.aws/", remote_secret="s")
+        self.assertEqual(ping.call_count, 1, "ping raz dziennie, nie co iterację")
+        self.assertEqual(ping.call_args.args[2], {"warm": True})
+        self.assertIn("Rozgrzewka Irlandii przed zrywem", out.getvalue())
+
+    def test_without_a_remote_url_the_final_check_pings_nothing(self):
+        chwila = datetime(2026, 8, 28, 10, 58, 30, tzinfo=self.TZ)
+        with mock.patch.object(cp, "verify_accounts_before_hunt"), \
+                mock.patch.object(cp, "call_remote") as ping, \
+                mock.patch.object(cp, "build_reg_cfg", return_value={"token": self.zywy()}), \
+                mock.patch.object(cp, "decathlon_rpc", return_value={}), \
+                mock.patch("sys.stdout", io.StringIO()):
+            cp.preflight_token(chwila, self.TZ, "temat", "https://kort")
+        ping.assert_not_called()
 
     def test_fires_exactly_thirty_minutes_before_the_burst(self):
         wynik, _, out, _ = self.sprawdz("10:30:05")
@@ -5534,14 +5564,23 @@ class AccountsFromConfigTest(unittest.TestCase):
 
 
 class MultiAccountRegistrationTest(SalvoHelpers, unittest.TestCase):
-    """Konta równolegle ścigają ten sam najlepszy termin, potem przechodzą dalej."""
+    """Konta w pierwszej fali rozkładają się po godzinach (od najcenniejszej), a gdy
+    kont jest więcej niż godzin, kilka strzela w tę samą godzinę RÓWNOLEGLE.
+
+    Godzina rozstrzygnięta — nasza wygrana albo cudze „No available seats" — zamyka
+    swoją kolejkę: limit miejsc to 1, więc każdy dalszy strzał dostałby 409 od nas
+    samych albo od rywala. Drugi cel konta idzie tylko w godzinę, w którą nikt z nas
+    jeszcze nie strzela. Dowód z 15.09: Decathlon obsługuje zapisy prawie po kolei
+    (dwadzieścia odpowiedzi co ~110 ms), więc dziesięć kont w jednej godzinie to
+    kolejka za własnym pierwszym żądaniem, nie dziesięć losów.
+    """
 
     def configs(self, count=2, limit=1):
         return [{"enabled": True, "konto": f"k{i}", "account_name": f"Konto {i}",
                  "max_per_run": limit, "order": "earliest", "salvo": 0,
                  "shots": []} for i in range(count)]
 
-    def test_two_accounts_really_hit_the_same_slot_in_parallel(self):
+    def test_more_accounts_than_hours_really_hit_the_same_slot_in_parallel(self):
         barrier = threading.Barrier(2, timeout=3)
         calls = []
         lock = threading.Lock()
@@ -5556,21 +5595,94 @@ class MultiAccountRegistrationTest(SalvoHelpers, unittest.TestCase):
                 if slot["id"] not in claimed:
                     claimed.add(slot["id"])
                     return True, "accepted"
-            return False, "409"
+            return False, '409: {"message":"No available seats"}'
 
-        cfgs = self.configs()
+        cfgs = self.configs(count=4)
         with mock.patch.object(cp, "register_slot", side_effect=register), \
                 mock.patch("sys.stdout", io.StringIO()):
             results, registered, used = cp.auto_register_accounts(
                 self.slots(17, 18), {}, cfgs, set(), TZ)
         self.assertEqual(len(registered), 2)
-        first_round = [kid for kid, sid in calls if sid == "s17"]
-        self.assertEqual(set(first_round), {"k0", "k1"})
-        second_round = [kid for kid, sid in calls if sid == "s18"]
-        self.assertEqual(set(second_round), {"k0", "k1"},
-                         "zwycięzca pierwszej godziny też ma próbować następnej")
+        self.assertEqual(len([kid for kid, sid in calls if sid == "s17"]), 2,
+                         "cztery konta na dwie godziny: po dwa na godzinę, naraz")
+        self.assertEqual(len([kid for kid, sid in calls if sid == "s18"]), 2)
+        self.assertEqual(len(calls), 4, "po rozstrzygnięciu godziny nikt już w nią nie strzela")
         self.assertEqual(sum(used.values()), 2)
         self.assertTrue(all(ok for ok, _msg in results.values()))
+
+    def test_the_winner_moves_on_to_an_open_hour_but_not_to_a_resolved_one(self):
+        """Dwa konta, trzy godziny. k0 wygrywa 17:00, k1 przegrywa 18:00 z rywalem
+        („No available seats"), 19:00 czeka wolna. k0 ma iść w 19:00 — i NIE w 18:00."""
+        calls, lock = [], threading.Lock()
+
+        def register(slot, price, cfg, speculative=False):
+            with lock:
+                calls.append((cfg["konto"], slot["id"]))
+            if slot["id"] == "s18":
+                return False, 'Decathlon HTTP 409: {"error":"Error","message":"No available seats"}'
+            return True, "accepted"
+
+        cfgs = self.configs()
+        with mock.patch.object(cp, "register_slot", side_effect=register), \
+                mock.patch("sys.stdout", io.StringIO()) as out:
+            _results, registered, _used = cp.auto_register_accounts(
+                self.slots(17, 18, 19), {}, cfgs, set(), TZ)
+        self.assertEqual(registered, {"s17", "s19"})
+        self.assertEqual([sid for _kid, sid in calls].count("s18"), 1,
+                         "cudze „No available seats” jest ostateczne — bez drugiego strzału")
+        self.assertIn("zajęte przez innych", out.getvalue())
+        self.assertEqual(cfgs[0]["pending_ids"], [], "zajętej godziny nie nadrabiamy")
+        self.assertEqual(cfgs[1]["pending_ids"], [])
+
+    def test_a_freed_account_does_not_queue_behind_our_own_older_request(self):
+        """k0 wygrywa 17:00 od razu, k1 wisi w 18:00. k0 jest wolne, ale 18:00 ma nasze
+        żądanie z WCZEŚNIEJSZEJ salwy — dołączenie teraz to kolejka za nami samymi."""
+        slow = threading.Event()
+        calls, lock = [], threading.Lock()
+
+        def register(slot, price, cfg, speculative=False):
+            with lock:
+                calls.append((cfg["konto"], slot["id"]))
+            if slot["id"] == "s18":
+                slow.wait(2)
+            return True, "accepted"
+
+        cfgs = self.configs()
+        with mock.patch.object(cp, "register_slot", side_effect=register), \
+                mock.patch("sys.stdout", io.StringIO()):
+            with concurrent.futures.ThreadPoolExecutor(1) as pool:
+                future = pool.submit(cp.auto_register_accounts, self.slots(17, 18), {}, cfgs, set(), TZ)
+                time.sleep(0.2)
+                slow.set()
+                _results, registered, _used = future.result(timeout=3)
+        self.assertEqual(registered, {"s17", "s18"})
+        self.assertEqual(sorted(calls), [("k0", "s17"), ("k1", "s18")])
+
+    def test_the_second_target_goes_only_where_nobody_of_ours_is_in_flight(self):
+        """15.09: dziesięć kont, dwie godziny — pierwsza fala po pięć na godzinę, druga
+        fala dokładała po pięć NASTĘPNYCH do tych samych kolejek. Teraz drugi cel
+        konta idzie wyłącznie w godzinę bez naszego żądania w locie."""
+        release = threading.Event()
+        calls, lock = [], threading.Lock()
+
+        def register(slot, price, cfg, speculative=False):
+            with lock:
+                calls.append((cfg["konto"], slot["id"]))
+            release.wait(2)
+            return False, '409: {"message":"No available seats"}'
+
+        cfgs = self.configs(count=4)
+        with mock.patch.object(cp, "register_slot", side_effect=register), \
+                mock.patch("sys.stdout", io.StringIO()):
+            with concurrent.futures.ThreadPoolExecutor(1) as pool:
+                future = pool.submit(cp.auto_register_accounts, self.slots(17, 18), {}, cfgs, set(), TZ)
+                time.sleep(0.2)
+                with lock:
+                    w_locie = list(calls)
+                release.set()
+                future.result(timeout=3)
+        self.assertEqual(len(w_locie), 4, "pierwsza fala: każde konto raz")
+        self.assertEqual(len(calls), 4, "druga fala nie dokłada żądań do godzin, w które już strzelamy")
 
     def test_there_is_no_combined_booking_limit(self):
         cfgs = self.configs(count=3, limit=2)
@@ -5677,8 +5789,9 @@ class MultiAccountRunOnceTest(SalvoHelpers, unittest.TestCase):
                 state = json.load(f)
         self.assertEqual(set(state["registered_ids"]), {"s17", "s18"})
         self.assertEqual({kid for kid, _sid in seen}, {"glowne", "ania"})
-        self.assertEqual([sid for _kid, sid in seen].count("s17"), 2)
-        self.assertEqual([sid for _kid, sid in seen].count("s18"), 2)
+        # Dwa konta, dwie godziny: każde bierze jedną i wygrywa — godzina zdobyta
+        # zamyka kolejkę, drugie konto nie strzela w nią po nas (limit miejsc 1).
+        self.assertEqual(sorted(sid for _kid, sid in seen), ["s17", "s18"])
 
 
 class ResourceReportTest(unittest.TestCase):

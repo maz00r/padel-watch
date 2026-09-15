@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.29.2 — po logu Lambdy z 15.09: ciepła Irlandia o 11:00, koniec kolejki za własnym żądaniem
+
+CloudWatch z 15.09 dołożył dwa fakty, których z Dziennika dodatku nie widać.
+
+- **Zimny start co dzień o 11:00:00.** `INIT_START` dokładnie w sekundzie wywołania:
+  341 ms inicjalizacji plus 654 ms rozgrzewania połączeń — Irlandia zaczynała patrzeć
+  o 11:00:01,4. Ping na starcie zrywu jest pomijany, gdy sprint rusza w tej samej
+  sekundzie, a odkąd oba startują o 11:00:00, nie wychodził nigdy. Teraz pukamy przy
+  końcowej kontroli JWT o 10:58 („Rozgrzewka Irlandii przed zrywem"); kontener żyje
+  potem kilka minut. Dziś bez kosztu — publikacja nie przyszła nigdy przed 11:00:13.
+- **Decathlon obsługuje zapisy prawie po kolei:** dwadzieścia odpowiedzi co ~110 ms,
+  pierwsza po 661 ms, ostatnia po 2723 ms. Liczy się nasze PIERWSZE żądanie do danej
+  godziny; kolejne stoją za nim w kolejce. Stąd dwie zmiany w rozdziale celów:
+  - **Godzina rozstrzygnięta zamyka swoją kolejkę.** Po naszej wygranej (limit miejsc 1)
+    albo cudzym „No available seats" żadne konto już w nią nie strzela. 14.09 po
+    pierwszym 409 kolejne konta wchodziły w tę samą godzinę i dostawały 409 w 80 ms.
+  - **Nikt nie ustawia się w kolejce za własnym żądaniem.** Do godziny, w którą już
+    strzelamy, dołącza tylko wolne konto i tylko w tej samej salwie — żądania wysłane
+    naraz mają szansę w jitterze kolejności, żądanie wysłane 700 ms później nie ma
+    żadnej. 15.09 druga fala dokładała po pięć żądań do godzin z pięcioma naszymi
+    w kolejce i wydłużała domykanie zapisów o 1,4 s. Pierwsza salwa działa jak dotąd:
+    przy większej liczbie kont niż godzin kilka kont strzela w tę samą godzinę naraz.
+
 ## 0.29.1 — po logu z 15.09: krótki sprint mówi o sobie przy starcie, bez drugiego strzału w cudzy termin
 
 15.09 publikacja przyszła o 11:00:50,6 — drugi dzień z rzędu o tej samej sekundzie.
