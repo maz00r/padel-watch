@@ -60,6 +60,14 @@ class ConfigTest(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     vw.load_config()
 
+    def test_multiple_ticket_types_and_statuses_are_normalized(self):
+        with mock.patch.dict(os.environ, {
+                "TICKET_TYPES": "  Muséi Vaticani ; visita GUIDATA ; Muséi Vaticani ",
+                "TICKET_STATUSES": " available, LOW_AVAILABILITY, available "}, clear=True):
+            cfg = vw.load_config()
+        self.assertEqual(cfg["ticket_types"], ["musei vaticani", "visita guidata"])
+        self.assertEqual(cfg["ticket_statuses"], ["AVAILABLE", "LOW_AVAILABILITY"])
+
     def test_rejects_invalid_range_and_interval(self):
         with mock.patch.dict(os.environ, {"START_DATE": "2026-09-29", "END_DATE": "2026-09-28"}, clear=True):
             with self.assertRaisesRegex(ValueError, "end_date"):
@@ -113,6 +121,21 @@ class SnapshotTest(unittest.TestCase):
         self.assertEqual([change["kind"] for change in changes], ["added", "removed", "changed"])
         self.assertEqual(changes[-1]["fields"], ["availability", "message", "price"])
         self.assertTrue(vw.changes_include_availability(changes))
+
+    def test_selected_changes_include_entering_and_losing_status(self):
+        cfg = {"ticket_types": ["biglietti d'ingresso"], "ticket_statuses": ["AVAILABLE"]}
+        selected = vw.canonical_product(raw_product(status="AVAILABLE"))
+        unavailable = vw.canonical_product(raw_product(status="SOLD_OUT"))
+        other = vw.canonical_product(raw_product("Visita guidata", "AVAILABLE"))
+        self.assertTrue(vw.selected_product(selected, cfg))
+        self.assertFalse(vw.selected_product(other, cfg))
+        for previous, current in (([unavailable], [selected]), ([selected], [unavailable]),
+                                  ([selected], []), ([], [selected])):
+            changes = vw.diff_snapshots(previous, current, date(2026, 9, 24))
+            self.assertTrue(any(vw.selected_change(change, cfg) for change in changes))
+        self.assertFalse(vw.selected_change(
+            vw.diff_snapshots([unavailable], [dict(unavailable, price="30,00 €")],
+                              date(2026, 9, 24))[0], cfg))
 
     def test_pagination_downloads_all_results(self):
         pages = [
@@ -278,6 +301,29 @@ class RunOnceTest(unittest.TestCase):
             self.run_with(self.snapshots([offer(price="99,00 €")]))
         self.assertEqual(self.sent, [])
         self.assertEqual(self.state()["visitors"], 5)
+
+    def test_ticket_selection_filters_notifications_and_rebaselines(self):
+        initial = self.snapshots([offer("Bilet standardowy", "SOLD_OUT"),
+                                  offer("Wycieczka", "AVAILABLE")])
+        self.run_with(initial)
+        self.sent.clear()
+        with mock.patch.dict(os.environ, {"TICKET_TYPES": "Bilet standardowy",
+                                      "TICKET_STATUSES": "AVAILABLE"}):
+            self.run_with(initial)
+            self.assertEqual(self.sent, [])
+            self.assertEqual(len(self.state()["snapshots"]["2026-09-24"]), 1)
+            available = self.snapshots([offer("Bilet standardowy", "AVAILABLE"),
+                                        offer("Wycieczka", "SOLD_OUT")])
+            self.run_with(available)
+            self.assertEqual(len(self.sent), 1)
+            self.assertIn("SOLD_OUT → AVAILABLE", self.sent[-1][0][2])
+            self.sent.clear()
+            self.run_with(initial)
+            self.assertEqual(len(self.sent), 1)
+            self.assertIn("AVAILABLE → SOLD_OUT", self.sent[-1][0][2])
+            self.sent.clear()
+            self.run_with(self.snapshots([offer("Wycieczka", "AVAILABLE")]))
+            self.assertEqual(self.sent, [])
 
     def test_start_notification_and_finished_range(self):
         self.run_with(self.snapshots(), announce=True)

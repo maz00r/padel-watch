@@ -10,10 +10,12 @@ export CHECK_INTERVAL="$(opt check_interval)"
 export START_DATE="$(opt start_date)"
 export END_DATE="$(opt end_date)"
 export VISITORS="$(opt visitors)"
+export TICKET_TYPES="$(opt ticket_types)"
+export TICKET_STATUSES="$(opt ticket_statuses)"
 export STATE_DIR=/data
 export TZ=Europe/Rome
 
-for variable in NTFY_TOPIC CHECK_INTERVAL START_DATE END_DATE VISITORS; do
+for variable in NTFY_TOPIC CHECK_INTERVAL START_DATE END_DATE VISITORS TICKET_TYPES TICKET_STATUSES; do
   eval "value=\${$variable}"
   [ "$value" = "None" ] && export "$variable="
 done
@@ -24,5 +26,5 @@ done
 : "${VISITORS:=1}"
 export CHECK_INTERVAL START_DATE END_DATE VISITORS
 
-echo "[watykan] start: ${START_DATE}–${END_DATE}, wszystkie oferty dla ${VISITORS} os., co ${CHECK_INTERVAL}s"
+echo "[watykan] start: ${START_DATE}–${END_DATE}, rodzaje: ${TICKET_TYPES:-wszystkie}, statusy: ${TICKET_STATUSES:-wszystkie}, ${VISITORS} os., co ${CHECK_INTERVAL}s"
 exec python3 /app/check_vatican.py

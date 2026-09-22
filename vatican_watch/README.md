@@ -1,12 +1,13 @@
 # Watykan Watch — zmiany w ofercie biletów
 
-Dodatek Home Assistant monitoruje **wszystkie oferty** zwracane przez oficjalny
-system biletowy Muzeów Watykańskich dla dni 24–28 września 2026. Wysyła
+Dopóki nie ustawisz filtrów, dodatek Home Assistant monitoruje **wszystkie oferty**
+zwracane przez oficjalny system biletowy Muzeów Watykańskich dla dni
+24–28 września 2026. Wysyła
 powiadomienie przez [ntfy.sh](https://ntfy.sh), gdy pojawi się albo zniknie
 produkt lub zmieni się jego dostępność, komunikat, cena albo warunki uczestnictwa.
 
-Nie filtruje wyników do biletu `Musei Vaticani - Biglietti d'ingresso` i nie
-wymaga dostępności dla pięciu osób. Domyślnie odpytuje system dla **jednej osoby**,
+Domyślnie nie ogranicza wyników do biletu `Musei Vaticani - Biglietti d'ingresso`
+i nie wymaga dostępności dla pięciu osób. Odpytuje system dla **jednej osoby**,
 bo to najszerszy i najwcześniejszy sygnał, że pojawiło się choć jedno miejsce.
 Można ustawić inną liczbę w opcji `visitors`. Trafienie dla jednej osoby nie
 gwarantuje pięciu miejsc — liczbę miejsc zawsze potwierdź przed zakupem.
@@ -33,6 +34,22 @@ Zakup pozostaje ręczny po kliknięciu powiadomienia.
 | `start_date` | pierwszy obserwowany dzień, `RRRR-MM-DD` | `2026-09-24` |
 | `end_date` | ostatni obserwowany dzień, `RRRR-MM-DD` | `2026-09-28` |
 | `visitors` | liczba osób używana w wyszukiwaniu, 1–20 | `1` |
+| `ticket_types` | fragmenty nazw rodzajów biletów rozdzielone średnikiem; puste = wszystkie | puste |
+| `ticket_statuses` | statusy rozdzielone przecinkiem; puste = wszystkie | puste |
+
+Przykład: `ticket_types: "Musei Vaticani - Biglietti d'ingresso; Visita guidata"`
+i `ticket_statuses: "AVAILABLE, LOW_AVAILABILITY"`. Nazwy są dopasowywane bez
+rozróżniania wielkości liter i znaków diakrytycznych, jako fragment pełnej nazwy
+oferty. Statusy wpisuj tak, jak zwraca je API, np. `AVAILABLE`, `LOW_AVAILABILITY`,
+`SOLD_OUT`. Można wybrać jeden albo kilka rodzajów i statusów.
+
+Po wybraniu statusów powiadomienia dotyczą uzyskania **lub utraty** wybranego statusu,
+a także innych zmian w ofercie, gdy jest w tym statusie. Na przykład wybór
+`AVAILABLE` powiadamia o pojawieniu się dostępnego biletu, przejściu z `SOLD_OUT`
+do `AVAILABLE`, przejściu z `AVAILABLE` do `SOLD_OUT` oraz zniknięciu dostępnej oferty.
+Oferty są nadal sprawdzane przy każdym cyklu, więc ponowna dostępność nie ginie.
+Zmiana filtra lub liczby osób tworzy nowy punkt odniesienia bez alertów o dawnych
+ofertach.
 
 Monitor działa według strefy **Europe/Rome** i pomija dni, które już minęły.
 Każdy cykl pobiera wszystkie strony wyników dla każdego aktywnego dnia. Pomiędzy
@@ -64,9 +81,9 @@ następnym cyklu. Błędna lub niepełna odpowiedź API również nie nadpisuje 
 poprawnego stanu. Po trzech błędnych cyklach wysyłany jest jeden alarm awarii,
 a po powrocie API — jeden komunikat o odzyskaniu działania.
 
-Zmiana opcji `visitors` tworzy nowy punkt odniesienia bez fałszywego alertu,
-ponieważ katalog wyników może być inny dla innej liczby osób. Po końcu zakresu
-dat dodatek kończy sprawdzanie i nie generuje dalszego ruchu.
+Zmiana opcji `visitors`, `ticket_types` lub `ticket_statuses` tworzy nowy punkt
+odniesienia bez fałszywego alertu. Po końcu zakresu dat dodatek kończy
+sprawdzanie i nie generuje dalszego ruchu.
 
 ## Rozwój
 

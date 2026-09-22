@@ -65,10 +65,11 @@ dodatek wyciąga sam. Pełna instrukcja: [cinema_watch/README.md](cinema_watch/R
 
 Monitoruje publiczny system biletowy Muzeów Watykańskich od 24 do 28 września
 2026 i powiadamia o dodaniu lub usunięciu produktu oraz zmianie statusu, ceny,
-komunikatu albo warunków uczestnictwa. Obejmuje wszystkie typy ofert zwracane dla
+komunikatu albo warunków uczestnictwa. Domyślnie obejmuje wszystkie typy ofert zwracane dla
 wybranej liczby odwiedzających (domyślnie jednej osoby) — bez logowania, danych
 osobowych, rezerwacji czy automatycznego zakupu. Kliknięcie powiadomienia prowadzi
 do oficjalnych wyników; decyzję i zakup wykonujesz ręcznie.
+W konfiguracji możesz wskazać kilka rodzajów biletów i statusów, które Cię interesują.
 
 Pełna konfiguracja i zasady alertów: [vatican_watch/README.md](vatican_watch/README.md).
 

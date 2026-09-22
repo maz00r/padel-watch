@@ -23,7 +23,7 @@ try:
 except ImportError:  # pragma: no cover
     ZoneInfo = None
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATE_PATH = os.path.join(os.environ.get("STATE_DIR") or HERE, "vatican_state.json")
 API_URL = "https://tickets.museivaticani.va/api/search/result"
@@ -91,6 +91,8 @@ def load_config():
         "interval": interval,
         "topic": (os.environ.get("NTFY_TOPIC") or "").strip(),
         "visitors": visitors,
+        "ticket_types": parse_selection(os.environ.get("TICKET_TYPES"), ";", normalized),
+        "ticket_statuses": parse_selection(os.environ.get("TICKET_STATUSES"), ",", lambda s: s.upper()),
     }
 
 
@@ -111,6 +113,37 @@ def normalized(value):
     value = unicodedata.normalize("NFKD", clean_text(value))
     value = "".join(ch for ch in value if not unicodedata.combining(ch))
     return value.casefold().replace("–", "-").replace("—", "-")
+
+
+def parse_selection(value, separator, transform):
+    """Puste pole oznacza wszystkie; usuwa powtórzenia i zbędne odstępy."""
+    return sorted({transform(clean_text(part)) for part in (value or "").split(separator)
+                   if clean_text(part)})
+
+
+def selected_product(product, cfg):
+    types = cfg["ticket_types"]
+    return not types or any(part in normalized(product["name"]) for part in types)
+
+
+def selected_change(change, cfg):
+    statuses = cfg["ticket_statuses"]
+    if not statuses:
+        return True
+    return any(item is not None and item["availability"] in statuses
+               for item in (change.get("before"), change.get("after")))
+
+
+def selection_key(cfg):
+    return {"ticket_types": cfg["ticket_types"], "ticket_statuses": cfg["ticket_statuses"]}
+
+
+def selection_description(cfg):
+    if not cfg["ticket_types"] and not cfg["ticket_statuses"]:
+        return "wszystkie oferty"
+    types = "; ".join(cfg["ticket_types"]) or "wszystkie rodzaje"
+    statuses = ", ".join(cfg["ticket_statuses"]) or "wszystkie statusy"
+    return f"{types}; {statuses}"
 
 
 def canonical_product(product):
@@ -239,7 +272,8 @@ def fetch_snapshot(day, visitors=1):
 
 
 def default_state():
-    return {"snapshots": {}, "visitors": None, "failure": {"count": 0, "alerted": False}}
+    return {"snapshots": {}, "visitors": None, "selection": None,
+            "failure": {"count": 0, "alerted": False}}
 
 
 def load_state():
@@ -263,6 +297,8 @@ def load_state():
         state["visitors"] = int(loaded["visitors"]) if loaded.get("visitors") is not None else None
     except (TypeError, ValueError):
         log("⚠ Stan ma niepoprawną liczbę osób — zapiszę nowy punkt odniesienia.")
+    if isinstance(loaded.get("selection"), dict):
+        state["selection"] = loaded["selection"]
     if isinstance(loaded.get("failure"), dict):
         try:
             state["failure"]["count"] = max(0, int(loaded["failure"].get("count") or 0))
@@ -404,13 +440,15 @@ def run_once(announce_startup=False, today=None):
         return 0, None
 
     state = load_state()
-    if state["visitors"] not in (None, cfg["visitors"]):
-        log("Zmieniła się liczba osób — zapisuję nowy punkt odniesienia bez fałszywego alertu.")
+    if state["visitors"] not in (None, cfg["visitors"]) or (
+            state["snapshots"] and state["selection"] != selection_key(cfg)):
+        log("Zmieniła się liczba osób lub wybór biletów/statusów — zapisuję nowy punkt odniesienia bez fałszywego alertu.")
         state["snapshots"] = {}
     observed = {}
     try:
         for index, day in enumerate(days):
-            observed[day.isoformat()] = fetch_snapshot(day, cfg["visitors"])
+            observed[day.isoformat()] = [product for product in fetch_snapshot(day, cfg["visitors"])
+                                         if selected_product(product, cfg)]
             if index + 1 < len(days):
                 time.sleep(DATE_GAP_SECONDS)
     except VaticanError as exc:
@@ -427,7 +465,7 @@ def run_once(announce_startup=False, today=None):
 
     if announce_startup:
         ntfy_post(cfg["topic"], "🎟️ Watykan Watch uruchomiony",
-                  f"Monitoruję wszystkie oferty dla {cfg['visitors']} "
+                  f"Monitoruję {selection_description(cfg)} dla {cfg['visitors']} "
                   f"{'osoby' if cfg['visitors'] == 1 else 'osób'}: "
                   f"{cfg['start_date']:%d.%m.%Y}–{cfg['end_date']:%d.%m.%Y}. "
                   f"Sprawdzanie co {cfg['interval']} s.", priority="default", tags="ticket")
@@ -439,7 +477,8 @@ def run_once(announce_startup=False, today=None):
         if key not in state["snapshots"]:
             baseline_days.append(day)
             continue
-        changes.extend(diff_snapshots(state["snapshots"][key], observed[key], day))
+        changes.extend(change for change in diff_snapshots(state["snapshots"][key], observed[key], day)
+                       if selected_change(change, cfg))
 
     if changes:
         for change in changes:
@@ -454,6 +493,7 @@ def run_once(announce_startup=False, today=None):
 
     state["snapshots"] = {day.isoformat(): observed[day.isoformat()] for day in days}
     state["visitors"] = cfg["visitors"]
+    state["selection"] = selection_key(cfg)
     save_state(state)
     if baseline_days:
         log("Punkt odniesienia: " + ", ".join(
@@ -471,7 +511,7 @@ def main():
         log(f"✗ Błędna konfiguracja: {exc}")
         return 1
     log(f"Start Watykan Watch {VERSION}: {cfg['start_date']:%d.%m.%Y}–{cfg['end_date']:%d.%m.%Y}, "
-        f"wszystkie oferty dla {cfg['visitors']} osób, co {cfg['interval']} s (Europe/Rome).")
+        f"{selection_description(cfg)} dla {cfg['visitors']} osób, co {cfg['interval']} s (Europe/Rome).")
     first = True
     while True:
         code, requested_delay = run_once(announce_startup=first)

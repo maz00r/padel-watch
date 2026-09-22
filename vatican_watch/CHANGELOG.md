@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.0 — wybór biletów i statusów
+
+- Opcje `ticket_types` i `ticket_statuses` pozwalają śledzić kilka rodzajów biletów
+  i powiadamiać o uzyskaniu lub utracie wybranych statusów.
+- Zmiana wyboru tworzy nowy punkt odniesienia bez fałszywych alertów.
+
 ## 0.2.0 — wszystkie zmiany oferty
 
 - Monitorowanie wszystkich produktów ze wszystkich stron wyników, bez filtrowania
