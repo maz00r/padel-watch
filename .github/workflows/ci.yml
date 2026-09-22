@@ -19,6 +19,8 @@ jobs:
         run: python3 -m unittest -v test_read_token
       - name: Testy jednostkowe (kino)
         run: python3 -m unittest -v test_check_cinema
+      - name: Testy jednostkowe (Watykan Watch)
+        run: python3 -m unittest -v test_check_vatican
       - name: Testy jednostkowe (zbieracz tokenów)
         run: python3 -m unittest -v test_zbieracz
       - name: Testy jednostkowe (konteksty przeglądarki)
@@ -32,7 +34,7 @@ jobs:
         # NameError('cfg_startowy') — składnia poprawna, kod martwy.
         run: python3 sprawdz_nazwy.py padel_browser/check_padel.py padel_browser/panel.py padel_browser/read_token.py padel_browser/konteksty.py padel_browser/zbieracz.py aws_remote/handler.py
       - name: Składnia silników
-        run: python3 -m py_compile padel_browser/check_padel.py padel_browser/read_token.py padel_browser/panel.py padel_browser/konteksty.py padel_browser/zbieracz.py cinema_watch/check_cinema.py
+        run: python3 -m py_compile padel_browser/check_padel.py padel_browser/read_token.py padel_browser/panel.py padel_browser/konteksty.py padel_browser/zbieracz.py cinema_watch/check_cinema.py vatican_watch/check_vatican.py
       - name: Paczka Lambdy jest aktualna
         # Wersjonowana paczka to plik, który użytkownik pobiera i wgrywa do AWS.
         # Gdyby rozjechała się ze źródłami, wgrałby STARY silnik i nie dowiedziałby

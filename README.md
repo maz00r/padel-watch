@@ -1,13 +1,14 @@
 # 🎾 Padel (Decathlon) — dodatki Home Assistant
 
-Repozytorium zawiera **dwa niezależne dodatki** — możesz zainstalować oba albo tylko jeden:
+Repozytorium zawiera **trzy niezależne dodatki** — możesz zainstalować wszystkie albo tylko wybrane:
 
 | Dodatek | Co robi |
 |---------|---------|
 | 🎾 **[Padel (Decathlon)](padel_browser/README.md)** | monitoruje wolne terminy padla, rejestruje automatycznie, pokazuje i anuluje Twoje rezerwacje |
 | 🎬 **[Kino (Cinema City)](cinema_watch/README.md)** | pilnuje repertuaru wybranego filmu i daje znać, gdy pojawią się nowe seanse |
+| 🎟️ **[Watykan Watch](vatican_watch/README.md)** | pilnuje zwykłych biletów do Muzeów Watykańskich dla 5 osób; tylko alert, bez zakupu |
 
-Oba wysyłają push na telefon przez [ntfy.sh](https://ntfy.sh).
+Wszystkie mogą wysyłać push na telefon przez [ntfy.sh](https://ntfy.sh).
 
 ---
 
@@ -60,15 +61,26 @@ czysty Python, bez przeglądarki i bez logowania (repertuar jest publiczny).
 Wklejasz link do filmu ze strony Cinema City (z wybranym miastem lub kinem), resztę
 dodatek wyciąga sam. Pełna instrukcja: [cinema_watch/README.md](cinema_watch/README.md).
 
+## 🎟️ Watykan Watch
+
+Monitoruje publiczny system biletowy Muzeów Watykańskich dla 5 osób od 24 do
+28 września 2026. Alarmuje tylko, gdy dostępny jest właściwy zwykły bilet — bez
+logowania, danych osobowych, rezerwacji czy automatycznego zakupu. Kliknięcie powiadomienia
+prowadzi do oficjalnych wyników; decyzję i zakup wykonujesz ręcznie.
+
+Pełna konfiguracja i zasady alertów: [vatican_watch/README.md](vatican_watch/README.md).
+
 ## Rozwój
 
 Każdy dodatek to jeden plik silnika bez zależności (czysty Python, stdlib):
-[padel_browser/check_padel.py](padel_browser/check_padel.py) i
-[cinema_watch/check_cinema.py](cinema_watch/check_cinema.py).
+[padel_browser/check_padel.py](padel_browser/check_padel.py),
+[cinema_watch/check_cinema.py](cinema_watch/check_cinema.py) i
+[vatican_watch/check_vatican.py](vatican_watch/check_vatican.py).
 
 Testy (uruchamiane też w CI przy każdym PR):
 
 ```
 python3 -m unittest -v test_check_padel
 python3 -m unittest -v test_check_cinema
+python3 -m unittest -v test_check_vatican
 ```
