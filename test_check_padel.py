@@ -3217,6 +3217,32 @@ class HuntJournalEndToEndTest(unittest.TestCase):
             hour=15, minute=0, second=0, microsecond=0).astimezone(cp._log_tz())
         self.assertEqual(wpisy[0]["registered"][0], cp.fmt_when(oczekiwana, short=True))
 
+    def test_remote_wins_are_written_when_no_slot_is_still_free(self):
+        """REGRESJA 21.09: Irlandia wygrała, ale dom zobaczył już pusty grafik."""
+        self.bieg(self.doc())
+        start = (datetime.now(timezone.utc) + timedelta(days=7)).replace(
+            hour=15, minute=0, second=0, microsecond=0)
+        occupied = {
+            "data": {"attributes": {"title": "Kort", "price": None,
+                                      "datesStats": {"availableListingDates": 0}}},
+            "included": [TestFreeSlots.date_item(start.isoformat(), "d15", count=1)],
+        }
+        sid = f"{self.LID}:d15"
+        local = start.astimezone(cp._log_tz())
+        when = cp.fmt_when(local, short=True)
+        remote = {
+            "registered": {sid}, "results": {sid: (True, "accepted")},
+            "shots": [{"when": when, "ok": True, "ms": 100, "start_ms": 0}],
+            "used_by_account": {}, "auth_errors": {}, "wykryto": datetime.now(timezone.utc),
+        }
+        with mock.patch.object(cp, "resolve_current_id", side_effect=lambda x: self.LID), \
+                mock.patch("sys.stdout", io.StringIO()):
+            cp.run_once(skip_light=True, prefetched=(self.LID, occupied), remote=remote)
+        wpis = cp.load_hunts()[0]
+        self.assertEqual(wpis["registered"], [when])
+        self.assertEqual(wpis["target_day"], f"{cp.PL_DAYS_SHORT[local.weekday()]} {local:%d.%m}")
+        self.assertEqual((wpis["free"], wpis["total"]), (0, 1))
+
 
 class NeverSeenTest(HuntJournalHelpers, unittest.TestCase):
     """Rozróżnienie, po które powstała ta zmiana: przegrany WYŚCIG vs godzina,
@@ -3232,7 +3258,7 @@ class NeverSeenTest(HuntJournalHelpers, unittest.TestCase):
         """20:00 z 409 to przegrany wyścig — widzieliśmy je wolne."""
         wyniki = {"L:d20": (False, 'HTTP 409: {"message":"No available seats"}')}
         wpis, _, _ = self.zapisz(godzina="11:00:40", sloty=(20,), wyniki=wyniki,
-                                 grid=("niedz 30.08", 5, 6, ["20:00"]))
+                                 grid=("niedz 30.08", 5, 6, ["20:00"], date(2026, 8, 30)))
         self.assertEqual([f["when"] for f in wpis["failed"]], ["niedz 30.08 20:00"])
         self.assertEqual(wpis["never_seen"], [],
                          "przegrany wyścig NIE jest 'nigdy nie widziane'")
@@ -3240,22 +3266,24 @@ class NeverSeenTest(HuntJournalHelpers, unittest.TestCase):
     def test_hour_taken_before_we_looked_is_flagged(self):
         """SEDNO: 20:00 zajęte, a my nawet w nie nie strzelaliśmy."""
         wpis, _, _ = self.zapisz(godzina="11:00:40", sloty=(15,),
-                                 grid=("niedz 30.08", 5, 7, ["20:00", "19:00"]))
+                                 grid=("niedz 30.08", 5, 7, ["20:00", "19:00"],
+                                       date(2026, 8, 30)))
         self.assertEqual(wpis["never_seen"], ["19:00", "20:00"])
 
     def test_our_own_bookings_are_not_flagged(self):
         """Zarezerwowany przez nas termin też jest 'zajęty' w kolejnej migawce —
         gdyby go nie odjąć, dziennik oskarżałby nas o kradzież własnych terminów."""
         wpis, _, _ = self.zapisz(godzina="11:00:40", sloty=(20,),
-                                 grid=("niedz 30.08", 5, 6, ["20:00"]))
+                                 grid=("niedz 30.08", 5, 6, ["20:00"], date(2026, 8, 30)))
         self.assertEqual(wpis["registered"], ["niedz 30.08 20:00"])
         self.assertEqual(wpis["never_seen"], [])
 
     def test_taken_accumulates_across_batches(self):
         """Publikacja przychodzi partiami — każda migawka pokazuje inny fragment."""
-        self.zapisz(godzina="11:00:40", sloty=(15,), grid=("niedz 30.08", 5, 7, ["20:00"]))
+        self.zapisz(godzina="11:00:40", sloty=(15,),
+                    grid=("niedz 30.08", 5, 7, ["20:00"], date(2026, 8, 30)))
         wpis, _, _ = self.zapisz(godzina="11:00:41", sloty=(17,),
-                                 grid=("niedz 30.08", 4, 7, ["19:00"]))
+                                 grid=("niedz 30.08", 4, 7, ["19:00"], date(2026, 8, 30)))
         self.assertEqual(wpis["taken"], ["19:00", "20:00"])
         self.assertEqual(wpis["never_seen"], ["19:00", "20:00"])
 
@@ -3556,6 +3584,13 @@ class CancellationIsNotPublicationTest(HuntJournalHelpers, unittest.TestCase):
         wpis, _, _ = self.publikacja("11:00:36")
         self.assertEqual(wpis["first_seen"], "11:00:36")
         self.assertTrue(wpis["aligned"], "publikacja o 11:00:36 mieści się w zrywie 11:00:30+60s")
+        self.assertEqual(wpis["target_day"], "pt 04.09")
+
+    def test_later_cancellation_does_not_replace_the_publication_grid(self):
+        self.publikacja("11:00:36")
+        wpis, _, _ = self.odwolanie("14:00:00")
+        self.assertEqual(wpis["target_day"], "pt 04.09")
+        self.assertEqual((wpis["free"], wpis["total"]), (8, 11))
 
     def test_alarm_fires_for_a_real_publication_outside_the_burst(self):
         """Prawdziwy rozjazd nadal ma krzyczeć — nie stępiamy alarmu."""

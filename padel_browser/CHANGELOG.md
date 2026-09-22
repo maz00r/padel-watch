@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.29.4 — poprawny Log polowania po powrocie Irlandii
+
+- Zapisuje zwycięstwa i porażki Irlandii także wtedy, gdy po ich rozstrzygnięciu
+  żaden z tych terminów nie jest już widoczny jako wolny w domowym odczycie.
+- Grafik właściwej publikacji (+7 dni) zastępuje wcześniejszy wpis z odwołania,
+  a późniejsze odwołania nie mogą już podmienić dnia i liczb publikacji.
+
 ## 0.29.3 — logowanie wszystkich kont z panelu
 
 - W zakładce **Konta** jest przycisk **Automatycznie zaloguj wszystkie**. Uruchamia

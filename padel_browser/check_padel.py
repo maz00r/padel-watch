@@ -953,7 +953,10 @@ def record_hunt(now_local, tz, new_slots, wyniki, shots, grid, zdalnie, topic,
         wpis["first_seen_iso"] = chwila.isoformat()
         wpis["burst"], wpis["aligned"] = okno, w_oknie
 
-    if grid:
+    # Odwołanie może utworzyć dzienny wpis przed publikacją, ale nie może później
+    # nadpisać grafiku dnia +7. Tak właśnie 21.09 raport zachował „wt 22.09",
+    # chociaż właściwe polowanie dotyczyło 28.09.
+    if grid and (to_publikacja or not wpis.get("first_seen")):
         wpis["target_day"], wpis["free"], wpis["total"] = grid[:3]
         # Zajęte godziny zbieramy TYLKO przez chwilę po pierwszym wykryciu.
         # Publikacja przychodzi partiami przez ~sekundę, więc jedna migawka nie
@@ -961,7 +964,7 @@ def record_hunt(now_local, tz, new_slots, wyniki, shots, grid, zdalnie, topic,
         # PÓŹNIEJ to zwykły ruch, a nie „zniknęła przed naszym pierwszym spojrzeniem".
         # 28.08 sumowanie przez całą dobę dało 8 godzin „nigdy nie widzianych" przy
         # 8 wolnych z 11 — liczby, które nie mogą być jednocześnie prawdziwe.
-        if okno_publikacji(wpis, now_local):
+        if to_publikacja and okno_publikacji(wpis, now_local):
             wpis["taken"] = sorted(set(wpis.get("taken") or [])
                                    | set(grid[3] if len(grid) > 3 else []))
     wpis["remote"] = wpis["remote"] or bool(zdalnie)
@@ -3978,23 +3981,37 @@ def run_once(announce_startup=False, skip_light=False, prefetched=None, defer_pu
 
     main_account_state = account_states.get(reg_cfg.get("konto") or KONTO_GLOWNE, {})
 
-    if new_ids:
-        log(f"NOWE wolne terminy: {len(new_ids)}")
-        new_slots = sorted((current[i] for i in new_ids), key=lambda x: x["start_utc"])
-        grid = log_day_grids(new_slots, docs_by_lid, now_utc, tz, registered_ids)
-        # Dziennik polowań: jeden wpis na dobę z tym, co naprawdę się liczy.
+    new_slots = sorted((current[i] for i in new_ids), key=lambda x: x["start_utc"])
+
+    # Dziennik nie może zależeć od tego, czy DOM po powrocie wyniku nadal widzi wolny
+    # termin. 21.09 Irlandia zdobyła 15:00 i 19:00, lecz końcowy dokument pokazywał je
+    # już jako zajęte, więc `new_ids` było puste i cały wynik wypadł z raportu.
+    strzaly = list((remote or {}).get("shots") or [])
+    for account_cfg in reg_cfgs:
+        strzaly.extend(account_cfg.get("shots") or [])
+    journal_slots = list(new_slots)
+    journal_ids = set(registration_results)
+    known_journal_ids = {s["id"] for s in journal_slots}
+    if journal_ids - known_journal_ids:
+        for lid, doc in docs_by_lid.items():
+            for slot in parse_slots(doc, lid, now_utc, only_free=False):
+                if slot["id"] in journal_ids and slot["id"] not in known_journal_ids:
+                    journal_slots.append(slot)
+                    known_journal_ids.add(slot["id"])
+    journal_slots.sort(key=lambda x: x["start_utc"])
+    grid = log_day_grids(journal_slots, docs_by_lid, now_utc, tz, registered_ids) \
+        if journal_slots else None
+    if journal_slots or strzaly:
         # Nie może wywrócić biegu — rezerwacje są już zrobione, historia to dodatek.
         try:
-            # Strzały mogły paść po OBU stronach: zdalnie w Irlandii i lokalnie
-            # z zapasu. Dziennik ma pokazać jedno i drugie.
-            strzaly = list((remote or {}).get("shots") or [])
-            for account_cfg in reg_cfgs:
-                strzaly.extend(account_cfg.get("shots") or [])
-            record_hunt(datetime.now(tz), tz, new_slots, registration_results,
+            record_hunt(datetime.now(tz), tz, journal_slots, registration_results,
                         strzaly, grid, bool(remote), topic,
                         wykryto=(remote or {}).get("wykryto"))
         except Exception as e:  # noqa: BLE001
             log(f"! Nie zapisałem polowania do dziennika: {e!r}")
+
+    if new_ids:
+        log(f"NOWE wolne terminy: {len(new_ids)}")
         # grupuj powiadomienia per listing (book_url)
         by_url = {}
         for s in new_slots:
