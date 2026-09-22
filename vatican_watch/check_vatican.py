@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
-"""Read-only monitor dostępności zwykłych biletów do Muzeów Watykańskich.
+"""Monitor zmian w ofertach oficjalnej kasy Muzeów Watykańskich.
 
 Korzysta wyłącznie z publicznego endpointu, nie loguje się i nie składa rezerwacji.
-Uruchomienie lokalne (bez powiadomień):
-    STATE_DIR=/tmp/vatican NTFY_TOPIC='' python3 check_vatican.py
 """
 
 import email.utils
@@ -18,32 +16,33 @@ import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 
 try:
     from zoneinfo import ZoneInfo
-except ImportError:  # pragma: no cover - obraz dodatku zawiera zoneinfo
+except ImportError:  # pragma: no cover
     ZoneInfo = None
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATE_PATH = os.path.join(os.environ.get("STATE_DIR") or HERE, "vatican_state.json")
 API_URL = "https://tickets.museivaticani.va/api/search/result"
 HOME_URL = "https://tickets.museivaticani.va/home"
-USER_AGENT = f"vatican-watch/{VERSION} (read-only availability monitor)"
+USER_AGENT = f"vatican-watch/{VERSION} (read-only offer change monitor)"
 ROME = "Europe/Rome"
-TARGET_NAME = "Musei Vaticani - Biglietti d'ingresso"
 AVAILABLE_STATES = {"AVAILABLE", "LOW_AVAILABILITY"}
-KNOWN_STATES = AVAILABLE_STATES | {"SOLD_OUT", "NOT_ALLOWED", "MISSING"}
 FAILURE_ALERT_AFTER = 3
 DATE_GAP_SECONDS = 0.4
+PAGE_GAP_SECONDS = 0.15
+MAX_PAGES = 20
 MAX_BACKOFF_SECONDS = 3600
+MAX_CHANGES_IN_NOTIFICATION = 18
 
 _TZ = None
 
 
 class VaticanError(Exception):
-    """Błąd odpowiedzi lub połączenia, który nie może zmienić dostępności."""
+    """Błąd odpowiedzi lub połączenia, który nie może zmienić zapisanego stanu."""
 
     def __init__(self, message, retry_after=None):
         super().__init__(message)
@@ -72,30 +71,30 @@ def parse_date(value, option_name):
 
 
 def load_config():
-    """Odczyt opcji dodatku; termin i liczba osób są celowo ograniczone do planu."""
     start = parse_date(os.environ.get("START_DATE") or "2026-09-24", "start_date")
     end = parse_date(os.environ.get("END_DATE") or "2026-09-28", "end_date")
     if end < start:
         raise ValueError("end_date nie może być wcześniejszy niż start_date")
     try:
         interval = int(os.environ.get("CHECK_INTERVAL") or "60")
+        visitors = int(os.environ.get("VISITORS") or "1")
     except ValueError as exc:
-        raise ValueError("check_interval musi być liczbą całkowitą") from exc
+        raise ValueError("check_interval i visitors muszą być liczbami całkowitymi") from exc
     if not 30 <= interval <= 3600:
         raise ValueError("check_interval musi być w zakresie 30–3600 sekund")
-    # Walidujemy strefę teraz, aby błąd obrazu/configu nie dawał pozornie poprawnych dat.
+    if not 1 <= visitors <= 20:
+        raise ValueError("visitors musi być w zakresie 1–20")
     rome_tz()
     return {
         "start_date": start,
         "end_date": end,
         "interval": interval,
         "topic": (os.environ.get("NTFY_TOPIC") or "").strip(),
-        "visitors": 5,
+        "visitors": visitors,
     }
 
 
 def active_dates(cfg, today=None):
-    """Daty z zakresu, które nie minęły jeszcze w strefie Muzeów Watykańskich."""
     today = today or datetime.now(rome_tz()).date()
     first = max(cfg["start_date"], today)
     if first > cfg["end_date"]:
@@ -104,49 +103,63 @@ def active_dates(cfg, today=None):
             for offset in range((cfg["end_date"] - first).days + 1)]
 
 
-def normalize_name(value):
-    """Porównanie nazw niezależne od akcentów, odstępów i typograficznego myślnika."""
-    value = unicodedata.normalize("NFKD", str(value or ""))
+def clean_text(value):
+    return " ".join(str(value or "").split())
+
+
+def normalized(value):
+    value = unicodedata.normalize("NFKD", clean_text(value))
     value = "".join(ch for ch in value if not unicodedata.combining(ch))
-    return " ".join(value.casefold().replace("–", "-").split())
+    return value.casefold().replace("–", "-").replace("—", "-")
 
 
-def is_target_product(product):
-    """Tylko zwykły bilet, bez dostępnych sugestii, wycieczek i innych obiektów."""
+def canonical_product(product):
+    """Semantyczny zapis oferty; pomija losowe ID i nazwy obrazków."""
     if not isinstance(product, dict):
-        return False
-    if str(product.get("suggestion") or "").strip():
-        return False
-    name = normalize_name(product.get("name"))
-    if name != normalize_name(TARGET_NAME):
-        return False
-    # Druga, jawna blokada na wypadek przyszłej zmiany części nazwy po stronie API.
-    forbidden = ("guidat", "didatt", "univers", "pellegrin", "castel", "palazzo", "giardin")
-    return not any(word in name for word in forbidden)
+        raise VaticanError("API zawiera produkt inny niż obiekt")
+    name = clean_text(product.get("name"))
+    if not name:
+        raise VaticanError("API zawiera produkt bez nazwy")
+    who = product.get("who") or []
+    if not isinstance(who, list):
+        raise VaticanError(f"produkt '{name}' ma niepoprawne pole who")
+    visitor_types = []
+    for item in who:
+        if not isinstance(item, dict):
+            raise VaticanError(f"produkt '{name}' ma niepoprawny typ odwiedzającego")
+        visitor_types.append(f"{clean_text(item.get('id'))}:{clean_text(item.get('description'))}")
+    result = {
+        "name": name,
+        "availability": clean_text(product.get("availability")).upper() or "UNKNOWN",
+        "description": clean_text(product.get("description")),
+        "message": clean_text(product.get("descrAvailability")),
+        "price": clean_text(product.get("priceFrom")),
+        "suggestion": clean_text(product.get("suggestion")),
+        "participants": clean_text(product.get("numberParticipants")),
+        "visitor_types": sorted(visitor_types),
+    }
+    # ID zmienia się nawet dla tej samej oferty. Klucz zawiera wyłącznie treść
+    # opisującą rodzaj produktu, nie jego bieżący stan.
+    result["key"] = "\x1f".join((normalized(result["name"]),
+                                    normalized(result["suggestion"]),
+                                    normalized(result["description"])))
+    return result
 
 
-def select_target_product(payload):
-    """Zwraca produkt albo None, gdy zwykły bilet nie jest danego dnia wystawiony."""
+def snapshot_from_payload(payload):
     if not isinstance(payload, dict):
         raise VaticanError("API zwróciło JSON inny niż obiekt")
     visits = payload.get("visits")
     if not isinstance(visits, list):
         raise VaticanError("API nie zawiera listy visits")
-    matches = [item for item in visits if is_target_product(item)]
-    if not matches:
-        return None
-    if len(matches) > 1:
-        raise VaticanError("więcej niż jeden zwykły bilet Muzeów Watykańskich w odpowiedzi API")
-    return matches[0]
-
-
-def status_from_product(product):
-    status = str(product.get("availability") or "").strip().upper()
-    return status if status in KNOWN_STATES else "MISSING"
+    products = [canonical_product(item) for item in visits]
+    keys = [item["key"] for item in products]
+    if len(keys) != len(set(keys)):
+        raise VaticanError("API zwróciło dwie nierozróżnialne oferty")
+    return sorted(products, key=lambda item: item["key"])
 
 
 def parse_retry_after(value, now=None):
-    """Retry-After w sekundach lub jako data HTTP; ujemny wynik oznacza natychmiast."""
     if not value:
         return None
     try:
@@ -165,9 +178,7 @@ def parse_retry_after(value, now=None):
 
 def http_get_json(url):
     request = urllib.request.Request(url, headers={
-        "User-Agent": USER_AGENT,
-        "Accept": "application/json",
-        "Accept-Encoding": "gzip",
+        "User-Agent": USER_AGENT, "Accept": "application/json", "Accept-Encoding": "gzip",
     })
     try:
         with urllib.request.urlopen(request, timeout=25) as response:
@@ -186,27 +197,49 @@ def http_get_json(url):
         raise VaticanError("API zwróciło niepoprawny JSON") from exc
 
 
-def result_url(day, visitors=5):
-    """Oficjalna trasa Angulara wyników, nie sam formularz /home z query stringiem."""
+def search_url(day, visitors, page):
+    return API_URL + "?" + urllib.parse.urlencode({
+        "lang": "it", "visitorNum": str(visitors), "visitDate": day.strftime("%d/%m/%Y"),
+        "area": "1", "who": "", "page": str(page),
+    })
+
+
+def result_url(day, visitors=1):
     local_midnight = datetime(day.year, day.month, day.day, tzinfo=rome_tz())
     epoch_ms = int(local_midnight.timestamp() * 1000)
     return f"{HOME_URL}/visit/{visitors}/{epoch_ms}/1/"
 
 
-def fetch_status(day, visitors=5):
-    url = API_URL + "?" + urllib.parse.urlencode({
-        "lang": "it", "visitorNum": str(visitors), "visitDate": day.strftime("%d/%m/%Y"),
-        "area": "1", "who": "", "page": "0",
-    })
-    product = select_target_product(http_get_json(url))
-    if product is None:
-        return "MISSING", ""
-    return status_from_product(product), str(product.get("id") or "")
+def fetch_snapshot(day, visitors=1):
+    """Pobiera wszystkie strony wyników; brak paginacji ukrywałby część zmian."""
+    all_products = []
+    total_results = None
+    for page in range(MAX_PAGES):
+        payload = http_get_json(search_url(day, visitors, page))
+        page_products = snapshot_from_payload(payload)
+        if total_results is None:
+            try:
+                total_results = max(0, int(payload.get("totalResults", len(page_products))))
+            except (TypeError, ValueError) as exc:
+                raise VaticanError("API ma niepoprawne totalResults") from exc
+        all_products.extend(page_products)
+        if len(all_products) >= total_results:
+            break
+        if not page_products:
+            raise VaticanError("API zakończyło strony przed totalResults")
+        time.sleep(PAGE_GAP_SECONDS)
+    else:
+        raise VaticanError("API przekroczyło limit stron wyników")
+    if total_results is not None and len(all_products) != total_results:
+        raise VaticanError(f"API zwróciło {len(all_products)} z {total_results} ofert")
+    keys = [item["key"] for item in all_products]
+    if len(keys) != len(set(keys)):
+        raise VaticanError("API powtórzyło ofertę na kilku stronach")
+    return sorted(all_products, key=lambda item: item["key"])
 
 
 def default_state():
-    return {"last_observed": {}, "last_notified": {}, "last_missing": {},
-            "failure": {"count": 0, "alerted": False}}
+    return {"snapshots": {}, "visitors": None, "failure": {"count": 0, "alerted": False}}
 
 
 def load_state():
@@ -222,9 +255,14 @@ def load_state():
         log("⚠ Stan ma niewłaściwy format — zaczynam od nowego.")
         return default_state()
     state = default_state()
-    for key in ("last_observed", "last_notified", "last_missing"):
-        if isinstance(loaded.get(key), dict):
-            state[key] = {str(day): str(status) for day, status in loaded[key].items()}
+    snapshots = loaded.get("snapshots")
+    if isinstance(snapshots, dict):
+        state["snapshots"] = {str(day): value for day, value in snapshots.items()
+                              if isinstance(value, list)}
+    try:
+        state["visitors"] = int(loaded["visitors"]) if loaded.get("visitors") is not None else None
+    except (TypeError, ValueError):
+        log("⚠ Stan ma niepoprawną liczbę osób — zapiszę nowy punkt odniesienia.")
     if isinstance(loaded.get("failure"), dict):
         try:
             state["failure"]["count"] = max(0, int(loaded["failure"].get("count") or 0))
@@ -235,8 +273,8 @@ def load_state():
 
 
 def save_state(state):
-    """Zapis atomowy w tym samym katalogu — os.replace nie pozostawi połowy JSON-a."""
     directory = os.path.dirname(STATE_PATH) or "."
+    tmp_path = None
     try:
         os.makedirs(directory, exist_ok=True)
         fd, tmp_path = tempfile.mkstemp(prefix=".vatican_state.", suffix=".tmp", dir=directory)
@@ -247,26 +285,23 @@ def save_state(state):
         os.replace(tmp_path, STATE_PATH)
     except OSError as exc:
         log(f"⚠ Nie zapisałem stanu {STATE_PATH}: {exc}")
-        try:
-            os.unlink(tmp_path)
-        except (OSError, UnboundLocalError):
-            pass
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
 
 
 def ntfy_post(topic, title, message, click=None, priority="default", tags="ticket"):
-    """True oznacza dostarczenie albo świadomy tryb bez powiadomień."""
     if not topic:
         log("Brak ntfy_topic — tryb bez powiadomień.")
         return True
-    headers = {
-        "Title": title.encode("utf-8"), "Priority": priority, "Tags": tags,
-        "Content-Type": "text/plain; charset=utf-8",
-    }
+    headers = {"Title": title.encode("utf-8"), "Priority": priority, "Tags": tags,
+               "Content-Type": "text/plain; charset=utf-8"}
     if click:
         headers["Click"] = click
-    request = urllib.request.Request(
-        "https://ntfy.sh/" + urllib.parse.quote(topic, safe=""),
-        data=message.encode("utf-8"), headers=headers, method="POST")
+    request = urllib.request.Request("https://ntfy.sh/" + urllib.parse.quote(topic, safe=""),
+                                     data=message.encode("utf-8"), headers=headers, method="POST")
     try:
         with urllib.request.urlopen(request, timeout=20):
             return True
@@ -277,10 +312,64 @@ def ntfy_post(topic, title, message, click=None, priority="default", tags="ticke
     return False
 
 
-def describe_alert(days, observed, visitors):
-    lines = [f"{day.strftime('%d.%m.%Y')}: {observed[day.isoformat()]}" for day in days]
-    return ("Dostępne zwykłe bilety do Muzeów Watykańskich dla "
-            f"{visitors} osób:\n" + "\n".join(lines) + "\nKup ręcznie w oficjalnym systemie.")
+TRACKED_FIELDS = ("availability", "message", "price", "participants", "visitor_types")
+FIELD_LABELS = {"availability": "status", "message": "komunikat", "price": "cena od",
+                "participants": "liczba uczestników", "visitor_types": "typy odwiedzających"}
+
+
+def diff_snapshots(previous, current, day):
+    old = {item["key"]: item for item in previous}
+    new = {item["key"]: item for item in current}
+    changes = []
+    for key in sorted(new.keys() - old.keys()):
+        changes.append({"kind": "added", "day": day, "after": new[key]})
+    for key in sorted(old.keys() - new.keys()):
+        changes.append({"kind": "removed", "day": day, "before": old[key]})
+    for key in sorted(old.keys() & new.keys()):
+        fields = [field for field in TRACKED_FIELDS if old[key].get(field) != new[key].get(field)]
+        if fields:
+            changes.append({"kind": "changed", "day": day, "before": old[key],
+                            "after": new[key], "fields": fields})
+    return changes
+
+
+def short(value, limit=72):
+    if isinstance(value, list):
+        value = ", ".join(value)
+    value = clean_text(value) or "—"
+    return value if len(value) <= limit else value[:limit - 1] + "…"
+
+
+def format_change(change):
+    day = change["day"].strftime("%d.%m")
+    if change["kind"] == "added":
+        item = change["after"]
+        return f"➕ {day} {short(item['name'], 58)} [{item['availability']}]"
+    if change["kind"] == "removed":
+        item = change["before"]
+        return f"➖ {day} {short(item['name'], 58)} [{item['availability']}]"
+    before, after = change["before"], change["after"]
+    details = [f"{FIELD_LABELS[field]}: {short(before.get(field), 30)} → {short(after.get(field), 30)}"
+               for field in change["fields"]]
+    return f"↔ {day} {short(after['name'], 52)} — " + "; ".join(details)
+
+
+def describe_changes(changes, visitors):
+    shown = changes[:MAX_CHANGES_IN_NOTIFICATION]
+    lines = [format_change(change) for change in shown]
+    if len(changes) > len(shown):
+        lines.append(f"… i {len(changes) - len(shown)} dalszych zmian (pełna lista w Dzienniku)")
+    return (f"Zmiany w oficjalnej ofercie dla {visitors} "
+            f"{'osoby' if visitors == 1 else 'osób'}:\n" + "\n".join(lines))
+
+
+def changes_include_availability(changes):
+    for change in changes:
+        after = change.get("after") or {}
+        if after.get("availability") in AVAILABLE_STATES:
+            if change["kind"] == "added" or "availability" in change.get("fields", []):
+                return True
+    return False
 
 
 def retry_delay(interval, failure_count, retry_after=None):
@@ -289,14 +378,13 @@ def retry_delay(interval, failure_count, retry_after=None):
 
 
 def record_failure(state, cfg, error):
-    """Zapisuje tylko zdrowie API, nigdy dostępność; alarm po trzech błędach."""
     failure = state["failure"]
     failure["count"] += 1
     log(f"⚠ API Watykanu: {error}. Kolejny błąd z rzędu: {failure['count']}.")
     if failure["count"] >= FAILURE_ALERT_AFTER and not failure["alerted"]:
         sent = ntfy_post(cfg["topic"], "⚠ Watykan Watch: problem z API",
-                         "Nie udało się sprawdzić dostępności w oficjalnym API. "
-                         "Stan biletów nie został zmieniony; monitor ponowi próbę.",
+                         "Nie udało się sprawdzić oficjalnej oferty. "
+                         "Poprzedni stan został zachowany; monitor ponowi próbę.",
                          priority="default", tags="warning")
         if sent:
             failure["alerted"] = True
@@ -305,7 +393,6 @@ def record_failure(state, cfg, error):
 
 
 def run_once(announce_startup=False, today=None):
-    """Jeden pełny cykl. Zwraca (kod, sugerowane opóźnienie); 2 oznacza błąd API/push."""
     try:
         cfg = load_config()
     except ValueError as exc:
@@ -317,13 +404,13 @@ def run_once(announce_startup=False, today=None):
         return 0, None
 
     state = load_state()
+    if state["visitors"] not in (None, cfg["visitors"]):
+        log("Zmieniła się liczba osób — zapisuję nowy punkt odniesienia bez fałszywego alertu.")
+        state["snapshots"] = {}
     observed = {}
-    product_ids = {}
     try:
         for index, day in enumerate(days):
-            status, product_id = fetch_status(day, cfg["visitors"])
-            observed[day.isoformat()] = status
-            product_ids[day.isoformat()] = product_id
+            observed[day.isoformat()] = fetch_snapshot(day, cfg["visitors"])
             if index + 1 < len(days):
                 time.sleep(DATE_GAP_SECONDS)
     except VaticanError as exc:
@@ -332,61 +419,48 @@ def run_once(announce_startup=False, today=None):
     previous_failure = state["failure"]
     if previous_failure["alerted"]:
         if not ntfy_post(cfg["topic"], "✅ Watykan Watch: API znów działa",
-                         "Oficjalne API znów odpowiada. Monitor kontynuuje sprawdzanie biletów.",
+                         "Oficjalne API znów odpowiada. Monitor kontynuuje obserwację zmian.",
                          priority="default", tags="white_check_mark"):
-            # Zachowujemy statusy, ale ponowimy informację o odzyskaniu w kolejnym cyklu.
             return 2, cfg["interval"]
         log("API odzyskało działanie.")
     state["failure"] = {"count": 0, "alerted": False}
 
     if announce_startup:
         ntfy_post(cfg["topic"], "🎟️ Watykan Watch uruchomiony",
-                  f"Monitoruję zwykłe bilety do Muzeów Watykańskich dla {cfg['visitors']} osób: "
+                  f"Monitoruję wszystkie oferty dla {cfg['visitors']} "
+                  f"{'osoby' if cfg['visitors'] == 1 else 'osób'}: "
                   f"{cfg['start_date']:%d.%m.%Y}–{cfg['end_date']:%d.%m.%Y}. "
                   f"Sprawdzanie co {cfg['interval']} s.", priority="default", tags="ticket")
 
-    alerts = [day for day in days
-              if observed[day.isoformat()] in AVAILABLE_STATES
-              and day.isoformat() not in state["last_notified"]]
-    if alerts:
-        earliest = min(alerts)
-        body = describe_alert(alerts, observed, cfg["visitors"])
-        log("DOSTĘPNE: " + ", ".join(
-            f"{day:%d.%m} ({observed[day.isoformat()]}, produkt {product_ids[day.isoformat()] or '?'})"
-            for day in alerts))
-        if not ntfy_post(cfg["topic"], "🎟️ Watykan: bilety dostępne", body,
-                         click=result_url(earliest, cfg["visitors"]), priority="high", tags="ticket"):
-            # Celowo nie zatwierdzamy żadnej zmiany dostępności: alert nie może zginąć.
+    changes = []
+    baseline_days = []
+    for day in days:
+        key = day.isoformat()
+        if key not in state["snapshots"]:
+            baseline_days.append(day)
+            continue
+        changes.extend(diff_snapshots(state["snapshots"][key], observed[key], day))
+
+    if changes:
+        for change in changes:
+            log(format_change(change))
+        priority = "high" if changes_include_availability(changes) else "default"
+        earliest = min(change["day"] for change in changes)
+        if not ntfy_post(cfg["topic"], f"🎟️ Watykan: {len(changes)} zmian",
+                         describe_changes(changes, cfg["visitors"]),
+                         click=result_url(earliest, cfg["visitors"]),
+                         priority=priority, tags="ticket"):
             return 2, cfg["interval"]
 
-    # Tylko pełny, poprawny odczyt może aktualizować dostępność. SOLD_OUT usuwa
-    # potwierdzenie alertu, dzięki czemu następne pojawienie się znów go wywoła.
-    # Dla niedziel i innych dni, w których API świadomie nie wystawia zwykłego
-    # produktu, MISSING jest informacją diagnostyczną. Nie wolno nim zastąpić
-    # poprzedniego SOLD_OUT/AVAILABLE ani skasować pamięci wysłanego alertu.
-    missing = [day for day in days if observed[day.isoformat()] == "MISSING"]
-    for day in missing:
-        key = day.isoformat()
-        if key not in state["last_missing"]:
-            log(f"⚠ {day:%d.%m.%Y}: API nie wystawia zwykłego biletu (MISSING); "
-                "pozostawiam poprzedni stan i będę sprawdzać dalej.")
-        state["last_missing"][key] = "MISSING"
-    state["last_missing"] = {key: value for key, value in state["last_missing"].items()
-                             if key in observed and observed[key] == "MISSING"}
-    state["last_observed"] = {
-        **{key: value for key, value in state["last_observed"].items()
-           if key in observed and observed[key] == "MISSING"},
-        **{key: value for key, value in observed.items() if value != "MISSING"},
-    }
-    state["last_notified"] = {
-        day: status for day, status in state["last_notified"].items()
-        if day in observed and observed[day] in (AVAILABLE_STATES | {"MISSING"})
-    }
-    for day in alerts:
-        state["last_notified"][day.isoformat()] = observed[day.isoformat()]
+    state["snapshots"] = {day.isoformat(): observed[day.isoformat()] for day in days}
+    state["visitors"] = cfg["visitors"]
     save_state(state)
-    summary = ", ".join(f"{day:%d.%m}: {observed[day.isoformat()]}" for day in days)
-    log("Statusy: " + summary)
+    if baseline_days:
+        log("Punkt odniesienia: " + ", ".join(
+            f"{day:%d.%m} — {len(observed[day.isoformat()])} ofert" for day in baseline_days))
+    elif not changes:
+        log("Bez zmian: " + ", ".join(
+            f"{day:%d.%m} — {len(observed[day.isoformat()])} ofert" for day in days))
     return 0, cfg["interval"]
 
 
@@ -397,7 +471,7 @@ def main():
         log(f"✗ Błędna konfiguracja: {exc}")
         return 1
     log(f"Start Watykan Watch {VERSION}: {cfg['start_date']:%d.%m.%Y}–{cfg['end_date']:%d.%m.%Y}, "
-        f"{cfg['visitors']} osób, co {cfg['interval']} s (Europe/Rome).")
+        f"wszystkie oferty dla {cfg['visitors']} osób, co {cfg['interval']} s (Europe/Rome).")
     first = True
     while True:
         code, requested_delay = run_once(announce_startup=first)
@@ -406,7 +480,6 @@ def main():
         if not active_dates(cfg):
             return 0
         delay = requested_delay if requested_delay is not None else cfg["interval"]
-        # Mały jitter sprawia, że kolejne cykle nie tworzą idealnie okresowego ruchu.
         delay += random.uniform(0, min(5.0, delay * 0.1))
         time.sleep(delay)
 

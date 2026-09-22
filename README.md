@@ -6,7 +6,7 @@ Repozytorium zawiera **trzy niezależne dodatki** — możesz zainstalować wszy
 |---------|---------|
 | 🎾 **[Padel (Decathlon)](padel_browser/README.md)** | monitoruje wolne terminy padla, rejestruje automatycznie, pokazuje i anuluje Twoje rezerwacje |
 | 🎬 **[Kino (Cinema City)](cinema_watch/README.md)** | pilnuje repertuaru wybranego filmu i daje znać, gdy pojawią się nowe seanse |
-| 🎟️ **[Watykan Watch](vatican_watch/README.md)** | pilnuje zwykłych biletów do Muzeów Watykańskich dla 5 osób; tylko alert, bez zakupu |
+| 🎟️ **[Watykan Watch](vatican_watch/README.md)** | wykrywa każdą istotną zmianę oficjalnej oferty w wybrane dni; tylko alert, bez zakupu |
 
 Wszystkie mogą wysyłać push na telefon przez [ntfy.sh](https://ntfy.sh).
 
@@ -63,10 +63,12 @@ dodatek wyciąga sam. Pełna instrukcja: [cinema_watch/README.md](cinema_watch/R
 
 ## 🎟️ Watykan Watch
 
-Monitoruje publiczny system biletowy Muzeów Watykańskich dla 5 osób od 24 do
-28 września 2026. Alarmuje tylko, gdy dostępny jest właściwy zwykły bilet — bez
-logowania, danych osobowych, rezerwacji czy automatycznego zakupu. Kliknięcie powiadomienia
-prowadzi do oficjalnych wyników; decyzję i zakup wykonujesz ręcznie.
+Monitoruje publiczny system biletowy Muzeów Watykańskich od 24 do 28 września
+2026 i powiadamia o dodaniu lub usunięciu produktu oraz zmianie statusu, ceny,
+komunikatu albo warunków uczestnictwa. Obejmuje wszystkie typy ofert zwracane dla
+wybranej liczby odwiedzających (domyślnie jednej osoby) — bez logowania, danych
+osobowych, rezerwacji czy automatycznego zakupu. Kliknięcie powiadomienia prowadzi
+do oficjalnych wyników; decyzję i zakup wykonujesz ręcznie.
 
 Pełna konfiguracja i zasady alertów: [vatican_watch/README.md](vatican_watch/README.md).
 

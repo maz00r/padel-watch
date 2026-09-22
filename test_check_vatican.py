@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Testy Watykan Watch, bez sieci i bez prawdziwego ntfy."""
+"""Testy Watykan Watch, bez prawdziwego ntfy i bez zależności od sieci."""
 
 import json
 import os
@@ -13,21 +13,52 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "vat
 import check_vatican as vw  # noqa: E402
 
 
-TARGET = "Musei Vaticani - Biglietti d'ingresso"
+def raw_product(name="Musei Vaticani - Biglietti d'ingresso", status="SOLD_OUT", **changes):
+    base = {
+        "id": 123,
+        "name": name,
+        "suggestion": "",
+        "availability": status,
+        "description": "Ingresso ai Musei Vaticani",
+        "descrAvailability": "Non disponibile",
+        "priceFrom": "25,00 €",
+        "numberParticipants": "1-10",
+        "who": [{"id": 1, "description": "Adulti"}],
+    }
+    base.update(changes)
+    return base
 
 
-def product(status="SOLD_OUT", **changes):
-    base = {"id": 123, "name": TARGET, "suggestion": "", "availability": status}
+def offer(name="Bilet standardowy", status="SOLD_OUT", **changes):
+    base = {
+        "key": name.casefold(),
+        "name": name,
+        "availability": status,
+        "description": "Opis",
+        "message": "Brak miejsc",
+        "price": "25,00 €",
+        "suggestion": "",
+        "participants": "1-10",
+        "visitor_types": ["1:Adulti"],
+    }
     base.update(changes)
     return base
 
 
 class ConfigTest(unittest.TestCase):
-    def test_defaults_match_deployment_scope(self):
+    def test_defaults_monitor_one_visitor_as_broadest_signal(self):
         with mock.patch.dict(os.environ, {}, clear=True):
             cfg = vw.load_config()
         self.assertEqual((cfg["start_date"], cfg["end_date"], cfg["visitors"], cfg["interval"]),
-                         (date(2026, 9, 24), date(2026, 9, 28), 5, 60))
+                         (date(2026, 9, 24), date(2026, 9, 28), 1, 60))
+
+    def test_custom_visitors_and_invalid_values(self):
+        with mock.patch.dict(os.environ, {"VISITORS": "5"}, clear=True):
+            self.assertEqual(vw.load_config()["visitors"], 5)
+        for value in ("0", "21", "x"):
+            with self.subTest(value=value), mock.patch.dict(os.environ, {"VISITORS": value}, clear=True):
+                with self.assertRaises(ValueError):
+                    vw.load_config()
 
     def test_rejects_invalid_range_and_interval(self):
         with mock.patch.dict(os.environ, {"START_DATE": "2026-09-29", "END_DATE": "2026-09-28"}, clear=True):
@@ -44,54 +75,76 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(vw.active_dates(cfg, date(2026, 9, 29)), [])
 
 
-class ProductSelectionTest(unittest.TestCase):
-    def test_exact_product_is_selected_even_when_id_changes(self):
-        first = product("SOLD_OUT", id=1653513808)
-        second = product("LOW_AVAILABILITY", id=903348722)
-        self.assertEqual(vw.select_target_product({"visits": [first]})["id"], 1653513808)
-        self.assertEqual(vw.select_target_product({"visits": [second]})["availability"], "LOW_AVAILABILITY")
+class SnapshotTest(unittest.TestCase):
+    def test_every_product_type_is_preserved(self):
+        payload = {"visits": [
+            raw_product(),
+            raw_product("Visita guidata", "AVAILABLE", id=2, suggestion="Suggerito"),
+            raw_product("Castel Gandolfo", "LOW_AVAILABILITY", id=3),
+        ]}
+        snapshot = vw.snapshot_from_payload(payload)
+        self.assertEqual([item["name"] for item in snapshot],
+                         ["Castel Gandolfo", "Musei Vaticani - Biglietti d'ingresso", "Visita guidata"])
 
-    def test_available_suggestion_for_another_object_is_ignored(self):
-        suggestion = product("AVAILABLE", id=99, name="Palazzo Papale - Biglietti d'ingresso",
-                             suggestion="Ti suggeriamo anche:")
-        chosen = vw.select_target_product({"visits": [suggestion, product()]})
-        self.assertEqual(chosen["name"], TARGET)
+    def test_unstable_id_and_image_do_not_create_a_change(self):
+        first = vw.snapshot_from_payload({"visits": [raw_product(id=1, image="a.jpg")]})
+        second = vw.snapshot_from_payload({"visits": [raw_product(id=999, image="b.jpg")]})
+        self.assertEqual(first, second)
+        self.assertEqual(vw.diff_snapshots(first, second, date(2026, 9, 24)), [])
 
-    def test_guided_school_and_pilgrimage_products_are_ignored(self):
-        variants = [
-            product("AVAILABLE", name="Musei Vaticani - Visite Guidate Singoli Musei"),
-            product("AVAILABLE", name="Musei Vaticani - Didattiche - Biglietti d'ingresso"),
-            product("AVAILABLE", name="Musei Vaticani - Pellegrinaggi - Biglietti d'ingresso"),
-        ]
-        self.assertIsNone(vw.select_target_product({"visits": variants}))
-
-    def test_missing_target_is_missing_not_sold_out(self):
-        with mock.patch.object(vw, "http_get_json", return_value={"visits": []}):
-            status, product_id = vw.fetch_status(date(2026, 9, 27))
-        self.assertEqual((status, product_id), ("MISSING", ""))
-
-    def test_target_with_suggestion_is_ignored_too(self):
-        self.assertIsNone(vw.select_target_product({"visits": [
-            product("AVAILABLE", suggestion="Ti suggeriamo anche:")]}))
+    def test_semantic_fields_are_canonicalized(self):
+        item = vw.snapshot_from_payload({"visits": [raw_product(
+            status=" available ", descrAvailability="  Są   miejsca ",
+            who=[{"id": 2, "description": "Ridotto"}, {"id": 1, "description": "Adulti"}])]} )[0]
+        self.assertEqual(item["availability"], "AVAILABLE")
+        self.assertEqual(item["message"], "Są miejsca")
+        self.assertEqual(item["visitor_types"], ["1:Adulti", "2:Ridotto"])
 
     def test_malformed_payload_is_contract_error(self):
-        with self.assertRaisesRegex(vw.VaticanError, "visits"):
-            vw.select_target_product({"oops": []})
+        for payload in ({"oops": []}, {"visits": ["bad"]}, {"visits": [{"name": ""}]}):
+            with self.subTest(payload=payload), self.assertRaises(vw.VaticanError):
+                vw.snapshot_from_payload(payload)
 
-    def test_unknown_availability_is_missing(self):
-        self.assertEqual(vw.status_from_product(product("SOMETHING_NEW")), "MISSING")
+    def test_add_remove_and_field_changes_are_detected(self):
+        day = date(2026, 9, 24)
+        old = [offer("A"), offer("B")]
+        new = [offer("B", "AVAILABLE", message="Są miejsca", price="30,00 €"), offer("C")]
+        changes = vw.diff_snapshots(old, new, day)
+        self.assertEqual([change["kind"] for change in changes], ["added", "removed", "changed"])
+        self.assertEqual(changes[-1]["fields"], ["availability", "message", "price"])
+        self.assertTrue(vw.changes_include_availability(changes))
+
+    def test_pagination_downloads_all_results(self):
+        pages = [
+            {"totalResults": 3, "visits": [raw_product("A"), raw_product("B", id=2)]},
+            {"totalResults": 3, "visits": [raw_product("C", id=3)]},
+        ]
+        with mock.patch.object(vw, "http_get_json", side_effect=pages) as get, \
+                mock.patch.object(vw.time, "sleep"):
+            result = vw.fetch_snapshot(date(2026, 9, 24), 1)
+        self.assertEqual([item["name"] for item in result], ["A", "B", "C"])
+        self.assertIn("page=0", get.call_args_list[0].args[0])
+        self.assertIn("page=1", get.call_args_list[1].args[0])
+
+    def test_incomplete_pagination_is_rejected(self):
+        with mock.patch.object(vw, "http_get_json", side_effect=[
+                {"totalResults": 2, "visits": [raw_product("A")]},
+                {"totalResults": 2, "visits": []}]), mock.patch.object(vw.time, "sleep"):
+            with self.assertRaisesRegex(vw.VaticanError, "totalResults"):
+                vw.fetch_snapshot(date(2026, 9, 24), 1)
 
 
 class RetryTest(unittest.TestCase):
     def test_result_url_is_official_angular_results_route_in_rome_time(self):
         self.assertEqual(vw.result_url(date(2026, 9, 24)),
-                         "https://tickets.museivaticani.va/home/visit/5/1790200800000/1/")
+                         "https://tickets.museivaticani.va/home/visit/1/1790200800000/1/")
 
     def test_retry_after_seconds_and_http_date(self):
         self.assertEqual(vw.parse_retry_after("42"), 42)
         then = datetime(2026, 9, 24, 12, 1, tzinfo=timezone.utc)
         now = datetime(2026, 9, 24, 12, 0, tzinfo=timezone.utc)
         self.assertEqual(vw.parse_retry_after("Thu, 24 Sep 2026 12:01:00 GMT", now), 60)
+        self.assertEqual(then.timestamp() - now.timestamp(), 60)
 
     def test_exponential_delay_honours_retry_after_and_has_cap(self):
         self.assertEqual(vw.retry_delay(60, 1), 60)
@@ -111,20 +164,19 @@ class StateTest(unittest.TestCase):
 
     def test_atomic_roundtrip(self):
         state = vw.default_state()
-        state["last_observed"] = {"2026-09-24": "SOLD_OUT"}
+        state["snapshots"] = {"2026-09-24": [offer()]}
+        state["visitors"] = 1
         vw.save_state(state)
-        self.assertEqual(vw.load_state()["last_observed"], {"2026-09-24": "SOLD_OUT"})
+        self.assertEqual(vw.load_state(), state)
         self.assertEqual([name for name in os.listdir(self.tmp.name) if name.endswith(".tmp")], [])
 
-    def test_corrupt_state_does_not_stop_monitor(self):
+    def test_corrupt_or_old_state_starts_cleanly(self):
         with open(self.path, "w", encoding="utf-8") as state_file:
             state_file.write("not-json")
         self.assertEqual(vw.load_state(), vw.default_state())
-
-    def test_malformed_failure_counter_is_reset(self):
         with open(self.path, "w", encoding="utf-8") as state_file:
-            json.dump({"failure": {"count": "not-a-number", "alerted": True}}, state_file)
-        self.assertEqual(vw.load_state()["failure"], {"count": 0, "alerted": True})
+            json.dump({"last_observed": {"2026-09-24": "SOLD_OUT"}}, state_file)
+        self.assertEqual(vw.load_state(), vw.default_state())
 
 
 class RunOnceTest(unittest.TestCase):
@@ -137,111 +189,114 @@ class RunOnceTest(unittest.TestCase):
         self.addCleanup(self.state_patch.stop)
         self.env = mock.patch.dict(os.environ, {
             "START_DATE": "2026-09-24", "END_DATE": "2026-09-28", "CHECK_INTERVAL": "60",
-            "NTFY_TOPIC": "unit-test-topic",
+            "VISITORS": "1", "NTFY_TOPIC": "unit-test-topic",
         }, clear=False)
         self.env.start()
         self.addCleanup(self.env.stop)
         self.sent = []
 
-    def run_with(self, statuses, ntfy_ok=True, today=date(2026, 9, 24), announce=False):
+    def snapshots(self, value=None):
+        value = value or [offer()]
+        return {f"2026-09-{day:02d}": value for day in range(24, 29)}
+
+    def run_with(self, snapshots, ntfy_ok=True, today=date(2026, 9, 24), announce=False):
         def fetch(day, _visitors):
-            value = statuses[day.isoformat()]
+            value = snapshots[day.isoformat()]
             if isinstance(value, Exception):
                 raise value
-            return value, "id-" + day.isoformat()
+            return value
 
         def notify(*args, **kwargs):
             self.sent.append((args, kwargs))
             return ntfy_ok
 
-        with mock.patch.object(vw, "fetch_status", side_effect=fetch), \
+        with mock.patch.object(vw, "fetch_snapshot", side_effect=fetch), \
                 mock.patch.object(vw, "ntfy_post", side_effect=notify), \
                 mock.patch.object(vw.time, "sleep"):
             return vw.run_once(announce_startup=announce, today=today)
 
-    def statuses(self, value):
-        return {f"2026-09-{day:02d}": value for day in range(24, 29)}
-
     def state(self):
         return vw.load_state()
 
-    def test_first_available_run_alerts_at_high_priority(self):
-        rc, _ = self.run_with(self.statuses("AVAILABLE"))
-        self.assertEqual(rc, 0)
+    def test_first_run_builds_baseline_without_change_alert(self):
+        self.assertEqual(self.run_with(self.snapshots())[0], 0)
+        self.assertEqual(self.sent, [])
+        self.assertEqual(len(self.state()["snapshots"]), 5)
+        self.assertEqual(self.state()["visitors"], 1)
+
+    def test_any_offer_change_alerts_and_availability_is_high_priority(self):
+        self.run_with(self.snapshots())
+        changed = self.snapshots()
+        changed["2026-09-26"] = [offer(status="AVAILABLE", message="Są miejsca")]
+        self.run_with(changed)
         self.assertEqual(len(self.sent), 1)
         args, kwargs = self.sent[0]
-        self.assertIn("bilety dostępne", args[1])
+        self.assertIn("1 zmian", args[1])
+        self.assertIn("status", args[2])
         self.assertEqual(kwargs["priority"], "high")
-        self.assertEqual(kwargs["click"],
-                         "https://tickets.museivaticani.va/home/visit/5/1790200800000/1/")
-        self.assertEqual(set(self.state()["last_notified"]), set(self.statuses("x")))
+        self.assertIn("/visit/1/", kwargs["click"])
 
-    def test_sold_out_is_quiet_and_second_identical_run_is_quiet(self):
-        self.assertEqual(self.run_with(self.statuses("SOLD_OUT"))[0], 0)
-        self.assertEqual(self.sent, [])
-        self.assertEqual(self.run_with(self.statuses("SOLD_OUT"))[0], 0)
-        self.assertEqual(self.sent, [])
+    def test_price_or_text_change_uses_default_priority(self):
+        self.run_with(self.snapshots())
+        changed = self.snapshots()
+        changed["2026-09-24"] = [offer(price="26,00 €", message="Nowy komunikat")]
+        self.run_with(changed)
+        self.assertEqual(self.sent[0][1]["priority"], "default")
 
-    def test_availability_is_not_repeated_until_it_is_sold_out_again(self):
-        self.run_with(self.statuses("AVAILABLE"))
-        self.sent.clear()
-        self.run_with(self.statuses("LOW_AVAILABILITY"))
-        self.assertEqual(self.sent, [])
-        self.run_with(self.statuses("SOLD_OUT"))
-        self.run_with(self.statuses("AVAILABLE"))
-        self.assertEqual(len(self.sent), 1)
+    def test_addition_and_removal_are_reported(self):
+        self.run_with(self.snapshots())
+        changed = self.snapshots()
+        changed["2026-09-24"] = [offer("Nowa wycieczka", "AVAILABLE")]
+        self.run_with(changed)
+        body = self.sent[0][0][2]
+        self.assertIn("➕", body)
+        self.assertIn("➖", body)
 
-    def test_failed_ntfy_does_not_accept_availability_and_is_retried(self):
-        self.run_with(self.statuses("SOLD_OUT"))
+    def test_failed_ntfy_keeps_baseline_and_retries_change(self):
+        self.run_with(self.snapshots())
         before = self.state()
+        changed = self.snapshots([offer(price="30,00 €")])
+        self.assertEqual(self.run_with(changed, ntfy_ok=False)[0], 2)
+        self.assertEqual(self.state(), before)
         self.sent.clear()
-        self.assertEqual(self.run_with(self.statuses("AVAILABLE"), ntfy_ok=False)[0], 2)
-        self.assertEqual(self.state()["last_observed"], before["last_observed"])
-        self.sent.clear()
-        self.assertEqual(self.run_with(self.statuses("AVAILABLE"))[0], 0)
+        self.assertEqual(self.run_with(changed)[0], 0)
         self.assertEqual(len(self.sent), 1)
 
-    def test_api_error_does_not_overwrite_previous_availability(self):
-        self.run_with(self.statuses("SOLD_OUT"))
-        before = self.state()["last_observed"].copy()
-        errors = self.statuses("SOLD_OUT")
+    def test_api_error_does_not_overwrite_previous_snapshot(self):
+        self.run_with(self.snapshots())
+        before = self.state()["snapshots"].copy()
+        errors = self.snapshots()
         errors["2026-09-26"] = vw.VaticanError("błąd serwera", retry_after=300)
         self.assertEqual(self.run_with(errors)[0], 2)
-        self.assertEqual(self.state()["last_observed"], before)
+        self.assertEqual(self.state()["snapshots"], before)
         self.assertEqual(self.state()["failure"]["count"], 1)
 
-    def test_missing_does_not_overwrite_previous_state_or_spam_warning(self):
-        available = self.statuses("AVAILABLE")
-        self.run_with(available)
+    def test_visitors_change_creates_new_baseline_without_false_alert(self):
+        self.run_with(self.snapshots())
         self.sent.clear()
-        missing = self.statuses("SOLD_OUT")
-        missing["2026-09-27"] = "MISSING"
-        self.run_with(missing)
-        state = self.state()
-        self.assertEqual(state["last_observed"]["2026-09-27"], "AVAILABLE")
-        self.assertEqual(state["last_missing"], {"2026-09-27": "MISSING"})
+        with mock.patch.dict(os.environ, {"VISITORS": "5"}, clear=False):
+            self.run_with(self.snapshots([offer(price="99,00 €")]))
         self.assertEqual(self.sent, [])
-        with mock.patch.object(vw, "log") as logged:
-            self.run_with(missing)
-        self.assertNotIn("nie wystawia zwykłego", " ".join(map(str, logged.call_args_list)))
+        self.assertEqual(self.state()["visitors"], 5)
 
     def test_start_notification_and_finished_range(self):
-        self.run_with(self.statuses("SOLD_OUT"), announce=True)
+        self.run_with(self.snapshots(), announce=True)
         self.assertEqual(len(self.sent), 1)
+        self.assertIn("wszystkie oferty", self.sent[0][0][2])
         self.sent.clear()
-        with mock.patch.object(vw, "fetch_status", side_effect=AssertionError("bez API")):
+        with mock.patch.object(vw, "fetch_snapshot", side_effect=AssertionError("bez API")):
             self.assertEqual(vw.run_once(today=date(2026, 9, 29)), (0, None))
         self.assertEqual(self.sent, [])
 
     def test_failure_alarm_once_then_recovery(self):
-        error_statuses = self.statuses("SOLD_OUT")
-        error_statuses["2026-09-24"] = vw.VaticanError("429", retry_after=120)
+        errors = self.snapshots()
+        errors["2026-09-24"] = vw.VaticanError("429", retry_after=120)
         for _ in range(3):
-            self.run_with(error_statuses)
+            self.run_with(errors)
         self.assertEqual(len(self.sent), 1)
         self.assertIn("problem z API", self.sent[0][0][1])
         self.sent.clear()
-        self.run_with(self.statuses("SOLD_OUT"))
+        self.run_with(self.snapshots())
         self.assertEqual(len(self.sent), 1)
         self.assertIn("znów działa", self.sent[0][0][1])
 

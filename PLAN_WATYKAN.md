@@ -1,140 +1,117 @@
 # Plan wdrożenia: Watykan Watch
 
-## 1. Cel i przyjęte założenia
+## 1. Cel i zakres
 
-- Osobny dodatek Home Assistant w tym samym repozytorium co Padel i Kino.
-- Monitorowany termin: 24–28 września 2026 (włącznie).
-- Liczba odwiedzających: 5.
-- Interesujący produkt: zwykłe bilety wstępu do Muzeów Watykańskich i Kaplicy
-  Sykstyńskiej, prezentowane w oficjalnym systemie jako
-  `Musei Vaticani - Biglietti d'ingresso`. Identyfikator produktu jest zależny
-  od dnia, więc nie może być podstawą dopasowania między różnymi datami.
-- Zakup pozostaje ręczny. Dodatek wykrywa dostępność i prowadzi użytkownika do
-  oficjalnego systemu, ale nie składa zamówienia i nie przechowuje danych osobowych
-  ani płatniczych.
-- Powiadomienia są wysyłane przez ntfy.sh, tak jak w istniejących dodatkach.
+- Osobny dodatek Home Assistant w repozytorium Padel/Kino.
+- Monitorowany termin: 24–28 września 2026 włącznie, według czasu rzymskiego.
+- Monitorowane są wszystkie oferty zwracane przez oficjalny system dla wybranej
+  liczby odwiedzających — bez ograniczenia do jednego produktu ani dostępności
+  dla pięciu osób.
+- Domyślne `visitors=1` daje możliwie wczesny sygnał o choć jednym miejscu;
+  wartość pozostaje konfigurowalna w zakresie 1–20.
+- Zakup jest ręczny. Dodatek nie loguje się, nie rezerwuje, nie kupuje i nie
+  przechowuje danych osobowych ani płatniczych.
+- Powiadomienia korzystają z tego samego transportu ntfy.sh co aplikacja Padel.
 
-## 2. Potwierdzony punkt integracji
+## 2. Punkt integracji
 
 Oficjalna strona korzysta z publicznego zapytania tylko do odczytu:
 
 `GET https://tickets.museivaticani.va/api/search/result`
 
-Parametry istotne dla monitora:
+Parametry monitora:
 
-- `lang=it`
-- `visitorNum=5`
-- `visitDate=DD/MM/YYYY`
-- `area=1` (Musei Vaticani)
-- `who=`
-- `page=0`
+- `lang=it`;
+- `visitorNum=<1–20>`;
+- `visitDate=DD/MM/YYYY`;
+- `area=1`;
+- `who=`;
+- `page=0`, `page=1`, … aż do pobrania `totalResults`.
 
-Dla 24 września 2026 i 5 osób API zwraca właściwy produkt ze stanem
-`SOLD_OUT`. Za dostępne uznajemy wyłącznie `AVAILABLE` i
-`LOW_AVAILABILITY`. Sugestie innych obiektów (np. Castel Gandolfo) muszą być
-ignorowane nawet wtedy, gdy są dostępne.
+Weryfikacja na żywo wykazała, że pojedyncza data może mieć 23 wyniki, podczas
+gdy pierwsza strona zwraca tylko 10. Pełna paginacja jest więc warunkiem
+wykrywania wszystkich zmian.
 
-## 3. Architektura dodatku
+## 3. Architektura
 
-Nowy katalog `vatican_watch/` będzie zawierał:
+Katalog `vatican_watch/` zawiera:
 
-- `check_vatican.py` — lekki monitor w Pythonie, wyłącznie biblioteka standardowa;
+- `check_vatican.py` — monitor w Pythonie bez zewnętrznych bibliotek;
 - `run.sh` — mapowanie opcji Home Assistant na zmienne środowiskowe;
-- `config.yaml` — metadane, wartości domyślne i walidacja opcji;
-- `Dockerfile` — mały obraz Alpine z Pythonem i danymi stref czasowych;
-- `README.md` — instalacja, konfiguracja, zachowanie alertów i diagnostyka;
-- `CHANGELOG.md` — historia wersji od `0.1.0`.
+- `config.yaml` — metadane, wartości domyślne i walidacja;
+- `Dockerfile` — obraz dodatku;
+- `README.md` — instalacja, konfiguracja i semantyka alertów;
+- `CHANGELOG.md` — historia wersji.
 
-Testy jednostkowe trafią do `test_check_vatican.py`. Główny `README.md` i
-`repository.yaml` zostaną rozszerzone o trzeci dodatek.
+Testy jednostkowe znajdują się w `test_check_vatican.py`, a CI uruchamia je razem
+z pełnym zestawem testów repozytorium.
 
 ## 4. Algorytm sprawdzania
 
-1. Zweryfikować konfigurację: temat ntfy, zakres dat, liczba osób, interwał i
-   strefa czasowa.
-2. W każdym cyklu wysłać po jednym zapytaniu dla każdego jeszcze aktualnego dnia
-   z zakresu.
-3. Z odpowiedzi wybrać wyłącznie zwykły bilet do Muzeów Watykańskich po
-   znormalizowanej nazwie i pustym polu `suggestion`. Zwrócony identyfikator
-   zachować tylko diagnostycznie, ponieważ jest inny dla każdego dnia.
-4. Odrzucić rekordy z polem `suggestion` oraz produkty prowadzone, szkolne,
-   pielgrzymkowe i dotyczące innych obiektów.
-5. Zapisać dla każdego dnia stan `AVAILABLE`, `LOW_AVAILABILITY`, `SOLD_OUT`,
-   `NOT_ALLOWED` albo `MISSING`.
-6. Wysłać alert tylko po przejściu dnia do stanu dostępnego. Jeśli push się nie
-   powiedzie, nie zatwierdzać nowego stanu, aby następny cykl ponowił alert.
-7. Po ponownym wyprzedaniu zapamiętać zmianę; kolejne pojawienie się biletów ma
-   wywołać nowy alert.
-8. Usuwać z aktywnego sprawdzania dni, które już minęły w strefie
-   `Europe/Rome`, a po końcu całego zakresu przejść w spokojny tryb zakończony.
+1. Zweryfikować zakres dat, temat ntfy, interwał, liczbę osób i strefę czasową.
+2. Dla każdego aktywnego dnia pobrać wszystkie strony wyników. Niepełna lista,
+   błędny JSON lub niespójne `totalResults` oznaczają błąd całego cyklu.
+3. Zbudować stabilny obraz każdej oferty: nazwa, opis, sugestia, status,
+   komunikat, cena, zakres uczestników i typy odwiedzających.
+4. Pominąć pola techniczne, takie jak zmienny identyfikator i obraz, aby nie
+   alarmować o różnicy niewidocznej dla użytkownika.
+5. W pierwszym poprawnym cyklu zapisać punkt odniesienia bez alertu.
+6. W kolejnych cyklach wykrywać dodanie, usunięcie oraz zmianę każdego
+   semantycznego pola. Zmiana nazwy/opisu/sugestii pojawia się jako usunięcie
+   starej i dodanie nowej wersji.
+7. Wysłać jeden zbiorczy alert ntfy. Jeśli nowa lub zmieniona oferta przechodzi
+   do `AVAILABLE` albo `LOW_AVAILABILITY`, nadać wysoki priorytet.
+8. Dopiero po skutecznym powiadomieniu atomowo zapisać nowy obraz. Nieudany push
+   pozostawia poprzedni stan i powoduje ponowienie alertu.
+9. Usuwać minione dni z aktywnego zakresu, a po 28.09.2026 zakończyć ruch.
 
-## 5. Częstotliwość i ochrona strony
+## 5. Częstotliwość i ochrona serwisu
 
-- Domyślnie: jeden cykl co 60 sekund, czyli maksymalnie pięć małych zapytań na
-  minutę na początku zakresu.
-- Konfigurowalny zakres: 30–3600 sekund.
-- Krótka przerwa pomiędzy datami i niewielki losowy jitter między cyklami, aby
-  nie generować idealnie okresowego ruchu.
-- Dla HTTP 429 i błędów 5xx: wykładnicze wycofanie z limitem, honorowanie
-  `Retry-After`, brak modyfikacji stanu dostępności.
-- Umiarkowany timeout, kompresja gzip i jednoznaczny User-Agent.
-- Żadnego omijania CAPTCHA, blokad ani zabezpieczeń; jeśli API przestanie być
-  publicznie dostępne, dodatek ma zgłosić czytelny błąd zamiast obchodzić ochronę.
+- Domyślny pełny cykl co 60 sekund; konfiguracja dopuszcza 30–3600 sekund.
+- Krótkie odstępy między stronami i datami oraz mały losowy jitter między cyklami.
+- Umiarkowany timeout, gzip i jednoznaczny User-Agent.
+- Dla 429 i 5xx: respektowanie `Retry-After` oraz wykładnicze wycofanie do godziny.
+- Brak omijania CAPTCHA, blokad albo innych zabezpieczeń. Utrata dostępu do
+  publicznego API ma wywołać alarm techniczny, nie próbę obejścia ochrony.
 
-## 6. Powiadomienia
+## 6. Powiadomienia i stan
 
-- Start: informacja, jaki produkt, daty i liczbę osób monitoruje dodatek.
-- Trafienie: powiadomienie ntfy o wysokim priorytecie z datą, statusem i linkiem
-  otwierającym oficjalne wyniki dla 5 osób.
-- Błąd trwały: pojedynczy alarm po serii kolejnych nieudanych cykli, bez zalewu
-  wiadomości; wiadomość o odzyskaniu działania po powrocie API.
-- Brak zmian: cisza, jedynie zwięzły wpis diagnostyczny w dzienniku.
+- Start: zakres dat, liczba osób i interwał.
+- Zmiana: data, nazwa oferty oraz konkretna różnica; kliknięcie otwiera oficjalne
+  wyniki dla najwcześniejszego dnia objętego zmianą.
+- Błąd: jeden alarm po trzech kolejnych nieudanych cyklach oraz jeden komunikat
+  po odzyskaniu działania.
+- Brak zmian: cisza w ntfy i krótki wpis w Dzienniku.
+- Stan: `/data/vatican_state.json`, zapis atomowy i migracja ze starego formatu
+  przez utworzenie nowego punktu odniesienia.
+- Zmiana `visitors` zeruje tylko obraz ofert i tworzy nowy punkt odniesienia,
+  dzięki czemu różne katalogi wyników nie generują fałszywej lawiny alertów.
 
-## 7. Niezawodność i stan
+## 7. Testy i kryteria odbioru
 
-- Stan w `/data/vatican_state.json`, zapisywany atomowo, aby przetrwał restart
-  dodatku i awarię podczas zapisu.
-- Rozdzielenie `last_observed` od `last_notified`, aby błąd ntfy nie zgubił
-  trafienia.
-- Uszkodzony plik stanu nie zatrzymuje procesu: jest zgłaszany, a monitor buduje
-  nowy bez fałszywego alertu.
-- Odpowiedź bez właściwego produktu nie jest traktowana jak `SOLD_OUT` i zostawia
-  poprzedni stan nietknięty. Stan `MISSING` ma być raportowany bez zalewu alarmów;
-  27.09.2026 obecnie zwraca tylko osobny produkt niedzielny, więc nie może być
-  uznany za awarię całego cyklu.
+Testy jednostkowe obejmują:
 
-## 8. Testy i kryteria odbioru
-
-Testy jednostkowe obejmą:
-
-- poprawne parsowanie dat i zakresu;
-- rozpoznanie `AVAILABLE` oraz `LOW_AVAILABILITY`;
-- ignorowanie dostępnych sugestii i niewłaściwych produktów;
-- brak alertu dla `SOLD_OUT` i brak powtórzenia tego samego alertu;
-- ponowny alert po sekwencji dostępny → wyprzedany → dostępny;
-- zachowanie stanu przy błędzie HTTP, błędnym JSON-ie i braku produktu;
-- ponowienie po nieudanym ntfy;
-- atomowy zapis i odczyt stanu;
-- format komunikatu i link do oficjalnej strony;
-- zakończenie monitorowania po upływie zakresu.
+- konfigurację, zakres dat i liczbę osób;
+- kanonizację wszystkich rodzajów produktów i ignorowanie technicznych ID;
+- pełną paginację oraz odrzucenie niepełnej odpowiedzi;
+- dodanie, usunięcie, zmianę statusu, komunikatu i ceny;
+- priorytet alertu oraz poprawny oficjalny link;
+- pierwszy punkt odniesienia, zmianę `visitors` i brak fałszywych alarmów;
+- ponowienie po błędzie ntfy i zachowanie stanu po błędzie API;
+- atomowy zapis, alarm awarii, odzyskanie oraz zakończenie zakresu.
 
 Weryfikacja końcowa:
 
-1. Uruchomić pełny zestaw istniejących i nowych testów.
-2. Wykonać test na żywym API w trybie bez wysyłania ntfy i potwierdzić obecny
-   stan: `SOLD_OUT` dla 24, 25, 26 i 28 września oraz `MISSING` dla niedzieli
-   27 września, gdzie zwykły produkt nie jest obecnie wystawiony.
-3. Zbudować obraz dodatku, jeśli lokalne środowisko Docker jest dostępne.
-4. Sprawdzić spójność wersji, dokumentacji i listy dodatków w repozytorium.
-5. Nie wysyłać testowego powiadomienia na prawdziwy temat bez jego jawnej
-   konfiguracji; test transportu ma korzystać z atrap.
+1. Sprawdzenie składni Pythona i skryptu startowego.
+2. Uruchomienie testów Watykan Watch oraz całego zestawu repozytorium.
+3. Odczyt wszystkich dat z żywego API bez prawdziwego powiadomienia ntfy i
+   potwierdzenie pełnej liczby wyników.
+4. Kontrola diffu, spójności wersji `0.2.0` i dokumentacji.
+5. Commit, push oraz obserwacja wyniku GitHub Actions.
 
-## 9. Otwarte kwestie, które nie blokują implementacji
+## 8. Pozostały krok wdrożeniowy
 
-- Potwierdzenie, czy rok 2026 jest właściwy (wynika z bieżącej daty 22.09.2026).
-- Docelowy temat ntfy; dodatek może odziedziczyć ten sam temat dopiero po wpisaniu
-  go w konfiguracji Home Assistant.
-- Czy po pierwszym wdrożeniu zejść z domyślnych 60 do 30 sekund. Najpierw warto
-  obserwować przez kilka godzin odpowiedzi API i ewentualne 429.
-- Czy użytkownik chce również okresowe przypomnienia, jeśli dostępność utrzyma się
-  dłużej; wersja pierwsza wysyła alert przy każdym nowym pojawieniu się biletów.
+Po aktualizacji repozytorium użytkownik odświeża dodatek w Home Assistant,
+wpisuje ten sam `ntfy_topic` co w Padel i uruchamia wersję `0.2.0`. Pierwszy cykl
+zapisze punkt odniesienia; od następnego poprawnego cyklu każda istotna różnica
+dla wybranych dat będzie zgłaszana.

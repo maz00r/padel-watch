@@ -1,7 +1,7 @@
 name: Watykan Watch — bilety do Muzeów Watykańskich
-version: "0.1.0"
+version: "0.2.0"
 slug: vatican_watch
-description: Monitoruje dostępność zwykłych biletów dla 5 osób i wysyła push przez ntfy; bez logowania i bez zakupu.
+description: Wykrywa każdą zmianę oficjalnej oferty we wskazane dni i wysyła push przez ntfy; bez logowania i zakupu.
 url: https://github.com/maz00r/padel-watch
 arch:
   - amd64
@@ -14,8 +14,10 @@ options:
   check_interval: 60
   start_date: "2026-09-24"
   end_date: "2026-09-28"
+  visitors: 1
 schema:
   ntfy_topic: str?
   check_interval: int(30,3600)
   start_date: str
   end_date: str
+  visitors: int(1,20)
