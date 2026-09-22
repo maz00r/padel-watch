@@ -303,6 +303,11 @@ def accounts_view():
         aktywne = bool(wpis.get("aktywne")) or (
             zadanie.get("id") == konto["id"] and zadanie.get("state") == "active"
         )
+        request = ""
+        if zadanie.get("id") == konto["id"]:
+            request = zadanie.get("state") or ""
+        elif konto["id"] in (zadanie.get("queue") or []):
+            request = "queued"
         out.append({
             "id": konto["id"],
             "name": konto.get("name") or konto["id"],
@@ -311,7 +316,7 @@ def accounts_view():
             "alive": exp > now,
             "active": aktywne,
             "error": wpis.get("blad") or "",
-            "request": zadanie.get("state") if zadanie.get("id") == konto["id"] else "",
+            "request": request,
         })
     return out
 
@@ -450,8 +455,27 @@ class Handler(BaseHTTPRequestHandler):
     def api_account_login(self):
         if "application/json" not in (self.headers.get("Content-Type") or ""):
             return self._json({"ok": False, "error": "wymagany Content-Type: application/json"}, 415)
-        kid = str(self._body().get("id") or "").strip()
+        body = self._body()
+        kid = str(body.get("id") or "").strip()
         konta = check_padel.konta_z_konfiguracji(check_padel.load_config(quiet=True))
+        if body.get("all"):
+            dodatkowe = [k for k in konta if not k.get("main")]
+            if not dodatkowe:
+                return self._json({"ok": False, "error": "brak kont dodatkowych"}, 400)
+            with _login_lock:
+                obecne = zbieracz.wczytaj_json(zbieracz.LOGIN_REQUEST_PATH)
+                if obecne.get("state") in ("pending", "active"):
+                    return self._json({"ok": False, "error": "logowanie już trwa"}, 409)
+                ids = [k["id"] for k in dodatkowe]
+                check_padel.zapisz_json_atomowo(zbieracz.LOGIN_REQUEST_PATH, {
+                    "id": ids[0],
+                    "queue": ids[1:],
+                    "state": "pending",
+                    "batch": True,
+                    "requested": int(time.time()),
+                })
+            log(f"zlecono logowanie wszystkich kont dodatkowych ({len(ids)})")
+            return self._json({"ok": True, "id": ids[0], "total": len(ids)})
         konto = next((k for k in konta if k["id"] == kid), None)
         if not konto:
             return self._json({"ok": False, "error": "nieznane konto"}, 404)

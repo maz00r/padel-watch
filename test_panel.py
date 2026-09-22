@@ -156,6 +156,33 @@ class AccountsEndpointTest(unittest.TestCase):
         self.assertEqual(write.call_args.args[1]["state"], "pending")
         self.assertEqual(write.call_args.args[1]["id"], "ania")
 
+    def test_all_accounts_are_written_as_one_durable_queue(self):
+        accounts = [
+            {"id": "glowne", "main": True},
+            {"id": "ania", "main": False},
+            {"id": "marek", "main": False},
+        ]
+        with mock.patch.object(cp, "load_config", return_value={}), \
+                mock.patch.object(cp, "konta_z_konfiguracji", return_value=accounts), \
+                mock.patch.object(cp, "zapisz_json_atomowo") as write:
+            odp = Zapytanie("POST", "/api/account-login", {"all": True}).wykonaj()
+        self.assertIn('"ok": true', odp)
+        task = write.call_args.args[1]
+        self.assertEqual(task["id"], "ania")
+        self.assertEqual(task["queue"], ["marek"])
+        self.assertTrue(task["batch"])
+
+    def test_all_accounts_does_not_replace_an_active_login(self):
+        accounts = [{"id": "glowne", "main": True}, {"id": "ania", "main": False}]
+        with mock.patch.object(cp, "load_config", return_value={}), \
+                mock.patch.object(cp, "konta_z_konfiguracji", return_value=accounts), \
+                mock.patch.object(panel.zbieracz, "wczytaj_json",
+                                  return_value={"id": "marek", "state": "active"}), \
+                mock.patch.object(cp, "zapisz_json_atomowo") as write:
+            odp = Zapytanie("POST", "/api/account-login", {"all": True}).wykonaj()
+        self.assertIn("409", odp)
+        write.assert_not_called()
+
     def test_main_account_is_not_sent_to_the_extra_browser(self):
         accounts = [{"id": "glowne", "main": True}]
         with mock.patch.object(cp, "load_config", return_value={}), \

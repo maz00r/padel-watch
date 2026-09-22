@@ -313,6 +313,22 @@ class RuntimeZbieraczaTest(unittest.TestCase):
         self.assertEqual(zb._konto_z_zadania(lista, {"state": "active", "id": "marek"})["id"],
                          "marek")
 
+    def test_batch_login_advances_to_the_next_account(self):
+        task = {"id": "ania", "queue": ["marek"], "state": "active",
+                "batch": True}
+        out = zb.zakoncz_zadanie_logowania(task, True, "", teraz=TERAZ)
+        self.assertEqual(out["id"], "marek")
+        self.assertEqual(out["state"], "pending")
+        self.assertTrue(out["ok"])
+
+    def test_batch_login_finishes_and_keeps_failures(self):
+        task = {"id": "marek", "queue": [], "state": "active", "batch": True,
+                "ok": True}
+        out = zb.zakoncz_zadanie_logowania(task, False, "brak tokenu", teraz=TERAZ)
+        self.assertEqual(out["state"], "done")
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["error"], "nie wszystkie konta odnowiono")
+
 
 if __name__ == "__main__":
     unittest.main()

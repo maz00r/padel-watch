@@ -431,6 +431,27 @@ def _konto_z_zadania(konta, doc):
     return next((k for k in konta if k["id"] == kid and not k.get("main")), None)
 
 
+def zakoncz_zadanie_logowania(zadanie, ok, blad, teraz=None):
+    """Zapisuje wynik wizyty i, dla serii, ustawia następne konto w kolejce."""
+    teraz = int(time.time() if teraz is None else teraz)
+    if not zadanie.get("batch"):
+        zadanie.update(state="done", ok=bool(ok), error=str(blad or ""), finished=teraz)
+        return zadanie
+
+    kolejka = [str(kid) for kid in (zadanie.get("queue") or []) if str(kid)]
+    wszystko_ok = bool(zadanie.get("ok", True)) and bool(ok)
+    if kolejka:
+        zadanie.update(id=kolejka.pop(0), queue=kolejka, state="pending",
+                       ok=wszystko_ok, error="")
+        zadanie.pop("started", None)
+        zadanie.pop("finished", None)
+    else:
+        zadanie.update(state="done", ok=wszystko_ok,
+                       error=("nie wszystkie konta odnowiono" if not wszystko_ok else ""),
+                       finished=teraz)
+    return zadanie
+
+
 def main():
     import check_padel
 
@@ -455,17 +476,22 @@ def main():
             if konto:
                 teraz = time.time()
                 publikacja = publikacja_dzis(check_padel, teraz)
-                # Nie zaczynaj dziesięciominutowego logowania tak późno, żeby mogło
-                # pozostać otwarte w krytycznym oknie polowania.
+                # Seria z przycisku to standardowy automatyczny obchód zbieracza.
+                # Pojedyncze zadanie pozostaje ręcznym logowaniem wybranego konta.
+                reczne = not bool(zadanie.get("batch"))
+                limit = LIMIT_LOGOWANIA if reczne else LIMIT_WIZYTY
+                # Nie zaczynaj wizyty tak późno, żeby mogła pozostać otwarta
+                # w krytycznym oknie polowania. Seryjny obchód z panelu używa
+                # dokładnie krótkiego trybu automatycznego zbieracza sprzed 11:00.
                 if cisza_przed_publikacja(
-                        teraz, publikacja, STOP_PRZED_PUBLIKACJA + LIMIT_LOGOWANIA):
+                        teraz, publikacja, STOP_PRZED_PUBLIKACJA + limit):
                     time.sleep(PETLA_SLEEP)
                     continue
                 zadanie.update(state="active", started=int(time.time()), error="")
                 _zapisz_json(LOGIN_REQUEST_PATH, zadanie)
-                ok, blad = odwiedz_konto(konto, status, reczne=True)
+                ok, blad = odwiedz_konto(konto, status, reczne=reczne, limit=limit)
                 zapisz_status(STATUS_PATH, status)
-                zadanie.update(state="done", ok=ok, error=blad, finished=int(time.time()))
+                zakoncz_zadanie_logowania(zadanie, ok, blad)
                 _zapisz_json(LOGIN_REQUEST_PATH, zadanie)
                 log(f"{konto['id']}: {'token zapisany' if ok else blad}")
                 continue

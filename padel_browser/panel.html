@@ -98,6 +98,7 @@
 <main id="accounts" class="hide">
   <div class="bar">
     <button class="btn primary" onclick="loadAccounts()">Odśwież</button>
+    <button class="btn" onclick="openAccount()">Automatycznie zaloguj wszystkie</button>
     <span class="grow"></span>
     <span id="accounts-summary" class="sub"></span>
   </div>
@@ -127,6 +128,7 @@ function showTab(name) {
 function accountState(a) {
   if (a.active || a.request === "active") return '<span class="badge warn">otwarte</span>';
   if (a.request === "pending") return '<span class="badge warn">oczekuje</span>';
+  if (a.request === "queued") return '<span class="badge off">w kolejce</span>';
   if (a.alive) return '<span class="badge ok">token ważny</span>';
   return '<span class="badge bad">wymaga logowania</span>';
 }
@@ -162,15 +164,16 @@ function loadAccounts() {
 }
 
 function openAccount(id) {
+  var wszystkie = !id;
   fetch("api/account-login", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ id: id })
+    body: JSON.stringify(wszystkie ? { all: true } : { id: id })
   })
     .then(function (r) { return r.json(); })
     .then(function (doc) {
       if (!doc.ok) throw new Error(doc.error || "nie uruchomiono konta");
-      mountAccountBrowser();
+      if (!wszystkie) mountAccountBrowser();
       loadAccounts();
     })
     .catch(function (e) {

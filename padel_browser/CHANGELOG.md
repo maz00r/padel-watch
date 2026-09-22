@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.29.3 — logowanie wszystkich kont z panelu
+
+- W zakładce **Konta** jest przycisk **Automatycznie zaloguj wszystkie**. Uruchamia
+  na żądanie ten sam automatyczny obchód co przed publikacją: konta dodatkowe otwierają
+  się kolejno, przechodzą przez nawigację i ciche logowanie, zapisują token, po czym
+  uruchamia się następny profil. Kolejka jest zapisana w `/data`, więc przeżywa restart
+  procesu zbieracza.
+- Panel pokazuje konto aktualnie otwarte, oczekujące konta i postęp całej serii.
+  Konto główne nadal ma własną stałą zakładkę **Główne** i nie jest przenoszone do
+  drugiej przeglądarki.
+
 ## 0.29.2 — po logu Lambdy z 15.09: ciepła Irlandia o 11:00, koniec kolejki za własnym żądaniem
 
 CloudWatch z 15.09 dołożył dwa fakty, których z Dziennika dodatku nie widać.

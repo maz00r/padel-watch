@@ -294,9 +294,11 @@ accounts:
 ```
 
 Pierwszy wpis jest kontem głównym i zachowuje istniejącą sesję z zakładki
-**Główne**. Po restarcie dodatku wejdź w **Konta** i użyj **Zaloguj** przy każdym
-nowym koncie. Otworzy się jego własny ekran; po poprawnym logowaniu token zostanie
-wykryty, zapisany i przeglądarka zamknie się sama. Sesja pozostaje w `/data`.
+**Główne**. Przycisk **Automatycznie zaloguj wszystkie** uruchamia na żądanie dokładnie
+taki sam obchód jak przed publikacją: profile dodatkowe otwierają się kolejno, strona
+jest ładowana, dodatek próbuje cichego logowania i zapisuje token. Po sprawdzeniu konta
+profil zamyka się i automatycznie uruchamia się następny. **Zaloguj** przy jednym koncie
+pozostaje trybem ręcznym, gdy trwała sesja faktycznie wygasła. Sesje pozostają w `/data`.
 
 Zbieracz wraca tylko do profili z wygasłym tokenem i tylko w półgodzinnym oknie przed
 rzutem. W ostatnich 90 sekundach oraz podczas zrywu obowiązuje twarda cisza — Chromium
@@ -374,10 +376,12 @@ Historia trzymana jest w `hunts.json` (katalog `/data`), ostatnie 60 dni.
 
 ## Panel: moje rezerwacje
 
-Ikona **Padel** w menu bocznym otwiera panel z dwiema zakładkami:
+Ikona **Padel** w menu bocznym otwiera panel z czterema zakładkami:
 
 - **Rezerwacje** — wszystkie Twoje rezerwacje z konta Decathlon GO (nie tylko te
   zrobione przez dodatek): data, godziny, kort, adres, uczestnicy i stan.
+- **Polowania** — dzienny wynik publikacji, strzałów i zdobytych terminów.
+- **Konta** — stan wszystkich kont oraz logowanie pojedyncze lub kolejno wszystkich.
 - **Główne** — Chromium z sesją konta głównego, w którym się logujesz (jak dotąd).
 
 Każda nadchodząca rezerwacja ma dwa przyciski:
